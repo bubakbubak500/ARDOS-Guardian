@@ -95,6 +95,7 @@ class StationConfig:
     beacon_enabled: bool = False
     beacon_interval: float = 120.0   # seconds between presence beacons
     scan_dwell: float = 3.0    # seconds per channel when scanning
+    auto_qsy: bool = True      # VARA P2P: tune the radio to the station's freq before connecting
 
     # Control burst behaviour
     default_ttl: int = 5

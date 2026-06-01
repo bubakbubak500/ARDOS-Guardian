@@ -31,12 +31,16 @@ class Route:
     destination: str          # callsign or group name
     preferred: str            # next-hop callsign
     backup: str = ""          # backup next-hop ("" or "ANY")
+    freq_hz: int = 0          # optional working frequency for this station (VARA P2P QSY)
+    mode: str = ""            # optional mode at that frequency (FM/USB/...)
 
     def normalised(self) -> "Route":
         return Route(
             destination=self.destination.strip().upper(),
             preferred=self.preferred.strip().upper(),
             backup=self.backup.strip().upper(),
+            freq_hz=int(self.freq_hz or 0),
+            mode=(self.mode or "").strip().upper(),
         )
 
 
@@ -63,6 +67,14 @@ class RouteTable:
     def remove(self, destination: str) -> None:
         dest = destination.strip().upper()
         self._routes = [r for r in self._routes if r.destination != dest]
+
+    def freq_for(self, callsign: str) -> tuple[int, str] | None:
+        """Return (freq_hz, mode) configured for a station, if any (for QSY)."""
+        call = callsign.strip().upper()
+        for r in self._routes:
+            if r.destination == call and r.freq_hz:
+                return r.freq_hz, r.mode
+        return None
 
     def lookup(self, destination: str) -> Route | None:
         """Find the configured route for a destination/group."""

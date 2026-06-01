@@ -247,6 +247,18 @@ and polish.
 - **Forms** — ICS-213 and SITREP templates in Compose render to clean,
   fixed-layout bodies with auto subjects.
 
+## Live monitoring & QSY (latest)
+- **Signal & audio metering** — the audio control channel computes RX RMS
+  level, peak and a slow **noise floor**; shown as an RX bar in the sidebar and
+  a "Signal & audio" card on Home with a plain-language hint (e.g. "high noise
+  floor — check local interference"). S-meter from Hamlib is shown when present.
+- **Per-station frequency + auto-QSY** — route entries gained optional
+  `freq_hz`/`mode`. In **VARA P2P** (only), before connecting to the next hop
+  Guardian tunes the radio to that station's frequency and restores afterwards
+  (`auto_qsy`, Hamlib only). Ignored for Winlink (operator tunes) and VOX
+  (can't tune). Caveat: assumes the peer is on its home freq and control bursts
+  share the current channel — a full calling/working-frequency split is future.
+
 ## 8. Known issues / watch-list
 - Taskbar/tray icon required an AppUserModelID + forced re-apply to override the
   pythonw default — verify it sticks after CustomTkinter theme changes.

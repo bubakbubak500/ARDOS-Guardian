@@ -39,9 +39,13 @@ def encode_envelope(msg_id: int, body: bytes) -> bytes:
 class VaraP2PBackend(PayloadBackend):
     name = "vara_p2p"
 
-    def __init__(self, vara=None, on_log=None):
+    def __init__(self, vara=None, on_log=None, on_qsy=None, on_unqsy=None):
         self.vara = vara
         self.on_log = on_log or (lambda m: None)
+        # Optional QSY hooks: on_qsy(callsign) tunes the radio to that station's
+        # frequency before connecting; on_unqsy() restores the previous channel.
+        self.on_qsy = on_qsy
+        self.on_unqsy = on_unqsy
 
     # ------------------------------------------------------------------ #
     def start_send(self, msg, done: DoneCb) -> None:
@@ -52,6 +56,8 @@ class VaraP2PBackend(PayloadBackend):
             self.on_log("VARA P2P: command port not connected")
             done(False)
             return
+        if self.on_qsy:
+            self._safe(lambda: self.on_qsy(msg.next_hop))
         try:
             self.vara.connect_to(msg.next_hop)
             if not self.vara.wait_link("CONNECTED", CONNECT_TIMEOUT):
@@ -65,6 +71,16 @@ class VaraP2PBackend(PayloadBackend):
         except Exception as exc:  # noqa: BLE001
             self.on_log(f"VARA P2P send failed: {exc}")
             done(False)
+        finally:
+            if self.on_unqsy:
+                self._safe(self.on_unqsy)
+
+    @staticmethod
+    def _safe(fn) -> None:
+        try:
+            fn()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     def start_receive(self, msg, done: DoneCb) -> None:

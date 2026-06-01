@@ -19,9 +19,9 @@ from .winlink_manual import WinlinkManualBackend
 __all__ = ["PayloadBackend", "VaraP2PBackend", "WinlinkManualBackend", "make_backend"]
 
 
-def make_backend(name: str, *, vara=None, prompt=None, on_log=None):
+def make_backend(name: str, *, vara=None, prompt=None, on_log=None, on_qsy=None, on_unqsy=None):
     """Build a payload backend by config name."""
     name = (name or "vara_p2p").lower()
     if name == "winlink_manual":
         return WinlinkManualBackend(prompt=prompt, on_log=on_log)
-    return VaraP2PBackend(vara=vara, on_log=on_log)
+    return VaraP2PBackend(vara=vara, on_log=on_log, on_qsy=on_qsy, on_unqsy=on_unqsy)

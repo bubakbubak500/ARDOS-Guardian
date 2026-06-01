@@ -68,6 +68,10 @@ class AudioControlTransport(ControlTransport):
         self._rx_frames: deque = deque()                   # decoded, awaiting pump()
         self._running = False
         self._rx_thread: threading.Thread | None = None
+        # Live RX metering (linear RMS in 0..1).
+        self._level = 0.0          # smoothed current level
+        self._floor = 0.0          # slow-tracking idle noise floor
+        self._peak = 0.0
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
@@ -124,7 +128,29 @@ class AudioControlTransport(ControlTransport):
     def _rx_callback(self, indata, frames, time_info, status):  # PortAudio thread
         if self._tx_lock.locked():
             return  # half-duplex: ignore our own transmission
-        self._rx_buf.extend(indata[:, 0].copy())
+        block = indata[:, 0]
+        self._rx_buf.extend(block.copy())
+        # Update level meters: smoothed RMS, peak, and a slow noise floor.
+        rms = float(np.sqrt(np.mean(block.astype(np.float64) ** 2))) if len(block) else 0.0
+        self._level = 0.7 * self._level + 0.3 * rms
+        self._peak = max(self._peak * 0.95, float(np.max(np.abs(block))) if len(block) else 0.0)
+        # Floor tracks downward fast, recovers slowly -> settles on the quiet level.
+        if self._floor == 0.0:
+            self._floor = rms
+        self._floor = min(rms, self._floor * 1.001 + 1e-5) if rms < self._floor else self._floor * 0.9995 + 0.0005 * rms
+
+    @staticmethod
+    def to_db(rms: float) -> float:
+        import math
+        return 20.0 * math.log10(max(rms, 1e-6))
+
+    def levels(self) -> dict:
+        """Current RX metering: linear rms/peak/floor plus dBFS conversions."""
+        return {
+            "rms": self._level, "peak": self._peak, "floor": self._floor,
+            "rms_db": self.to_db(self._level), "floor_db": self.to_db(self._floor),
+            "running": self._stream is not None,
+        }
 
     def _rx_loop(self) -> None:
         while self._running:

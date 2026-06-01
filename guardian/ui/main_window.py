@@ -164,7 +164,7 @@ class GuardianApp(ctk.CTk):
     def _build_sidebar(self) -> None:
         bar = ctk.CTkFrame(self, width=210, corner_radius=0)
         bar.grid(row=0, column=0, sticky="nsew")
-        bar.grid_rowconfigure(9, weight=1)
+        bar.grid_rowconfigure(11, weight=1)
 
         ctk.CTkLabel(bar, text="GUARDIAN", font=ctk.CTkFont(size=22, weight="bold")).grid(
             row=0, column=0, padx=20, pady=(20, 0))
@@ -181,12 +181,17 @@ class GuardianApp(ctk.CTk):
         self.dot_ptt = self._status_row(bar, 6, "PTT")
         self.dot_channel = self._status_row(bar, 7, "Control ch.")
 
+        ctk.CTkLabel(bar, text="RX level", text_color=GREY).grid(row=8, column=0, padx=20, pady=(10, 0), sticky="w")
+        self.side_rx = ctk.CTkProgressBar(bar, height=10)
+        self.side_rx.set(0)
+        self.side_rx.grid(row=9, column=0, padx=20, pady=(2, 0), sticky="ew")
+
         self.lbl_mailcount = ctk.CTkLabel(bar, text="", justify="left", text_color=GREY)
-        self.lbl_mailcount.grid(row=8, column=0, padx=20, pady=(10, 0), sticky="w")
+        self.lbl_mailcount.grid(row=10, column=0, padx=20, pady=(10, 0), sticky="w")
 
         ctk.CTkButton(bar, text="⚙  Settings", fg_color=GREY,
                       command=lambda: self.tabs.set("⚙ Settings")).grid(
-            row=10, column=0, padx=20, pady=(8, 20), sticky="ew")
+            row=12, column=0, padx=20, pady=(8, 20), sticky="ew")
 
     def _status_row(self, parent, row: int, label: str):
         frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -242,7 +247,7 @@ class GuardianApp(ctk.CTk):
 
     def _build_dashboard(self, tab) -> None:
         tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(3, weight=1)
+        tab.grid_rowconfigure(4, weight=1)
 
         mode_card = ctk.CTkFrame(tab)
         mode_card.grid(row=0, column=0, padx=10, pady=(10, 6), sticky="ew")
@@ -271,8 +276,21 @@ class GuardianApp(ctk.CTk):
         ctk.CTkButton(actions, text="Connect radio", fg_color=GREY, command=self._connect_radio).pack(side="left", padx=6)
         ctk.CTkButton(actions, text="Connect VARA", fg_color=GREY, command=self._connect_vara).pack(side="left", padx=6)
 
+        sig = ctk.CTkFrame(tab)
+        sig.grid(row=3, column=0, padx=10, pady=6, sticky="ew")
+        sig.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(sig, text="Signal & audio", font=ctk.CTkFont(size=16, weight="bold")).grid(
+            row=0, column=0, columnspan=2, padx=14, pady=(12, 4), sticky="w")
+        ctk.CTkLabel(sig, text="RX level").grid(row=1, column=0, padx=14, pady=4, sticky="w")
+        self.sig_bar = ctk.CTkProgressBar(sig)
+        self.sig_bar.set(0)
+        self.sig_bar.grid(row=1, column=1, padx=14, pady=4, sticky="ew")
+        self.sig_lbl = ctk.CTkLabel(sig, text="Audio control channel off (live mode shows levels here).",
+                                    justify="left", text_color=GREY)
+        self.sig_lbl.grid(row=2, column=0, columnspan=2, padx=14, pady=(0, 12), sticky="w")
+
         status = ctk.CTkFrame(tab)
-        status.grid(row=3, column=0, padx=10, pady=(6, 10), sticky="nsew")
+        status.grid(row=4, column=0, padx=10, pady=(6, 10), sticky="nsew")
         status.grid_columnconfigure((0, 1, 2), weight=1)
         self.db_radio = self._status_card(status, 0, "Radio")
         self.db_vara = self._status_card(status, 1, "VARA")
@@ -556,23 +574,39 @@ class GuardianApp(ctk.CTk):
 
         editor = ctk.CTkFrame(tab)
         editor.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
-        for i in range(6):
+        for i in range(5):
             editor.grid_columnconfigure(i, weight=1)
-        ctk.CTkLabel(editor, text="Destination / group").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-        ctk.CTkLabel(editor, text="Preferred next hop").grid(row=0, column=1, padx=6, pady=4, sticky="w")
-        ctk.CTkLabel(editor, text="Backup (or ANY)").grid(row=0, column=2, padx=6, pady=4, sticky="w")
+        for c, t in enumerate(("Destination / group", "Preferred next hop", "Backup (or ANY)",
+                               "QSY freq MHz (opt.)", "Mode")):
+            ctk.CTkLabel(editor, text=t).grid(row=0, column=c, padx=6, pady=4, sticky="w")
         self.r_dest = ctk.CTkEntry(editor, placeholder_text="OK1CCC")
         self.r_pref = ctk.CTkEntry(editor, placeholder_text="OK1DDD")
         self.r_back = ctk.CTkEntry(editor, placeholder_text="OK1EEE / ANY")
+        self.r_freq = ctk.CTkEntry(editor, placeholder_text="145.500")
+        self.r_mode = ctk.CTkOptionMenu(editor, values=["", "FM", "USB", "LSB", "DATA"], width=80)
         self.r_dest.grid(row=1, column=0, padx=6, pady=4, sticky="ew")
         self.r_pref.grid(row=1, column=1, padx=6, pady=4, sticky="ew")
         self.r_back.grid(row=1, column=2, padx=6, pady=4, sticky="ew")
-        ctk.CTkButton(editor, text="Add / Update", command=self._add_route).grid(row=1, column=3, padx=6, pady=4)
-        ctk.CTkButton(editor, text="Remove", fg_color=GREY, command=self._remove_route).grid(row=1, column=4, padx=6, pady=4)
+        self.r_freq.grid(row=1, column=3, padx=6, pady=4, sticky="ew")
+        self.r_mode.grid(row=1, column=4, padx=6, pady=4, sticky="w")
+        btns = ctk.CTkFrame(editor, fg_color="transparent")
+        btns.grid(row=2, column=0, columnspan=5, padx=2, pady=(2, 6), sticky="w")
+        ctk.CTkButton(btns, text="Add / Update", command=self._add_route).pack(side="left", padx=6)
+        ctk.CTkButton(btns, text="Remove", fg_color=GREY, command=self._remove_route).pack(side="left", padx=6)
+        self.qsy_chk = ctk.CTkCheckBox(btns, text="Auto-QSY before VARA P2P (ignored for Winlink)",
+                                       command=self._apply_qsy_opt)
+        if self.cfg.auto_qsy:
+            self.qsy_chk.select()
+        self.qsy_chk.pack(side="left", padx=18)
 
         self.route_box = ctk.CTkTextbox(tab, font=ctk.CTkFont(family="Consolas", size=13))
         self.route_box.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="nsew")
         self._refresh_routes()
+
+    def _apply_qsy_opt(self) -> None:
+        self.cfg.auto_qsy = bool(self.qsy_chk.get())
+        self.cfg.save()
+        self.log(f"Auto-QSY: {self.cfg.auto_qsy}")
 
     # ---- Net tab (live session orchestration) ------------------------- #
     def _build_net_tab(self, tab) -> None:
@@ -705,7 +739,35 @@ class GuardianApp(ctk.CTk):
         return make_backend(
             self.cfg.payload_backend, vara=self.vara,
             prompt=self._winlink_prompt, on_log=self.log,
+            on_qsy=self._qsy_to, on_unqsy=self._qsy_restore,
         )
+
+    def _qsy_to(self, callsign: str) -> None:
+        """Tune the radio to a station's configured frequency (VARA P2P only)."""
+        if not self.cfg.auto_qsy:
+            return
+        fm = self.routes.freq_for(callsign)
+        if not fm:
+            return
+        hz, mode = fm
+        try:
+            self._qsy_prev = self.radio.get_state().frequency_hz   # remember to restore
+            self.radio.set_frequency(hz)
+            if mode:
+                self.radio.set_mode(mode)
+            self.log(f"QSY → {callsign} on {hz/1e6:.4f} MHz {mode}".rstrip())
+        except Exception as exc:  # noqa: BLE001 - VOX/None can't tune
+            self.log(f"QSY skipped ({callsign}): {exc}")
+
+    def _qsy_restore(self) -> None:
+        prev = getattr(self, "_qsy_prev", None)
+        if self.cfg.auto_qsy and prev:
+            try:
+                self.radio.set_frequency(prev)
+                self.log(f"QSY restored to {prev/1e6:.4f} MHz")
+            except Exception:
+                pass
+        self._qsy_prev = None
 
     def _payload_for_net(self):
         """Which payload backend the live orchestrator should use.
@@ -1530,7 +1592,14 @@ class GuardianApp(ctk.CTk):
         if not dest or not pref:
             self.log("Route needs at least a destination and a preferred hop")
             return
-        self.routes.add(Route(dest, pref, self.r_back.get().strip()))
+        freq_hz = 0
+        raw = self.r_freq.get().strip()
+        if raw:
+            try:
+                freq_hz = int(float(raw) * 1_000_000)
+            except ValueError:
+                self.log("QSY freq: enter MHz like 145.500 (ignored)")
+        self.routes.add(Route(dest, pref, self.r_back.get().strip(), freq_hz, self.r_mode.get()))
         self.routes.save()
         self._refresh_routes()
         self._refresh_station_card()
@@ -1549,13 +1618,14 @@ class GuardianApp(ctk.CTk):
 
     def _refresh_routes(self) -> None:
         self.route_box.delete("1.0", "end")
-        header = f"{'DESTINATION':<18}{'PREFERRED':<14}{'BACKUP':<14}\n"
+        header = f"{'DESTINATION':<16}{'PREFERRED':<12}{'BACKUP':<12}{'QSY FREQ':<14}{'MODE'}\n"
         self.route_box.insert("end", header)
-        self.route_box.insert("end", "-" * 46 + "\n")
+        self.route_box.insert("end", "-" * 58 + "\n")
         if not len(self.routes):
             self.route_box.insert("end", "(no routes configured)\n")
         for r in self.routes:
-            self.route_box.insert("end", f"{r.destination:<18}{r.preferred:<14}{r.backup or '-':<14}\n")
+            fq = f"{r.freq_hz/1e6:.4f} MHz" if r.freq_hz else "-"
+            self.route_box.insert("end", f"{r.destination:<16}{r.preferred:<12}{r.backup or '-':<12}{fq:<14}{r.mode or '-'}\n")
 
     # ---- message actions --------------------------------------------- #
     def _compose_frame(self) -> ControlFrame:
@@ -1639,8 +1709,32 @@ class GuardianApp(ctk.CTk):
                       f"Outbox {counts.get('outbox',0)} waiting\n"
                       f"Transit {counts.get('transit',0)} held"))
         self._refresh_setup_checklist()
+        self._update_signal(rs)
 
         self.after(POLL_MS, self._poll)
+
+    def _update_signal(self, rs) -> None:
+        """RX audio level + noise floor + S-meter, with an interference hint."""
+        level01 = 0.0
+        text = "Audio control channel off — switch to a Live mode to see RX levels."
+        if self.audio_transport is not None:
+            lv = self.audio_transport.levels()
+            # Map -60..0 dBFS to 0..1 for the bars.
+            level01 = max(0.0, min(1.0, (lv["rms_db"] + 60) / 60))
+            floor01 = max(0.0, min(1.0, (lv["floor_db"] + 60) / 60))
+            hint = "floor low — channel clean"
+            if lv["floor_db"] > -25:
+                hint = "⚠ high noise floor — check local interference / RFI / gain"
+            elif lv["floor_db"] > -40:
+                hint = "moderate noise floor"
+            smeter = f"  ·  S-meter: {rs.signal}" if rs.signal is not None else ""
+            text = (f"RX {lv['rms_db']:.0f} dBFS   floor {lv['floor_db']:.0f} dBFS "
+                    f"({floor01*100:.0f}%){smeter}\n{hint}")
+        if hasattr(self, "sig_bar"):
+            self.sig_bar.set(level01)
+            self.sig_lbl.configure(text=text)
+        if hasattr(self, "side_rx"):
+            self.side_rx.set(level01)
 
     def _net_loop(self) -> None:
         """Drive the control-net state machine and deliver queued frames."""
