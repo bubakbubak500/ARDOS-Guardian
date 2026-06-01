@@ -170,7 +170,13 @@ the state-machine.
 
 # Standalone exe:
 .\build.ps1                 # -> dist\Guardian\Guardian.exe (custom shield icon)
+.\make_shortcut.ps1         # Desktop + Start Menu shortcuts to the exe
 ```
+
+The PyInstaller entry point is the top-level `guardian_launch.py` (absolute
+import) — NOT `guardian/__main__.py`, whose relative import breaks the frozen
+build. `dist/` and `build/` are git-ignored, so each machine builds its own exe
+(or you zip and copy `dist\Guardian\`).
 
 Per-station state lives in `%APPDATA%\Guardian\`:
 `config.json`, `routes.json`, `guardian.ico`, and `hamlib\` if installed.
