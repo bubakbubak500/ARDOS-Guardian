@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from ..config import config_dir
+from ..protocol import crc16
 from .mail import Folder, MailMessage, Status
 
 
@@ -26,6 +27,7 @@ class MessageStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.index_path = self.root / "index.json"
         self._index: dict[int, dict] = {}
+        self._counter = 0
         self.load()
 
     # ------------------------------------------------------------------ #
@@ -34,11 +36,13 @@ class MessageStore:
             try:
                 data = json.loads(self.index_path.read_text(encoding="utf-8"))
                 self._index = {int(k): v for k, v in data.get("messages", {}).items()}
+                self._counter = int(data.get("counter", 0))
             except (json.JSONDecodeError, OSError, ValueError):
                 self._index = {}
 
     def _save_index(self) -> None:
-        payload = {"messages": {str(k): v for k, v in self._index.items()}}
+        payload = {"counter": self._counter,
+                   "messages": {str(k): v for k, v in self._index.items()}}
         self.index_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _bundle_path(self, msg_id: int) -> Path:
@@ -50,11 +54,21 @@ class MessageStore:
             "subject": mail.subject, "priority": mail.priority, "created": mail.created,
             "folder": mail.folder, "status": mail.status, "next_hop": mail.next_hop,
             "hops": mail.hops, "size": size, "att": len(mail.attachments),
+            "read": getattr(mail, "read", True),
         }
 
     # ------------------------------------------------------------------ #
-    def next_id(self) -> int:
-        return (max(self._index) + 1) if self._index else 1001
+    def next_id(self, callsign: str = "") -> int:
+        """Globally-unique-ish 32-bit id: station-hash prefix + counter.
+
+        12-bit station hash (4096 stations) << 20 | 20-bit per-station counter,
+        so two different stations almost never mint the same id.
+        """
+        self._counter += 1
+        prefix = crc16(callsign.strip().upper().encode("ascii", "replace")) & 0xFFF
+        mid = ((prefix << 20) | (self._counter & 0xFFFFF)) & 0xFFFFFFFF
+        self._save_index()
+        return mid
 
     def add(self, mail: MailMessage) -> None:
         bundle = mail.to_bundle()
@@ -72,6 +86,16 @@ class MessageStore:
             c[m.get("folder", Folder.DRAFT)] = c.get(m.get("folder", Folder.DRAFT), 0) + 1
         return c
 
+    def unread(self, folder: str) -> int:
+        return sum(1 for m in self._index.values()
+                   if m.get("folder") == folder and not m.get("read", True))
+
+    def mark_read(self, msg_id: int) -> None:
+        meta = self._index.get(msg_id)
+        if meta and not meta.get("read", True):
+            meta["read"] = True
+            self._save_index()
+
     def get(self, msg_id: int) -> MailMessage | None:
         path = self._bundle_path(msg_id)
         if not path.exists():
@@ -81,6 +105,7 @@ class MessageStore:
         mail.folder = meta.get("folder", Folder.INBOX)
         mail.status = meta.get("status", Status.RECEIVED)
         mail.next_hop = meta.get("next_hop", "")
+        mail.read = meta.get("read", True)
         return mail
 
     def set_status(self, msg_id: int, *, status: str | None = None,
@@ -108,6 +133,7 @@ class MessageStore:
         mail = MailMessage.from_bundle(bundle)
         if via and via not in mail.hops:
             mail.hops.append(via)
+        mail.read = False   # incoming starts unread
         if mail.final_dest.strip().upper() == my_callsign.strip().upper():
             mail.folder, mail.status = Folder.INBOX, Status.RECEIVED
         else:

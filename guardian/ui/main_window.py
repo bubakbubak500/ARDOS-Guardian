@@ -25,6 +25,7 @@ from ..config import StationConfig
 from ..protocol import ControlFrame, FrameType, Priority, Flags
 from ..install import hamlib_installer
 from ..message import Attachment, Folder, MailMessage, MessageStore, Status
+from ..message.forms import FORMS, form_names
 from ..radio import make_driver
 from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.rigctld_launcher import RigctldProcess
@@ -71,7 +72,9 @@ class GuardianApp(ctk.CTk):
         self.bus = LoopbackBus(monitor=self._on_channel_frame)
         self.partners: dict[str, Orchestrator] = {}
         self.audio_transport = None  # set when control channel = audio
-        self._next_msg_id = 1001
+        self._deliver_attempts: dict[int, float] = {}
+        self._last_beacon = 0.0
+        self._last_autodeliver = 0.0
         self.net = self._build_net(self.bus.endpoint(self.cfg.callsign))
 
         ctk.set_appearance_mode(self.cfg.appearance)
@@ -465,8 +468,7 @@ class GuardianApp(ctk.CTk):
             self.log("Net send: enter a final destination")
             return
         next_hop = self.n_next.get().strip().upper()
-        msg_id = self._next_msg_id
-        self._next_msg_id += 1
+        msg_id = self.mailstore.next_id(self.cfg.callsign)
         resolved = next_hop or (self.routes.next_hop(final) or final)
         if self.sim_chk.get():
             self._ensure_partner(resolved)
@@ -725,7 +727,9 @@ class GuardianApp(ctk.CTk):
             return
         counts = self.mailstore.counts()
         for label, key in self._FOLDERS:
-            self.mail_folder_btns[key].configure(text=f"{label} ({counts.get(key, 0)})")
+            unread = self.mailstore.unread(key)
+            badge = f" ({counts.get(key, 0)}" + (f", {unread} new)" if unread else ")")
+            self.mail_folder_btns[key].configure(text=f"{label}{badge}")
         name = next((l for l, k in self._FOLDERS if k == self.mail_folder), self.mail_folder)
         self.mail_title.configure(text=name)
         for w in self.mail_list.winfo_children():
@@ -737,7 +741,8 @@ class GuardianApp(ctk.CTk):
         for i, m in enumerate(rows):
             via = f" via {m['next_hop']}" if m.get("next_hop") else ""
             att = f" 📎{m['att']}" if m.get("att") else ""
-            txt = (f"#{m['msg_id']}  {m['source']}→{m['final_dest']}{via}\n"
+            dot = "● " if not m.get("read", True) else ""
+            txt = (f"{dot}#{m['msg_id']}  {m['source']}→{m['final_dest']}{via}\n"
                    f"    {m.get('subject') or '(no subject)'}  ·  {m['status']}{att}  ·  {m['size']}B")
             sel = (m["msg_id"] == self.mail_selected)
             ctk.CTkButton(self.mail_list, text=txt, anchor="w", height=44,
@@ -747,6 +752,7 @@ class GuardianApp(ctk.CTk):
 
     def _open_mail(self, msg_id: int) -> None:
         self.mail_selected = msg_id
+        self.mailstore.mark_read(msg_id)
         mail = self.mailstore.get(msg_id)
         self._refresh_mail_list()
         for w in self.mail_atts.winfo_children():
@@ -771,6 +777,8 @@ class GuardianApp(ctk.CTk):
                 ctk.CTkButton(self.mail_atts, text="Open", width=50, height=26, fg_color=GREY,
                               command=lambda att=a: self._open_attachment(att)).pack(side="left", padx=(0, 8))
         # Folder-specific actions.
+        if mail.folder == Folder.INBOX:
+            ctk.CTkButton(self.mail_actions, text="↩ Reply", command=lambda: self._compose_mail(reply_to=mail)).pack(side="left", padx=4)
         if mail.folder == Folder.TRANSIT:
             ctk.CTkButton(self.mail_actions, text="Deliver now", command=lambda: self._deliver_transit(msg_id)).pack(side="left", padx=4)
         if mail.folder in (Folder.OUTBOX,):
@@ -819,34 +827,71 @@ class GuardianApp(ctk.CTk):
         self.log(f"(demo) stored incoming #{got.msg_id} into {got.folder}")
         self._select_folder(got.folder)
 
-    def _compose_mail(self) -> None:
+    def _compose_mail(self, reply_to: MailMessage | None = None) -> None:
         win = ctk.CTkToplevel(self)
         win.title("Compose message")
-        win.geometry("560x520")
+        win.geometry("600x600")
         win.transient(self)
-        win.grid_columnconfigure(1, weight=1)
-        win.grid_rowconfigure(3, weight=1)
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(2, weight=1)
         atts: list[Attachment] = []
+        widgets: dict[str, object] = {}   # form field key -> widget
 
-        ctk.CTkLabel(win, text="To (final dest)").grid(row=0, column=0, padx=10, pady=8, sticky="w")
-        to = ctk.CTkEntry(win, placeholder_text="OK1CCC")
-        to.grid(row=0, column=1, columnspan=2, padx=10, pady=8, sticky="ew")
-        ctk.CTkLabel(win, text="Subject").grid(row=1, column=0, padx=10, pady=4, sticky="w")
-        subj = ctk.CTkEntry(win)
-        subj.grid(row=1, column=1, padx=10, pady=4, sticky="ew")
-        prio = ctk.CTkOptionMenu(win, values=[p.name for p in Priority], width=130)
+        # Header: To + Template + Priority.
+        head = ctk.CTkFrame(win)
+        head.grid(row=0, column=0, padx=10, pady=(10, 4), sticky="ew")
+        head.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(head, text="To (final dest)").grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        to = ctk.CTkEntry(head, placeholder_text="OK1CCC")
+        to.grid(row=0, column=1, padx=8, pady=6, sticky="ew")
+        ctk.CTkLabel(head, text="Template").grid(row=1, column=0, padx=8, pady=6, sticky="w")
+        tpl = ctk.CTkOptionMenu(head, values=form_names(), width=150)
+        tpl.set("Plain")
+        tpl.grid(row=1, column=1, padx=8, pady=6, sticky="w")
+        prio = ctk.CTkOptionMenu(head, values=[p.name for p in Priority], width=130)
         prio.set(Priority.ROUTINE.name)
-        prio.grid(row=1, column=2, padx=10, pady=4)
-        ctk.CTkLabel(win, text="Message").grid(row=2, column=0, padx=10, pady=4, sticky="nw")
-        body = ctk.CTkTextbox(win)
-        body.grid(row=3, column=1, columnspan=2, padx=10, pady=4, sticky="nsew")
+        prio.grid(row=1, column=2, padx=8, pady=6)
+
+        content = ctk.CTkScrollableFrame(win, label_text="Message")
+        content.grid(row=2, column=0, padx=10, pady=4, sticky="nsew")
+        content.grid_columnconfigure(0, weight=1)
+
+        def render(_=None):
+            for w in content.winfo_children():
+                w.destroy()
+            widgets.clear()
+            name = tpl.get()
+            if name == "Plain":
+                ctk.CTkLabel(content, text="Subject").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 0))
+                s = ctk.CTkEntry(content)
+                s.grid(row=1, column=0, sticky="ew", padx=6)
+                widgets["_subject"] = s
+                b = ctk.CTkTextbox(content, height=240)
+                b.grid(row=2, column=0, sticky="nsew", padx=6, pady=6)
+                content.grid_rowconfigure(2, weight=1)
+                widgets["_body"] = b
+                return
+            form = FORMS[name]
+            r = 0
+            for f in form.fields:
+                ctk.CTkLabel(content, text=f.label).grid(row=r, column=0, sticky="w", padx=6, pady=(6, 0))
+                r += 1
+                if f.multiline:
+                    w = ctk.CTkTextbox(content, height=90)
+                else:
+                    w = ctk.CTkEntry(content)
+                w.grid(row=r, column=0, sticky="ew", padx=6)
+                widgets[f.key] = w
+                r += 1
+
+        tpl.configure(command=render)
+        render()
 
         att_lbl = ctk.CTkLabel(win, text="No attachments", text_color=GREY)
-        att_lbl.grid(row=4, column=1, padx=10, pady=4, sticky="w")
+        att_lbl.grid(row=3, column=0, padx=10, pady=2, sticky="w")
 
         def add_att():
-            paths = filedialog.askopenfilenames(title="Attach files")
-            for p in paths:
+            for p in filedialog.askopenfilenames(title="Attach files"):
                 try:
                     with open(p, "rb") as fh:
                         atts.append(Attachment(os.path.basename(p), fh.read()))
@@ -856,17 +901,26 @@ class GuardianApp(ctk.CTk):
             warn = "  ⚠ large for RF" if total > 50_000 else ""
             att_lbl.configure(text=f"{len(atts)} file(s), {total} B{warn}")
 
-        ctk.CTkButton(win, text="📎 Attach", command=add_att).grid(row=4, column=0, padx=10, pady=4)
+        def _val(w) -> str:
+            return w.get("1.0", "end").rstrip("\n") if isinstance(w, ctk.CTkTextbox) else w.get().strip()
 
         def finish(send: bool):
             dest = to.get().strip().upper()
             if send and not dest:
                 self.log("Compose: enter a destination")
                 return
+            name = tpl.get()
+            if name == "Plain":
+                subject = _val(widgets["_subject"])
+                body = _val(widgets["_body"])
+            else:
+                form = FORMS[name]
+                values = {k: _val(w) for k, w in widgets.items()}
+                body = form.render(values)
+                subject = form.subject(values) or form.name
             mail = MailMessage(
-                msg_id=self.mailstore.next_id(), source=self.cfg.callsign,
-                final_dest=dest, subject=subj.get().strip(),
-                body=body.get("1.0", "end").rstrip("\n"), attachments=list(atts),
+                msg_id=self.mailstore.next_id(self.cfg.callsign), source=self.cfg.callsign,
+                final_dest=dest, subject=subject, body=body, attachments=list(atts),
                 priority=Priority[prio.get()].value, created=time.time(),
                 hops=[self.cfg.callsign],
                 folder=Folder.OUTBOX if send else Folder.DRAFT,
@@ -879,10 +933,19 @@ class GuardianApp(ctk.CTk):
             self._select_folder(mail.folder)
 
         bar = ctk.CTkFrame(win, fg_color="transparent")
-        bar.grid(row=5, column=0, columnspan=3, padx=10, pady=10, sticky="e")
+        bar.grid(row=4, column=0, padx=10, pady=10, sticky="e")
+        ctk.CTkButton(bar, text="📎 Attach", fg_color=GREY, command=add_att).pack(side="left", padx=6)
         ctk.CTkButton(bar, text="Send", command=lambda: finish(True)).pack(side="left", padx=6)
         ctk.CTkButton(bar, text="Save draft", fg_color=GREY, command=lambda: finish(False)).pack(side="left", padx=6)
         ctk.CTkButton(bar, text="Cancel", fg_color=GREY, command=win.destroy).pack(side="left", padx=6)
+
+        # Reply prefill (plain template).
+        if reply_to is not None:
+            to.insert(0, reply_to.source)
+            widgets["_subject"].insert(0, "Re: " + reply_to.subject)
+            quoted = "\n".join("> " + ln for ln in reply_to.body.splitlines())
+            widgets["_body"].insert("1.0", f"\n\n--- {reply_to.source} wrote ---\n{quoted}\n")
+            self.mail_selected = reply_to.msg_id
 
     def _send_mail(self, mail: MailMessage) -> None:
         self.mailstore.set_status(mail.msg_id, status=Status.SENDING)
@@ -934,6 +997,19 @@ class GuardianApp(ctk.CTk):
             self.auto_relay_chk.select()
         self.auto_relay_chk.pack(side="left", padx=16)
 
+        row2 = ctk.CTkFrame(opts, fg_color="transparent")
+        row2.pack(fill="x", padx=8, pady=(0, 8))
+        self.auto_deliver_chk = ctk.CTkCheckBox(
+            row2, text="Auto-deliver waiting mail when the next hop is heard", command=self._apply_mesh_opts)
+        if self.cfg.auto_deliver:
+            self.auto_deliver_chk.select()
+        self.auto_deliver_chk.pack(side="left", padx=6)
+        self.beacon_chk = ctk.CTkCheckBox(
+            row2, text="Send presence beacon (so others can deliver to me)", command=self._apply_mesh_opts)
+        if self.cfg.beacon_enabled:
+            self.beacon_chk.select()
+        self.beacon_chk.pack(side="left", padx=16)
+
         ctk.CTkLabel(tab, text="Heard stations").grid(row=1, column=0, padx=14, pady=(4, 0), sticky="w")
         self.heard_box = ctk.CTkTextbox(tab, height=150, font=ctk.CTkFont(family="Consolas", size=12))
         self.heard_box.grid(row=2, column=0, padx=10, pady=(0, 8), sticky="nsew")
@@ -964,10 +1040,13 @@ class GuardianApp(ctk.CTk):
     def _apply_mesh_opts(self) -> None:
         self.cfg.auto_route = bool(self.auto_route_chk.get())
         self.cfg.auto_relay = bool(self.auto_relay_chk.get())
+        self.cfg.auto_deliver = bool(self.auto_deliver_chk.get())
+        self.cfg.beacon_enabled = bool(self.beacon_chk.get())
         self.net.auto_route = self.cfg.auto_route
         self.net.relay = self.cfg.auto_relay
         self.cfg.save()
-        self.log(f"Mesh: auto_route={self.cfg.auto_route} auto_relay={self.cfg.auto_relay}")
+        self.log(f"Mesh: auto_route={self.cfg.auto_route} auto_relay={self.cfg.auto_relay} "
+                 f"auto_deliver={self.cfg.auto_deliver} beacon={self.cfg.beacon_enabled}")
 
     def _refresh_heard(self) -> None:
         if not hasattr(self, "heard_box"):
@@ -1433,9 +1512,46 @@ class GuardianApp(ctk.CTk):
         if self.scanner.enabled:
             self.scanner.tick(now)
             self._refresh_channels()
+        self._maybe_beacon(now)
+        self._auto_deliver_scan(now)
         self._refresh_sessions()
         self._refresh_heard()
         self.after(250, self._net_loop)
+
+    def _maybe_beacon(self, now: float) -> None:
+        if self.cfg.beacon_enabled and now - self._last_beacon >= self.cfg.beacon_interval:
+            self._last_beacon = now
+            try:
+                self.net.beacon()
+                self.log("Presence beacon sent")
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"Beacon failed: {exc}")
+
+    def _auto_deliver_scan(self, now: float) -> None:
+        """Send waiting Outbox/Transit mail when its next hop is currently heard."""
+        if now - self._last_autodeliver < 5.0:
+            return
+        self._last_autodeliver = now
+        candidates = []
+        if self.cfg.auto_deliver:
+            candidates += self.mailstore.list(Folder.OUTBOX)
+        if self.cfg.auto_relay:
+            candidates += self.mailstore.list(Folder.TRANSIT)
+        for meta in candidates:
+            mid = meta["msg_id"]
+            sess = self.net.sessions.get(mid)
+            if sess and not sess.state.terminal:
+                continue  # already in flight
+            hop, _how = self.net._resolve_next_hop(meta["final_dest"])
+            if not hop or not self.heard.is_heard(hop, now):
+                continue
+            if now - self._deliver_attempts.get(mid, -1e9) < 30.0:
+                continue
+            self._deliver_attempts[mid] = now
+            mail = self.mailstore.get(mid)
+            if mail is not None:
+                self.log(f"Auto-deliver #{mid} -> {hop} (heard)")
+                self._send_mail(mail)
 
     def _set_dot(self, dot, on: bool, on_color: str = GREEN) -> None:
         dot.configure(text_color=on_color if on else GREY)

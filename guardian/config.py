@@ -91,6 +91,9 @@ class StationConfig:
     # Mesh / smart routing.
     auto_route: bool = True    # discover a next hop (ROUTE_QUERY) when none known
     auto_relay: bool = False   # forward received messages toward their final dest
+    auto_deliver: bool = True  # send waiting Outbox/Transit mail when the hop is heard
+    beacon_enabled: bool = False
+    beacon_interval: float = 120.0   # seconds between presence beacons
     scan_dwell: float = 3.0    # seconds per channel when scanning
 
     # Control burst behaviour

@@ -69,6 +69,7 @@ class MailMessage:
     folder: str = Folder.DRAFT
     status: str = Status.DRAFT
     next_hop: str = ""
+    read: bool = True
 
     # ------------------------------------------------------------------ #
     def content_size(self) -> int:

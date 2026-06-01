@@ -229,14 +229,25 @@ and polish.
   "Simulate receive (demo)" lets you exercise the receive/read/attachment UX on
   one PC without a radio.
 
+## Mail extras (latest)
+- **Globally-unique message IDs** — 12-bit station-hash prefix + 20-bit counter
+  (fits uint32), so two stations almost never collide.
+- **Read/unread** — incoming starts unread (● + "N new" badge), marked read on
+  open. **Reply** button on Inbox messages prefills a quoted reply.
+- **Presence beacon + auto-deliver** — a station can beacon "I'm here"; holders
+  auto-send waiting Outbox/Transit mail when the next hop becomes *heard*
+  (Mesh-tab toggles: auto-deliver, beacon). This is the "pickup when the
+  recipient shows up" behaviour.
+- **Forms** — ICS-213 and SITREP templates in Compose render to clean,
+  fixed-layout bodies with auto subjects.
+
 ## 8. Known issues / watch-list
-- **msg_id uniqueness**: ids are currently local (store max+1). In a real
-  multi-station mesh two stations could mint the same id and collide in the
-  store. Make ids globally unique (source-qualified) before multi-station use.
 - Taskbar/tray icon required an AppUserModelID + forced re-apply to override the
   pythonw default — verify it sticks after CustomTkinter theme changes.
 - `rigctl -l` model ids change between Hamlib versions — the live "Browse all"
   picker is authoritative; curated ids were verified against Hamlib 4.7.1.
 - AFSK bit-sync uses a phase search tuned for clean audio; real fading channels
   may need a PLL/transition-tracking sync (revisit during on-air bring-up).
+- Station-hash id prefix is 12-bit, so a rare hash collision between two
+  callsigns is possible; identity is really (source, msg_id) if ever needed.
 ```

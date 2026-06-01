@@ -197,6 +197,10 @@ class Orchestrator:
         msg.attempts = 1
         self._send(FrameType.HAVE_MSG, msg)
 
+    def beacon(self) -> None:
+        """Transmit a presence beacon so neighbours hear (and can deliver to) us."""
+        self.transport.send(ControlFrame(type=FrameType.BEACON, source=self.callsign))
+
     def cancel(self, msg_id: int) -> None:
         msg = self.sessions.get(msg_id)
         if msg and not msg.state.terminal:

@@ -53,6 +53,7 @@ class FrameType(IntEnum):
     RECEIVED = 7      # payload received OK (crc ok)
     DELIVERED = 8     # final station confirms end-to-end delivery
     CANCEL = 9        # cancel/retract message
+    BEACON = 10       # presence beacon ("I am here") — lets neighbours hear us
 
     @property
     def label(self) -> str:
