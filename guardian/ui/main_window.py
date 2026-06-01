@@ -164,28 +164,29 @@ class GuardianApp(ctk.CTk):
     def _build_sidebar(self) -> None:
         bar = ctk.CTkFrame(self, width=210, corner_radius=0)
         bar.grid(row=0, column=0, sticky="nsew")
-        bar.grid_rowconfigure(7, weight=1)
+        bar.grid_rowconfigure(9, weight=1)
 
         ctk.CTkLabel(bar, text="GUARDIAN", font=ctk.CTkFont(size=22, weight="bold")).grid(
-            row=0, column=0, padx=20, pady=(20, 0)
-        )
+            row=0, column=0, padx=20, pady=(20, 0))
         ctk.CTkLabel(bar, text="ARDOS control layer", text_color=GREY).grid(
-            row=1, column=0, padx=20, pady=(0, 16)
-        )
+            row=1, column=0, padx=20, pady=(0, 12))
 
         self.lbl_call = ctk.CTkLabel(bar, text=self.cfg.callsign, font=ctk.CTkFont(size=18, weight="bold"))
-        self.lbl_call.grid(row=2, column=0, padx=20, pady=(0, 12))
+        self.lbl_call.grid(row=2, column=0, padx=20, pady=(0, 2))
+        self.lbl_mode = ctk.CTkLabel(bar, text="", text_color=GREY)
+        self.lbl_mode.grid(row=3, column=0, padx=20, pady=(0, 12))
 
-        self.dot_radio = self._status_row(bar, 3, "Radio")
-        self.dot_vara = self._status_row(bar, 4, "VARA")
-        self.dot_ptt = self._status_row(bar, 5, "PTT")
+        self.dot_radio = self._status_row(bar, 4, "Radio")
+        self.dot_vara = self._status_row(bar, 5, "VARA")
+        self.dot_ptt = self._status_row(bar, 6, "PTT")
+        self.dot_channel = self._status_row(bar, 7, "Control ch.")
 
-        ctk.CTkLabel(bar, text="Appearance").grid(row=8, column=0, padx=20, pady=(10, 0), sticky="w")
-        self.appearance_menu = ctk.CTkOptionMenu(
-            bar, values=["System", "Dark", "Light"], command=self._set_appearance
-        )
-        self.appearance_menu.set(self.cfg.appearance)
-        self.appearance_menu.grid(row=9, column=0, padx=20, pady=(0, 20), sticky="ew")
+        self.lbl_mailcount = ctk.CTkLabel(bar, text="", justify="left", text_color=GREY)
+        self.lbl_mailcount.grid(row=8, column=0, padx=20, pady=(10, 0), sticky="w")
+
+        ctk.CTkButton(bar, text="⚙  Settings", fg_color=GREY,
+                      command=lambda: self.tabs.set("⚙ Settings")).grid(
+            row=10, column=0, padx=20, pady=(8, 20), sticky="ew")
 
     def _status_row(self, parent, row: int, label: str):
         frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -201,61 +202,245 @@ class GuardianApp(ctk.CTk):
     def _build_tabs(self) -> None:
         self.tabs = ctk.CTkTabview(self)
         self.tabs.grid(row=0, column=1, padx=16, pady=16, sticky="nsew")
-        for name in ("Dashboard", "Mail", "Radio", "VARA", "Routing", "Net", "Mesh", "Messages", "Log"):
+        # Operational tabs first (the things you DO), then a single Settings area.
+        for name in ("Home", "Mail", "Net", "Mesh", "Log", "⚙ Settings"):
             self.tabs.add(name)
-        self._build_dashboard(self.tabs.tab("Dashboard"))
+        self._build_dashboard(self.tabs.tab("Home"))
         self._build_mail_tab(self.tabs.tab("Mail"))
-        self._build_radio_tab(self.tabs.tab("Radio"))
-        self._build_vara_tab(self.tabs.tab("VARA"))
-        self._build_routing_tab(self.tabs.tab("Routing"))
         self._build_net_tab(self.tabs.tab("Net"))
         self._build_mesh_tab(self.tabs.tab("Mesh"))
-        self._build_messages_tab(self.tabs.tab("Messages"))
         self._build_log_tab(self.tabs.tab("Log"))
+        self._build_settings_tab(self.tabs.tab("⚙ Settings"))
 
-    # ---- Dashboard ---------------------------------------------------- #
+    def _build_settings_tab(self, tab) -> None:
+        """All configuration lives here, grouped into sections."""
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+        self.settings_tabs = ctk.CTkTabview(tab)
+        self.settings_tabs.grid(row=0, column=0, sticky="nsew")
+        for name in ("Station", "Radio", "VARA", "Channel", "Mesh", "Routing", "Advanced"):
+            self.settings_tabs.add(name)
+        self._build_station_settings(self.settings_tabs.tab("Station"))
+        self._build_radio_tab(self.settings_tabs.tab("Radio"))
+        self._build_vara_tab(self.settings_tabs.tab("VARA"))
+        self._build_channel_settings(self.settings_tabs.tab("Channel"))
+        self._build_mesh_settings(self.settings_tabs.tab("Mesh"))
+        self._build_routing_tab(self.settings_tabs.tab("Routing"))
+        self._build_messages_tab(self.settings_tabs.tab("Advanced"))
+
+    def _goto_settings(self, section: str) -> None:
+        self.tabs.set("⚙ Settings")
+        self._safe(lambda: self.settings_tabs.set(section))
+
+    # ---- Home (guided dashboard) -------------------------------------- #
+    MODES = ["Simulation", "Live · VARA P2P", "Live · Winlink"]
+    _MODE_DESC = {
+        "Simulation": "Try everything on this PC — no radio needed. Control frames run on a loopback channel.",
+        "Live · VARA P2P": "On-air, Guardian moves the payload itself over VARA. Needs radio + audio + VARA.",
+        "Live · Winlink": "On-air, you transfer the payload with your own Winlink session. Needs radio + audio.",
+    }
+
     def _build_dashboard(self, tab) -> None:
-        tab.grid_columnconfigure((0, 1), weight=1)
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(3, weight=1)
 
-        radio_card = ctk.CTkFrame(tab)
-        radio_card.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
-        ctk.CTkLabel(radio_card, text="Radio", font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=14, pady=(12, 4))
-        self.db_radio = ctk.CTkLabel(radio_card, text="Not connected", justify="left", text_color=GREY)
-        self.db_radio.pack(anchor="w", padx=14, pady=(0, 12))
+        mode_card = ctk.CTkFrame(tab)
+        mode_card.grid(row=0, column=0, padx=10, pady=(10, 6), sticky="ew")
+        mode_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(mode_card, text="Operating mode", font=ctk.CTkFont(size=16, weight="bold")).grid(
+            row=0, column=0, padx=14, pady=(12, 2), sticky="w")
+        self.mode_seg = ctk.CTkSegmentedButton(mode_card, values=self.MODES, command=self._set_mode)
+        self.mode_seg.set(self._current_mode())
+        self.mode_seg.grid(row=1, column=0, padx=14, pady=4, sticky="w")
+        self.mode_desc = ctk.CTkLabel(mode_card, text="", text_color=GREY, justify="left")
+        self.mode_desc.grid(row=2, column=0, padx=14, pady=(0, 12), sticky="w")
 
-        vara_card = ctk.CTkFrame(tab)
-        vara_card.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
-        ctk.CTkLabel(vara_card, text="VARA FM", font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=14, pady=(12, 4))
-        self.db_vara = ctk.CTkLabel(vara_card, text="Not connected", justify="left", text_color=GREY)
-        self.db_vara.pack(anchor="w", padx=14, pady=(0, 12))
+        steps_card = ctk.CTkFrame(tab)
+        steps_card.grid(row=1, column=0, padx=10, pady=6, sticky="ew")
+        steps_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(steps_card, text="Setup checklist", font=ctk.CTkFont(size=16, weight="bold")).grid(
+            row=0, column=0, padx=14, pady=(12, 2), sticky="w")
+        self.checklist = ctk.CTkFrame(steps_card, fg_color="transparent")
+        self.checklist.grid(row=1, column=0, padx=8, pady=(0, 10), sticky="ew")
+        self.checklist.grid_columnconfigure(1, weight=1)
 
-        info = ctk.CTkFrame(tab)
-        info.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
-        ctk.CTkLabel(info, text="Station", font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=14, pady=(12, 4))
-        self.db_station = ctk.CTkLabel(info, text="", justify="left")
-        self.db_station.pack(anchor="w", padx=14, pady=(0, 12))
+        actions = ctk.CTkFrame(tab, fg_color="transparent")
+        actions.grid(row=2, column=0, padx=10, pady=4, sticky="ew")
+        ctk.CTkButton(actions, text="✎ Compose mail", command=self._compose_mail).pack(side="left", padx=6)
+        ctk.CTkButton(actions, text="📬 Open Mail", fg_color=GREY, command=lambda: self.tabs.set("Mail")).pack(side="left", padx=6)
+        ctk.CTkButton(actions, text="Connect radio", fg_color=GREY, command=self._connect_radio).pack(side="left", padx=6)
+        ctk.CTkButton(actions, text="Connect VARA", fg_color=GREY, command=self._connect_vara).pack(side="left", padx=6)
+
+        status = ctk.CTkFrame(tab)
+        status.grid(row=3, column=0, padx=10, pady=(6, 10), sticky="nsew")
+        status.grid_columnconfigure((0, 1, 2), weight=1)
+        self.db_radio = self._status_card(status, 0, "Radio")
+        self.db_vara = self._status_card(status, 1, "VARA")
+        self.db_mail = self._status_card(status, 2, "Mailbox")
+        self.db_station = ctk.CTkLabel(status, text="", justify="left", text_color=GREY)
+        self.db_station.grid(row=1, column=0, columnspan=3, padx=14, pady=(0, 12), sticky="w")
+        self._set_mode_desc()
+        self._refresh_setup_checklist()
         self._refresh_station_card()
 
+    def _status_card(self, parent, col: int, title: str):
+        f = ctk.CTkFrame(parent)
+        f.grid(row=0, column=col, padx=8, pady=10, sticky="nsew")
+        ctk.CTkLabel(f, text=title, font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(10, 2))
+        lbl = ctk.CTkLabel(f, text="—", justify="left", text_color=GREY)
+        lbl.pack(anchor="w", padx=12, pady=(0, 10))
+        return lbl
+
+    def _current_mode(self) -> str:
+        if self.cfg.control_channel == "loopback":
+            return "Simulation"
+        return "Live · VARA P2P" if self.cfg.payload_backend == "vara_p2p" else "Live · Winlink"
+
+    def _set_mode_desc(self) -> None:
+        self.mode_desc.configure(text=self._MODE_DESC.get(self.mode_seg.get(), ""))
+
+    def _set_mode(self, mode: str) -> None:
+        self._set_mode_desc()
+        if mode == "Simulation":
+            self._start_loopback_channel()
+        else:
+            self.cfg.payload_backend = "vara_p2p" if "VARA" in mode else "winlink_manual"
+            if hasattr(self, "payload_menu"):
+                self.payload_menu.set(self.cfg.payload_backend)
+            self.net.payload = self._payload_for_net()
+            self._start_audio_channel()
+        self.cfg.save()
+        self._refresh_setup_checklist()
+        self._refresh_station_card()
+        self.log(f"Mode: {mode}")
+
+    def _refresh_setup_checklist(self) -> None:
+        if not hasattr(self, "checklist"):
+            return
+        for w in self.checklist.winfo_children():
+            w.destroy()
+        mode = self._current_mode()
+        cs = self.cfg.callsign
+        radio_ok = self._safe_bool(lambda: self.radio.is_open)
+        audio_ok = self.audio_transport is not None
+        vara_ok = self.vara.connected
+
+        steps = [("Set your callsign & station info",
+                  bool(cs and cs != "NOCALL"), "Station")]
+        if mode == "Simulation":
+            steps.append(("Control channel: loopback (simulation)",
+                          self.cfg.control_channel == "loopback", "Channel"))
+        else:
+            steps.append(("Connect your radio (Hamlib or VOX)", radio_ok, "Radio"))
+            steps.append(("Start the audio control channel", audio_ok, "Channel"))
+            if mode == "Live · VARA P2P":
+                steps.append(("Connect VARA (moves the payload)", vara_ok, "VARA"))
+            else:
+                steps.append(("Winlink: you'll transfer the payload yourself", None, "VARA"))
+        ready = all(s[1] for s in steps if s[1] is not None)
+        steps.append((f"Ready — compose in Mail{'' if ready else ' (finish the steps above)'}", ready, None))
+
+        for i, (label, done, section) in enumerate(steps):
+            mark = "✓" if done else ("➖" if done is None else "⬜")
+            color = GREEN if done else (GREY if done is None else AMBER)
+            ctk.CTkLabel(self.checklist, text=mark, text_color=color,
+                         font=ctk.CTkFont(size=15)).grid(row=i, column=0, padx=(8, 6), pady=3, sticky="w")
+            ctk.CTkLabel(self.checklist, text=f"{i+1}. {label}", anchor="w").grid(
+                row=i, column=1, padx=4, pady=3, sticky="w")
+            if section:
+                ctk.CTkButton(self.checklist, text="Go", width=44, height=26,
+                              command=lambda s=section: self._goto_settings(s)).grid(
+                    row=i, column=2, padx=8, pady=3)
+
+    @staticmethod
+    def _safe_bool(fn) -> bool:
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+
     def _refresh_station_card(self) -> None:
+        if not hasattr(self, "db_station"):
+            return
         c = self.cfg
         self.db_station.configure(
-            text=(
-                f"Callsign:   {c.callsign}\n"
-                f"Operator:   {c.operator_name or '-'}\n"
-                f"Radio:      {c.radio or '-'}  (backend: {c.radio_backend})\n"
-                f"rigctld:    {c.rigctld_host}:{c.rigctld_port}\n"
-                f"VARA {c.vara_mode}:    {c.vara_host}  cmd {c.vara_cmd_port} / data {c.vara_data_port}\n"
-                f"Burst modem:{c.active_modem()}\n"
-                f"Payload:    {c.payload_backend}\n"
-                f"Routes:     {len(self.routes)} configured"
-            )
-        )
+            text=(f"{c.callsign} · {c.operator_name or 'no operator'} · radio {c.radio or '-'} "
+                  f"({c.radio_backend}) · VARA {c.vara_mode} · modem {c.active_modem()} · "
+                  f"payload {c.payload_backend} · {len(self.routes)} routes"))
+
+    # ---- Settings: Station -------------------------------------------- #
+    def _build_station_settings(self, tab) -> None:
+        tab.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(tab, text="Station identity", font=ctk.CTkFont(size=15, weight="bold")).grid(
+            row=0, column=0, columnspan=2, padx=14, pady=(12, 6), sticky="w")
+        self._field(tab, 1, "Callsign", "callsign")
+        self._field(tab, 2, "Operator name", "operator_name")
+        self._field(tab, 3, "Default TTL (max hops)", "default_ttl")
+        ctk.CTkLabel(tab, text="Appearance").grid(row=4, column=0, padx=14, pady=8, sticky="w")
+        self.appearance_menu = ctk.CTkOptionMenu(tab, values=["System", "Dark", "Light"], command=self._set_appearance)
+        self.appearance_menu.set(self.cfg.appearance)
+        self.appearance_menu.grid(row=4, column=1, padx=14, pady=8, sticky="w")
+        ctk.CTkButton(tab, text="Save", command=self._save_config).grid(row=5, column=0, padx=14, pady=14, sticky="w")
+
+    # ---- Settings: Channel & payload ---------------------------------- #
+    def _build_channel_settings(self, tab) -> None:
+        tab.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(tab, text="Control channel", font=ctk.CTkFont(size=15, weight="bold")).grid(
+            row=0, column=0, columnspan=3, padx=14, pady=(12, 4), sticky="w")
+        ctk.CTkLabel(tab, text="Channel").grid(row=1, column=0, padx=14, pady=6, sticky="w")
+        self.channel_seg = ctk.CTkSegmentedButton(tab, values=["loopback", "audio"], command=self._set_control_channel)
+        self.channel_seg.set(self.cfg.control_channel)
+        self.channel_seg.grid(row=1, column=1, padx=14, pady=6, sticky="w")
+        ctk.CTkLabel(tab, text="loopback = simulation on this PC · audio = real RF via the radio",
+                     text_color=GREY).grid(row=2, column=1, padx=14, sticky="w")
+
+        ctk.CTkLabel(tab, text="Audio input").grid(row=3, column=0, padx=14, pady=6, sticky="w")
+        self.audio_in_menu = ctk.CTkOptionMenu(tab, values=["(default)"])
+        self.audio_in_menu.grid(row=3, column=1, padx=14, pady=6, sticky="ew")
+        ctk.CTkLabel(tab, text="Audio output").grid(row=4, column=0, padx=14, pady=6, sticky="w")
+        self.audio_out_menu = ctk.CTkOptionMenu(tab, values=["(default)"])
+        self.audio_out_menu.grid(row=4, column=1, padx=14, pady=6, sticky="ew")
+        ctk.CTkButton(tab, text="Refresh devices", command=self._refresh_audio_devices).grid(
+            row=3, column=2, padx=8, pady=6)
+        self.channel_status = ctk.CTkLabel(tab, text="", text_color=GREY)
+        self.channel_status.grid(row=5, column=1, padx=14, pady=(0, 8), sticky="w")
+
+        ctk.CTkLabel(tab, text="Payload transport", font=ctk.CTkFont(size=15, weight="bold")).grid(
+            row=6, column=0, columnspan=3, padx=14, pady=(14, 4), sticky="w")
+        self.payload_menu = ctk.CTkOptionMenu(tab, values=["vara_p2p", "winlink_manual"], command=self._set_payload_backend)
+        self.payload_menu.set(self.cfg.payload_backend)
+        self.payload_menu.grid(row=7, column=1, padx=14, pady=6, sticky="w")
+        ctk.CTkLabel(tab, text="vara_p2p = Guardian sends it over VARA · winlink_manual = you send via Winlink",
+                     text_color=GREY).grid(row=8, column=1, padx=14, sticky="w")
+        self._refresh_audio_devices()
+
+    # ---- Settings: Mesh options --------------------------------------- #
+    def _build_mesh_settings(self, tab) -> None:
+        ctk.CTkLabel(tab, text="Smart routing & mesh", font=ctk.CTkFont(size=15, weight="bold")).pack(
+            anchor="w", padx=14, pady=(12, 6))
+        self.auto_route_chk = ctk.CTkCheckBox(
+            tab, text="Auto-route — discover a next hop (ROUTE_QUERY) when none is configured",
+            command=self._apply_mesh_opts)
+        self.auto_relay_chk = ctk.CTkCheckBox(
+            tab, text="Auto-relay — forward messages for other stations (mesh)", command=self._apply_mesh_opts)
+        self.auto_deliver_chk = ctk.CTkCheckBox(
+            tab, text="Auto-deliver — send waiting mail when its next hop is heard", command=self._apply_mesh_opts)
+        self.beacon_chk = ctk.CTkCheckBox(
+            tab, text="Presence beacon — periodically announce I'm here (so others can deliver to me)",
+            command=self._apply_mesh_opts)
+        for chk, on in ((self.auto_route_chk, self.cfg.auto_route),
+                        (self.auto_relay_chk, self.cfg.auto_relay),
+                        (self.auto_deliver_chk, self.cfg.auto_deliver),
+                        (self.beacon_chk, self.cfg.beacon_enabled)):
+            if on:
+                chk.select()
+            chk.pack(anchor="w", padx=18, pady=4)
 
     # ---- Radio tab ---------------------------------------------------- #
     def _build_radio_tab(self, tab) -> None:
         tab.grid_columnconfigure(1, weight=1)
-        self._field(tab, 0, "Callsign", "callsign")
-        self._field(tab, 1, "Operator name", "operator_name")
+        ctk.CTkLabel(tab, text="Radio control", font=ctk.CTkFont(size=15, weight="bold")).grid(
+            row=0, column=0, columnspan=2, padx=14, pady=(10, 2), sticky="w")
 
         # Friendly radio picker: choose by name, ids fill in automatically.
         ctk.CTkLabel(tab, text="Radio").grid(row=2, column=0, padx=14, pady=8, sticky="w")
@@ -416,42 +601,14 @@ class GuardianApp(ctk.CTk):
         self.n_body = ctk.CTkEntry(compose, placeholder_text="message text / body…")
         self.n_body.grid(row=3, column=1, columnspan=3, padx=8, pady=4, sticky="ew")
 
-        ctk.CTkLabel(compose, text="Payload transport").grid(row=4, column=0, padx=8, pady=4, sticky="w")
-        self.payload_menu = ctk.CTkOptionMenu(
-            compose, values=["vara_p2p", "winlink_manual"], command=self._set_payload_backend)
-        self.payload_menu.set(self.cfg.payload_backend)
-        self.payload_menu.grid(row=4, column=1, padx=8, pady=4, sticky="w")
-        ctk.CTkLabel(compose, text="vara_p2p = Guardian sends it · winlink_manual = you send via Winlink",
-                     text_color=GREY).grid(row=4, column=2, columnspan=2, padx=8, pady=4, sticky="w")
-
         actions = ctk.CTkFrame(compose, fg_color="transparent")
         actions.grid(row=5, column=0, columnspan=4, padx=4, pady=8, sticky="ew")
         ctk.CTkButton(actions, text="Send over net", command=self._net_send).pack(side="left", padx=6)
         self.sim_chk = ctk.CTkCheckBox(actions, text="Simulate next-hop reply (loopback)")
         self.sim_chk.select()
         self.sim_chk.pack(side="left", padx=12)
-        self.sim_note = ctk.CTkLabel(actions, text="Loopback channel (simulation).", text_color=GREY)
+        self.sim_note = ctk.CTkLabel(actions, text="", text_color=GREY)
         self.sim_note.pack(side="left", padx=6)
-
-        # Control channel: loopback simulation vs real audio over the radio.
-        chan = ctk.CTkFrame(tab)
-        chan.grid(row=1, column=0, padx=10, pady=(0, 8), sticky="ew")
-        chan.grid_columnconfigure(5, weight=1)
-        ctk.CTkLabel(chan, text="Control channel").grid(row=0, column=0, padx=8, pady=8, sticky="w")
-        self.channel_seg = ctk.CTkSegmentedButton(chan, values=["loopback", "audio"], command=self._set_control_channel)
-        self.channel_seg.set(self.cfg.control_channel)
-        self.channel_seg.grid(row=0, column=1, padx=8, pady=8)
-        ctk.CTkLabel(chan, text="Audio in").grid(row=0, column=2, padx=(14, 4), pady=8, sticky="e")
-        self.audio_in_menu = ctk.CTkOptionMenu(chan, values=["(default)"], width=180)
-        self.audio_in_menu.grid(row=0, column=3, padx=4, pady=8)
-        ctk.CTkLabel(chan, text="out").grid(row=1, column=2, padx=(14, 4), pady=(0, 8), sticky="e")
-        self.audio_out_menu = ctk.CTkOptionMenu(chan, values=["(default)"], width=180)
-        self.audio_out_menu.grid(row=1, column=3, padx=4, pady=(0, 8))
-        ctk.CTkButton(chan, text="Refresh devices", width=120, command=self._refresh_audio_devices).grid(
-            row=0, column=4, padx=8, pady=8)
-        self.channel_status = ctk.CTkLabel(chan, text="", text_color=GREY, justify="left")
-        self.channel_status.grid(row=1, column=4, columnspan=2, padx=8, pady=(0, 8), sticky="w")
-        self._refresh_audio_devices()
 
         ctk.CTkLabel(tab, text="Sessions").grid(row=2, column=0, padx=14, pady=(4, 0), sticky="w")
         self.sessions_box = ctk.CTkTextbox(tab, height=140, font=ctk.CTkFont(family="Consolas", size=12))
@@ -978,46 +1135,17 @@ class GuardianApp(ctk.CTk):
     # ---- Mesh tab (smart routing + scanning) -------------------------- #
     def _build_mesh_tab(self, tab) -> None:
         tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(3, weight=1)
 
-        opts = ctk.CTkFrame(tab)
-        opts.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
-        ctk.CTkLabel(opts, text="Smart routing", font=ctk.CTkFont(size=15, weight="bold")).pack(
-            anchor="w", padx=10, pady=(8, 4))
-        row = ctk.CTkFrame(opts, fg_color="transparent")
-        row.pack(fill="x", padx=8, pady=(0, 8))
-        self.auto_route_chk = ctk.CTkCheckBox(
-            row, text="Auto-route (discover next hop via ROUTE_QUERY)", command=self._apply_mesh_opts)
-        if self.cfg.auto_route:
-            self.auto_route_chk.select()
-        self.auto_route_chk.pack(side="left", padx=6)
-        self.auto_relay_chk = ctk.CTkCheckBox(
-            row, text="Auto-relay (forward messages for others — mesh)", command=self._apply_mesh_opts)
-        if self.cfg.auto_relay:
-            self.auto_relay_chk.select()
-        self.auto_relay_chk.pack(side="left", padx=16)
-
-        row2 = ctk.CTkFrame(opts, fg_color="transparent")
-        row2.pack(fill="x", padx=8, pady=(0, 8))
-        self.auto_deliver_chk = ctk.CTkCheckBox(
-            row2, text="Auto-deliver waiting mail when the next hop is heard", command=self._apply_mesh_opts)
-        if self.cfg.auto_deliver:
-            self.auto_deliver_chk.select()
-        self.auto_deliver_chk.pack(side="left", padx=6)
-        self.beacon_chk = ctk.CTkCheckBox(
-            row2, text="Send presence beacon (so others can deliver to me)", command=self._apply_mesh_opts)
-        if self.cfg.beacon_enabled:
-            self.beacon_chk.select()
-        self.beacon_chk.pack(side="left", padx=16)
-
-        ctk.CTkLabel(tab, text="Heard stations").grid(row=1, column=0, padx=14, pady=(4, 0), sticky="w")
+        ctk.CTkLabel(tab, text="Heard stations  (routing/relay options are in ⚙ Settings → Mesh)",
+                     font=ctk.CTkFont(size=15, weight="bold")).grid(
+            row=0, column=0, padx=14, pady=(10, 0), sticky="w")
         self.heard_box = ctk.CTkTextbox(tab, height=150, font=ctk.CTkFont(family="Consolas", size=12))
-        self.heard_box.grid(row=2, column=0, padx=10, pady=(0, 8), sticky="nsew")
-        tab.grid_rowconfigure(2, weight=1)
+        self.heard_box.grid(row=1, column=0, padx=10, pady=(4, 8), sticky="nsew")
+        tab.grid_rowconfigure(1, weight=1)
 
         # Channel scanning.
         scan = ctk.CTkFrame(tab)
-        scan.grid(row=3, column=0, padx=10, pady=8, sticky="nsew")
+        scan.grid(row=2, column=0, padx=10, pady=8, sticky="nsew")
         scan.grid_columnconfigure(6, weight=1)
         scan.grid_rowconfigure(2, weight=1)
         ctk.CTkLabel(scan, text="Channel scanning", font=ctk.CTkFont(size=15, weight="bold")).grid(
@@ -1494,6 +1622,23 @@ class GuardianApp(ctk.CTk):
         if vs.cmd_connected:
             vara_txt = f"Connected\nMYCALL: {vs.mycall or '-'}\nLink: {vs.link_state}\nLast: {vs.last_notification or '-'}"
         self.db_vara.configure(text=vara_txt)
+
+        # Sidebar: control-channel + mode + mailbox counts.
+        on_air = self.audio_transport is not None
+        self._set_dot(self.dot_channel, self.cfg.control_channel == "audio" or on_air,
+                      on_color=GREEN if on_air else AMBER)
+        self.lbl_mode.configure(text=self._current_mode())
+        counts = self.mailstore.counts()
+        unread = self.mailstore.unread(Folder.INBOX)
+        self.lbl_mailcount.configure(
+            text=f"Inbox {counts.get('inbox', 0)}" + (f" ({unread} new)" if unread else "")
+                 + f"\nOutbox {counts.get('outbox', 0)}  Transit {counts.get('transit', 0)}")
+        if hasattr(self, "db_mail"):
+            self.db_mail.configure(
+                text=(f"Inbox {counts.get('inbox',0)} ({unread} new)\n"
+                      f"Outbox {counts.get('outbox',0)} waiting\n"
+                      f"Transit {counts.get('transit',0)} held"))
+        self._refresh_setup_checklist()
 
         self.after(POLL_MS, self._poll)
 

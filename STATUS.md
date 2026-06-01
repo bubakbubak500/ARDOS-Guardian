@@ -119,7 +119,13 @@ guardian/
     main_window.py    CustomTkinter UI (tabs below)
 ```
 
-UI tabs: **Dashboard, Radio, VARA, Routing, Net, Messages, Log.**
+UI (reorganised for a guided journey): operational tabs **Home · Mail · Net ·
+Mesh · Log** up front, all configuration under **⚙ Settings** (sections:
+Station, Radio, VARA, Channel, Mesh, Routing, Advanced). **Home** has an
+operating-mode selector (Simulation / Live·VARA P2P / Live·Winlink) and a
+mode-aware **setup checklist** that shows what to configure first (with "Go"
+buttons jumping to the right settings section) plus live status cards. The
+sidebar shows callsign, mode, Radio/VARA/PTT/Control-channel dots and mailbox counts.
 
 The control flow is transport-agnostic: the orchestrator talks to a
 `ControlTransport` (LoopbackBus for sim, AudioControlTransport for real RF) and

@@ -1,0 +1,21 @@
+UI: guided Home + Settings reorganisation
+
+Reorganise the interface around the usage journey:
+- Operational tabs up front: Home, Mail, Net, Mesh, Log
+- All configuration consolidated under a single "Settings" tab with sections:
+  Station, Radio, VARA, Channel, Mesh, Routing, Advanced
+- Home is now a guided dashboard: an operating-mode selector
+  (Simulation / Live VARA P2P / Live Winlink) plus a mode-aware setup
+  checklist that shows what to configure first, with "Go" buttons that jump
+  to the relevant settings section; live status cards below
+- Sidebar shows callsign, current mode, Radio/VARA/PTT/Control-channel
+  status dots, and mailbox counts; a Settings shortcut button
+- Moved config widgets out of the operational tabs: callsign/operator ->
+  Station, control-channel + audio devices + payload -> Channel, mesh
+  toggles -> Mesh settings, frame inspector -> Advanced; appearance ->
+  Station
+
+Verified: full UI builds, mode switching, checklist rendering, and all
+relocated widgets present.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
