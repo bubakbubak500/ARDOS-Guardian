@@ -39,9 +39,18 @@ radios. The aim is no per-radio CAT reverse-engineering.
 |-------|-------------------------------|--------|
 | 1     | UI, config, protocol, drivers | ✅ done |
 | 2     | VARA session state-machine    | ✅ done |
-| 3     | Control modem (AFSK) + payload backends | ✅ done* |
-| 4     | Smart routing / heard-stations |        |
-| 5     | Multi-channel scanning / mesh |        |
+| 3     | Control modem (AFSK + MFSK) + payload backends | ✅ done* |
+| 4     | Smart routing / heard-stations | ✅ done |
+| 5     | Multi-channel scanning / mesh | ✅ done* |
+
+### Phases 4 & 5 — smart routing + mesh
+
+Heard-stations registry (built from every received control frame),
+**ROUTE_QUERY/ROUTE_OFFER** route discovery when no manual route exists,
+learned-path memory, **multi-hop auto-relay** (TTL + loop avoidance), and a
+tick-driven **channel scanner** (dwell + activity hold). The **Mesh** tab shows
+heard stations and toggles auto-route / auto-relay; channel scanning lives there
+too. (*) scanning needs a real radio to tune.
 
 \*Phase 3 is software-complete: AFSK 1200 (FM) and MFSK-16 (HF, ~0 dB SNR) modems
 with rate-1/2 K=7 convolutional FEC, audio device pickers, and a loopback↔audio

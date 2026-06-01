@@ -27,8 +27,9 @@ from ..radio.rigctld_launcher import RigctldProcess
 from ..modem import make_modem
 from ..modem.audio import AudioControlTransport, list_audio_devices
 from ..payload import make_backend
+from ..radio.scanner import Channel, ChannelPlan, ChannelScanner
 from ..radio.usb_serial import detect as detect_usb_serial
-from ..routing import Route, RouteTable
+from ..routing import HeardStations, Route, RouteTable
 from ..session import LoopbackBus, Orchestrator, SessionState
 from ..vara import VaraClient
 
@@ -52,15 +53,18 @@ class GuardianApp(ctk.CTk):
 
         # Control-net: loopback (simulation) transport until the Phase-3 modem
         # exists. Our own orchestrator + on-demand virtual partner stations.
-        self.bus = LoopbackBus(monitor=self._on_channel_frame)
-        self.net = Orchestrator(
-            self.cfg.callsign, self.bus.endpoint(self.cfg.callsign),
-            routes=self.routes, on_event=self._on_session_event,
-            payload=self._payload_for_net(),
+        self.heard = HeardStations()
+        self.channel_plan = ChannelPlan.load()
+        self.scanner = ChannelScanner(
+            self.radio, self.channel_plan, dwell=self.cfg.scan_dwell,
+            on_change=lambda ch: self.log(f"Scan -> {ch.name} ({ch.freq_hz/1e6:.4f} MHz)"),
+            on_log=self.log,
         )
+        self.bus = LoopbackBus(monitor=self._on_channel_frame)
         self.partners: dict[str, Orchestrator] = {}
         self.audio_transport = None  # set when control channel = audio
         self._next_msg_id = 1001
+        self.net = self._build_net(self.bus.endpoint(self.cfg.callsign))
 
         ctk.set_appearance_mode(self.cfg.appearance)
         ctk.set_default_color_theme("blue")
@@ -186,13 +190,14 @@ class GuardianApp(ctk.CTk):
     def _build_tabs(self) -> None:
         self.tabs = ctk.CTkTabview(self)
         self.tabs.grid(row=0, column=1, padx=16, pady=16, sticky="nsew")
-        for name in ("Dashboard", "Radio", "VARA", "Routing", "Net", "Messages", "Log"):
+        for name in ("Dashboard", "Radio", "VARA", "Routing", "Net", "Mesh", "Messages", "Log"):
             self.tabs.add(name)
         self._build_dashboard(self.tabs.tab("Dashboard"))
         self._build_radio_tab(self.tabs.tab("Radio"))
         self._build_vara_tab(self.tabs.tab("VARA"))
         self._build_routing_tab(self.tabs.tab("Routing"))
         self._build_net_tab(self.tabs.tab("Net"))
+        self._build_mesh_tab(self.tabs.tab("Mesh"))
         self._build_messages_tab(self.tabs.tab("Messages"))
         self._build_log_tab(self.tabs.tab("Log"))
 
@@ -486,11 +491,7 @@ class GuardianApp(ctk.CTk):
             self._safe(self.audio_transport.stop)
             self.audio_transport = None
         self.cfg.control_channel = "loopback"
-        self.net = Orchestrator(
-            self.cfg.callsign, self.bus.endpoint(self.cfg.callsign),
-            routes=self.routes, on_event=self._on_session_event,
-            payload=self._payload_for_net(),
-        )
+        self.net = self._build_net(self.bus.endpoint(self.cfg.callsign))
         self.sim_chk.configure(state="normal")
         self.sim_chk.select()
         self.channel_seg.set("loopback")
@@ -518,11 +519,7 @@ class GuardianApp(ctk.CTk):
             return
         self.audio_transport = transport
         self.cfg.control_channel = "audio"
-        self.net = Orchestrator(
-            self.cfg.callsign, transport,
-            routes=self.routes, on_event=self._on_session_event,
-            payload=self._payload_for_net(),
-        )
+        self.net = self._build_net(transport)
         self.sim_chk.deselect()
         self.sim_chk.configure(state="disabled")
         self.channel_seg.set("audio")
@@ -555,6 +552,14 @@ class GuardianApp(ctk.CTk):
         if self.cfg.payload_backend == "winlink_manual":
             return self._make_payload_backend()
         return None
+
+    def _build_net(self, transport) -> Orchestrator:
+        """Create an Orchestrator on `transport` with current mesh settings."""
+        return Orchestrator(
+            self.cfg.callsign, transport, routes=self.routes,
+            on_event=self._on_session_event, payload=self._payload_for_net(),
+            heard=self.heard, auto_route=self.cfg.auto_route, relay=self.cfg.auto_relay,
+        )
 
     def _set_payload_backend(self, name: str) -> None:
         self.cfg.payload_backend = name
@@ -630,6 +635,121 @@ class GuardianApp(ctk.CTk):
         self.sessions_box.insert("end", f"{'ID':<6}{'STATION':<9}{'DIR':<4}{'NEXT':<9}{'FINAL':<9}{'STATE':<13}NOTE\n")
         for mid, stn, d, nh, fd, st, err in sorted(rows):
             self.sessions_box.insert("end", f"{mid:<6}{stn:<9}{d:<4}{nh:<9}{fd:<9}{st:<13}{err}\n")
+
+    # ---- Mesh tab (smart routing + scanning) -------------------------- #
+    def _build_mesh_tab(self, tab) -> None:
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(3, weight=1)
+
+        opts = ctk.CTkFrame(tab)
+        opts.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+        ctk.CTkLabel(opts, text="Smart routing", font=ctk.CTkFont(size=15, weight="bold")).pack(
+            anchor="w", padx=10, pady=(8, 4))
+        row = ctk.CTkFrame(opts, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=(0, 8))
+        self.auto_route_chk = ctk.CTkCheckBox(
+            row, text="Auto-route (discover next hop via ROUTE_QUERY)", command=self._apply_mesh_opts)
+        if self.cfg.auto_route:
+            self.auto_route_chk.select()
+        self.auto_route_chk.pack(side="left", padx=6)
+        self.auto_relay_chk = ctk.CTkCheckBox(
+            row, text="Auto-relay (forward messages for others — mesh)", command=self._apply_mesh_opts)
+        if self.cfg.auto_relay:
+            self.auto_relay_chk.select()
+        self.auto_relay_chk.pack(side="left", padx=16)
+
+        ctk.CTkLabel(tab, text="Heard stations").grid(row=1, column=0, padx=14, pady=(4, 0), sticky="w")
+        self.heard_box = ctk.CTkTextbox(tab, height=150, font=ctk.CTkFont(family="Consolas", size=12))
+        self.heard_box.grid(row=2, column=0, padx=10, pady=(0, 8), sticky="nsew")
+        tab.grid_rowconfigure(2, weight=1)
+
+        # Channel scanning.
+        scan = ctk.CTkFrame(tab)
+        scan.grid(row=3, column=0, padx=10, pady=8, sticky="nsew")
+        scan.grid_columnconfigure(6, weight=1)
+        scan.grid_rowconfigure(2, weight=1)
+        ctk.CTkLabel(scan, text="Channel scanning", font=ctk.CTkFont(size=15, weight="bold")).grid(
+            row=0, column=0, columnspan=7, padx=10, pady=(8, 4), sticky="w")
+        self.ch_name = ctk.CTkEntry(scan, placeholder_text="Name", width=120)
+        self.ch_name.grid(row=1, column=0, padx=4, pady=4)
+        self.ch_freq = ctk.CTkEntry(scan, placeholder_text="MHz e.g. 145.500", width=120)
+        self.ch_freq.grid(row=1, column=1, padx=4, pady=4)
+        self.ch_mode = ctk.CTkOptionMenu(scan, values=["FM", "USB", "LSB", "DATA"], width=80)
+        self.ch_mode.set("FM")
+        self.ch_mode.grid(row=1, column=2, padx=4, pady=4)
+        ctk.CTkButton(scan, text="Add", width=60, command=self._add_channel).grid(row=1, column=3, padx=4)
+        ctk.CTkButton(scan, text="Remove", width=70, fg_color=GREY, command=self._remove_channel).grid(row=1, column=4, padx=4)
+        ctk.CTkButton(scan, text="Start scan", width=90, command=self._start_scan).grid(row=1, column=5, padx=4)
+        ctk.CTkButton(scan, text="Stop", width=60, fg_color=GREY, command=self._stop_scan).grid(row=1, column=6, padx=4, sticky="w")
+        self.channels_box = ctk.CTkTextbox(scan, font=ctk.CTkFont(family="Consolas", size=12))
+        self.channels_box.grid(row=2, column=0, columnspan=7, padx=8, pady=8, sticky="nsew")
+        self._refresh_channels()
+
+    def _apply_mesh_opts(self) -> None:
+        self.cfg.auto_route = bool(self.auto_route_chk.get())
+        self.cfg.auto_relay = bool(self.auto_relay_chk.get())
+        self.net.auto_route = self.cfg.auto_route
+        self.net.relay = self.cfg.auto_relay
+        self.cfg.save()
+        self.log(f"Mesh: auto_route={self.cfg.auto_route} auto_relay={self.cfg.auto_relay}")
+
+    def _refresh_heard(self) -> None:
+        if not hasattr(self, "heard_box"):
+            return
+        now = time.monotonic()
+        self.heard.prune(now)
+        stations = self.heard.active(now)
+        self.heard_box.delete("1.0", "end")
+        self.heard_box.insert("end", f"{'STATION':<10}{'AGE':<7}{'SEEN':<6}{'LAST':<12}REACHES\n")
+        if not stations:
+            self.heard_box.insert("end", "(nothing heard yet)\n")
+        for s in stations:
+            reaches = ",".join(sorted(s.reaches)) or "-"
+            self.heard_box.insert("end", f"{s.callsign:<10}{int(s.age(now)):<7}{s.count:<6}{s.last_frame:<12}{reaches}\n")
+
+    def _refresh_channels(self) -> None:
+        self.channels_box.delete("1.0", "end")
+        cur = self.scanner.current.name if (self.scanner.enabled and self.scanner.current) else None
+        if not len(self.channel_plan):
+            self.channels_box.insert("end", "(no channels — add one above)\n")
+        for c in self.channel_plan.channels:
+            mark = " <= scanning" if c.name == cur else ""
+            self.channels_box.insert("end", f"{c.name:<16}{c.freq_hz/1e6:>11.4f} MHz  {c.mode}{mark}\n")
+
+    def _add_channel(self) -> None:
+        name = self.ch_name.get().strip()
+        try:
+            hz = int(float(self.ch_freq.get().strip()) * 1_000_000)
+        except ValueError:
+            self.log("Channel: enter frequency in MHz, e.g. 145.500")
+            return
+        if not name:
+            self.log("Channel: enter a name")
+            return
+        self.channel_plan.add(Channel(name, hz, self.ch_mode.get()))
+        self.channel_plan.save()
+        self._refresh_channels()
+        self.log(f"Channel added: {name} {hz/1e6:.4f} MHz {self.ch_mode.get()}")
+
+    def _remove_channel(self) -> None:
+        name = self.ch_name.get().strip()
+        self.channel_plan.remove(name)
+        self.channel_plan.save()
+        self._refresh_channels()
+        self.log(f"Channel removed: {name}")
+
+    def _start_scan(self) -> None:
+        if not self.radio.is_open:
+            self.log("Scan: connect the radio first (Radio tab)")
+            return
+        self.scanner.dwell = self.cfg.scan_dwell
+        self.scanner.start(time.monotonic())
+        self.log("Channel scan started")
+
+    def _stop_scan(self) -> None:
+        self.scanner.stop()
+        self._refresh_channels()
+        self.log("Channel scan stopped")
 
     # ---- Messages tab ------------------------------------------------- #
     def _build_messages_tab(self, tab) -> None:
@@ -1034,7 +1154,11 @@ class GuardianApp(ctk.CTk):
             if self.bus.idle:
                 break
             self.bus.pump()
+        if self.scanner.enabled:
+            self.scanner.tick(now)
+            self._refresh_channels()
         self._refresh_sessions()
+        self._refresh_heard()
         self.after(250, self._net_loop)
 
     def _set_dot(self, dot, on: bool, on_color: str = GREEN) -> None:

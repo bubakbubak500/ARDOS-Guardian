@@ -30,8 +30,15 @@ RTS/DTR VOX fallback — no per-radio CAT reverse-engineering.
 | 1 | UI, station config, control-burst protocol, radio drivers | ✅ done |
 | 2 | VARA handshake state-machine (orchestrator) | ✅ done |
 | 3 | Control modem (AFSK + MFSK) + payload backends + audio channel | ✅ done* |
-| 4 | Smart routing / heard-stations | ⬜ next |
-| 5 | Multi-channel scanning / mesh | ⬜ |
+| 4 | Smart routing / heard-stations | ✅ done |
+| 5 | Multi-channel scanning / mesh | ✅ done* |
+
+**Phases 4 & 5 done in software.** Heard-stations registry (populated from every
+RX frame), ROUTE_QUERY/ROUTE_OFFER route discovery, learned-path memory,
+multi-hop auto-relay (TTL decrement + loop avoidance), and tick-driven channel
+scanning (dwell + activity hold). Tested over the loopback bus: A discovers a
+route to C with no manual entry; A→B→C relay chain delivers end-to-end; TTL=1
+correctly stops relaying. (*) Channel scanning needs a real radio to tune.
 
 **Phase 3 done in software.** Built + tested: AFSK 1200 modem, MFSK-16 HF modem
 (decodes to ~0 dB SNR in loopback), rate-1/2 K=7 convolutional FEC + Viterbi,
@@ -77,6 +84,8 @@ guardian/
     frames.py         ARD control-burst encode/decode, CRC-16, frame types
   routing/
     route_table.py    configurable dest -> preferred/backup next hop
+    heard.py          heard-stations registry (Phase 4)
+  radio/scanner.py    channel plan + tick-driven scanner (Phase 5)
   radio/
     base.py           RadioDriver interface + NullRadio
     hamlib.py         rigctld TCP backend (freq/mode/PTT/S-meter)
@@ -160,27 +169,35 @@ Dev note (this machine): venv at `.venv`, Python at
 `%LOCALAPPDATA%\Programs\Python\Python312`. Headless tests run with
 `PYTHONPATH` = project root and `PYTHONUTF8=1`.
 
+### Source control
+- Remote: `https://github.com/bubakbubak500/ARDOS-Guardian.git` (branch `main`).
+- Commit identity (local repo config): `bubakbubak500` /
+  `bubakbubak500@users.noreply.github.com` (keeps real email out of public
+  history; not set globally).
+- `.venv/`, `build/`, `dist/`, `config.json`, `routes.json`,
+  `.claude/settings.local.json`, and the generated `guardian.ico` are
+  git-ignored. `.gitattributes` normalises text to LF (PS1 stays CRLF).
+
 ---
 
 ## 7. Future plans
 
-**Finish Phase 3 (hardware bring-up only)**
-1. **On-air test** — pick audio in/out + control channel = "audio" in the Net
-   tab, then loopback-cable test (TX into RX), then on-air with a real rig.
-   Add RX level/squelch meters; confirm PTT keys via the radio driver.
+All five planned phases are software-complete. What remains is hardware bring-up
+and polish.
+
+**Hardware bring-up (the big remaining gap)**
+1. **On-air control channel** — Net tab → audio devices + control channel
+   "audio": loopback-cable test (TX into RX), then on-air with a real rig. Add
+   RX level/squelch meters; confirm PTT keys via the radio driver.
 2. **Live `vara_p2p`** — finish VARA connect/notification edge cases, buffer
    drain, disconnect handling; test between two stations.
-3. **MFSK robustness** — soft-decision Viterbi + PLL bit-sync for real fading
-   (current sync is tuned for clean audio).
+3. **Channel scanning on a real radio** — verify tune/mode via rigctld; wire an
+   activity threshold from the S-meter.
 
-**Phase 4 — smart routing**
-- Heard-stations table (populate from RX control frames: who, when, signal).
-- Last-successful-path memory; auto-pick next hop by reachability/quality.
-- Busy/available awareness; operator-approval option for auto-routing.
-
-**Phase 5 — multi-channel / mesh**
-- Dedicated control sub-receiver / channel scanning.
-- Multi-hop relay automation (relay node auto-re-announces toward final dest).
+**Robustness / polish**
+- MFSK soft-decision Viterbi + PLL bit-sync for real fading (current sync is
+  tuned for clean audio).
+- Heard-station signal quality from the modem (SNR) to rank relay candidates.
 - Optional Pat HTTP-API payload backend (automated Winlink without Express).
 
 **Cross-cutting TODO**

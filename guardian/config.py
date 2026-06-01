@@ -88,6 +88,11 @@ class StationConfig:
     # Control-burst channel: "loopback" (simulation) | "audio" (real RF).
     control_channel: str = "loopback"
 
+    # Mesh / smart routing.
+    auto_route: bool = True    # discover a next hop (ROUTE_QUERY) when none known
+    auto_relay: bool = False   # forward received messages toward their final dest
+    scan_dwell: float = 3.0    # seconds per channel when scanning
+
     # Control burst behaviour
     default_ttl: int = 5
 

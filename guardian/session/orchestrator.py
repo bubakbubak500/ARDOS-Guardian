@@ -33,7 +33,10 @@ from enum import Enum
 from typing import Callable
 
 from ..protocol import ControlFrame, Flags, FrameType, Priority
+from ..routing import HeardStations
 from .transport import ControlTransport
+
+DISCOVERY_TIMEOUT = 8.0
 
 # Timeouts (seconds). Generous, since HF bursts are slow.
 ACK_TIMEOUT = 8.0
@@ -46,6 +49,7 @@ MAX_ANNOUNCE = 3
 class SessionState(Enum):
     IDLE = "idle"
     # initiator
+    ROUTE_DISCOVERY = "discovery"  # no route known; ROUTE_QUERY out, gathering offers
     ANNOUNCING = "announcing"      # sent HAVE_MSG, waiting for ACK
     WAITING_BUSY = "waiting"       # peer was busy, will retry
     STARTING_VARA = "starting"     # got ACK, starting VARA session
@@ -82,6 +86,8 @@ class Message:
     tried_backup: bool = False
     t_state: float = 0.0           # monotonic time the state was entered
     error: str = ""
+    offers: list = field(default_factory=list)   # ROUTE_OFFER sources during discovery
+    relayed: bool = False          # this station has already relayed this msg
 
 
 class Orchestrator:
@@ -109,6 +115,10 @@ class Orchestrator:
         auto_complete: bool = False,
         begin_transfer: Callable[[Message], None] | None = None,
         payload=None,
+        heard=None,
+        auto_route: bool = True,
+        relay: bool = False,
+        clock: Callable[[], float] | None = None,
     ):
         self.callsign = callsign.strip().upper()
         self.transport = transport
@@ -118,6 +128,11 @@ class Orchestrator:
         self.auto_complete = auto_complete
         self.begin_transfer = begin_transfer
         self.payload = payload  # PayloadBackend | None
+        self.heard = heard if heard is not None else HeardStations()
+        self.auto_route = auto_route
+        self.relay = relay
+        self._clock = clock
+        self.learned_paths: dict[str, str] = {}   # final_dest -> next_hop that worked
         self.busy = False
         self.sessions: dict[int, Message] = {}
         self._now = 0.0  # last tick time, used when reacting to frames
@@ -137,22 +152,48 @@ class Orchestrator:
     ) -> Message:
         """Originate (or relay) a message toward final_dest."""
         final_dest = final_dest.strip().upper()
-        hop = (next_hop or "").strip().upper()
-        if not hop and self.routes is not None:
-            hop = self.routes.next_hop(final_dest) or ""
-        if not hop:
-            hop = final_dest  # last resort: try to reach the destination directly
         msg = Message(
             msg_id=msg_id, source=self.callsign, final_dest=final_dest,
-            next_hop=hop, priority=priority, ttl=ttl, flags=flags,
+            next_hop="", priority=priority, ttl=ttl, flags=flags,
             body=body, direction="out",
         )
         self.sessions[msg_id] = msg
+
+        hop, how = self._resolve_next_hop(final_dest, explicit=next_hop)
+        if hop:
+            msg.next_hop = hop
+            self._begin_announce(msg)
+            self._emit(msg, f"announcing to {hop} (final {final_dest}, via {how})")
+        elif self.auto_route:
+            # No route known — discover one with a ROUTE_QUERY broadcast.
+            self._enter(msg, SessionState.ROUTE_DISCOVERY)
+            self._send(FrameType.ROUTE_QUERY, msg)
+            self._emit(msg, f"no route to {final_dest} — querying the net")
+        else:
+            msg.next_hop = final_dest  # last resort: try the destination directly
+            self._begin_announce(msg)
+            self._emit(msg, f"announcing directly to {final_dest}")
+        return msg
+
+    def _resolve_next_hop(self, final_dest: str, explicit: str | None = None) -> tuple[str | None, str]:
+        """Pick a next hop: explicit > manual route > learned > directly heard."""
+        hop = (explicit or "").strip().upper()
+        if hop:
+            return hop, "manual"
+        if self.routes is not None:
+            r = self.routes.next_hop(final_dest)
+            if r:
+                return r, "route"
+        if final_dest in self.learned_paths:
+            return self.learned_paths[final_dest], "learned"
+        if self.heard.is_heard(final_dest, self._now):
+            return final_dest, "heard"
+        return None, "none"
+
+    def _begin_announce(self, msg: Message) -> None:
         self._enter(msg, SessionState.ANNOUNCING)
         msg.attempts = 1
         self._send(FrameType.HAVE_MSG, msg)
-        self._emit(msg, f"announcing to {hop} (final {final_dest})")
-        return msg
 
     def cancel(self, msg_id: int) -> None:
         msg = self.sessions.get(msg_id)
@@ -179,6 +220,34 @@ class Orchestrator:
         else:
             self._enter(msg, SessionState.RECEIVED_OK)
             self._emit(msg, "payload received — ready to relay onward")
+            self._maybe_relay(msg)
+
+    def _maybe_relay(self, inbound: Message) -> None:
+        """Mesh: forward a received message toward its final destination."""
+        if not self.relay or inbound.relayed:
+            return
+        if inbound.ttl <= 1:
+            self._emit(inbound, "TTL expired — not relaying")
+            return
+        inbound.relayed = True
+        relay = Message(
+            msg_id=inbound.msg_id, source=self.callsign,
+            final_dest=inbound.final_dest, next_hop="",
+            priority=inbound.priority, ttl=inbound.ttl - 1,
+            flags=inbound.flags, body=inbound.body, direction="out",
+        )
+        self.sessions[inbound.msg_id] = relay  # the outbound leg takes over
+        hop, how = self._resolve_next_hop(relay.final_dest)
+        if hop:
+            relay.next_hop = hop
+            self._begin_announce(relay)
+            self._emit(relay, f"relaying to {hop} (final {relay.final_dest}, ttl {relay.ttl})")
+        elif self.auto_route:
+            self._enter(relay, SessionState.ROUTE_DISCOVERY)
+            self._send(FrameType.ROUTE_QUERY, relay)
+            self._emit(relay, f"relaying — querying route to {relay.final_dest}")
+        else:
+            self._fail(relay, "relay: no route to destination")
 
     def _on_send_done(self, msg: Message, ok: bool) -> None:
         """Initiator payload-send result. End-to-end confirm still via RECEIVED."""
@@ -214,15 +283,46 @@ class Orchestrator:
             elif msg.state is SessionState.RECEIVING and self.auto_complete:
                 # Simulation: pretend the VARA payload has now arrived.
                 self.notify_payload_delivered(msg.msg_id, ok=True)
+            elif msg.state is SessionState.ROUTE_DISCOVERY and elapsed > DISCOVERY_TIMEOUT:
+                self._discovery_timeout(msg)
+
+    def _discovery_timeout(self, msg: Message) -> None:
+        if msg.offers:
+            hop = self._best_offer(msg)
+            msg.next_hop = hop
+            self._begin_announce(msg)
+            self._emit(msg, f"discovered route via {hop} (offers: {','.join(msg.offers)})")
+        else:
+            # Nobody offered — try the destination directly as a last resort.
+            msg.next_hop = msg.final_dest
+            self._begin_announce(msg)
+            self._emit(msg, f"no offers — trying {msg.final_dest} directly")
+
+    def _best_offer(self, msg: Message) -> str:
+        # Prefer the destination itself (direct reach); else the most recently
+        # heard offerer.
+        if msg.final_dest in msg.offers:
+            return msg.final_dest
+        ranked = sorted(
+            msg.offers,
+            key=lambda c: (self.heard.get(c).last_heard if self.heard.get(c) else 0),
+            reverse=True,
+        )
+        return ranked[0]
 
     # ------------------------------------------------------------------ #
     #  Frame handling                                                     #
     # ------------------------------------------------------------------ #
     def _on_frame(self, frame: ControlFrame) -> None:
+        # Every frame we hear means its sender is reachable right now.
+        if frame.source and frame.source != self.callsign:
+            self.heard.record(frame.source, self._now, frame=frame.type.name)
         handler = {
             FrameType.HAVE_MSG: self._rx_have_msg,
             FrameType.ACK_HAVE: self._rx_ack,
             FrameType.BUSY: self._rx_busy,
+            FrameType.ROUTE_QUERY: self._rx_route_query,
+            FrameType.ROUTE_OFFER: self._rx_route_offer,
             FrameType.START_VARA: self._rx_start,
             FrameType.RECEIVED: self._rx_received,
             FrameType.DELIVERED: self._rx_delivered,
@@ -230,6 +330,37 @@ class Orchestrator:
         }.get(frame.type)
         if handler:
             handler(frame)
+
+    def _rx_route_query(self, f: ControlFrame) -> None:
+        """Someone is asking who can reach f.destination. Offer if we can."""
+        if f.source == self.callsign:
+            return
+        dest = f.destination
+        can = (
+            dest == self.callsign
+            or (self.routes is not None and self.routes.next_hop(dest))
+            or dest in self.learned_paths
+            or self.heard.is_heard(dest, self._now)
+        )
+        if can:
+            offer = ControlFrame(
+                type=FrameType.ROUTE_OFFER, source=self.callsign,
+                destination=dest, next_hop=f.source, message_id=f.message_id,
+                priority=f.priority, ttl=f.ttl,
+            )
+            self.transport.send(offer)
+            # Remember that we can reach dest (for our own heard table view).
+            self.heard.record(f.source, self._now, frame="ROUTE_QUERY")
+
+    def _rx_route_offer(self, f: ControlFrame) -> None:
+        """A station offers to relay toward f.destination for our query."""
+        msg = self.sessions.get(f.message_id)
+        if msg and msg.direction == "out" and msg.state is SessionState.ROUTE_DISCOVERY:
+            if f.source not in msg.offers:
+                msg.offers.append(f.source)
+                self._emit(msg, f"route offer from {f.source}")
+        # Note that this station can reach the destination.
+        self.heard.record(f.source, self._now, frame="ROUTE_OFFER", reaches=f.destination)
 
     def _rx_have_msg(self, f: ControlFrame) -> None:
         # Am I the requested next hop (or the final dest with no hop set)?
@@ -286,9 +417,9 @@ class Orchestrator:
         if msg and msg.state is SessionState.TRANSFERRING:
             self._enter(msg, SessionState.CONFIRMED)
             self._emit(msg, f"{f.source} confirmed RECEIVED")
-            if msg.next_hop == msg.final_dest:
-                # Next hop is the final dest; DELIVERED should follow.
-                pass
+            # Learn that this next hop reaches this destination (for next time).
+            if msg.next_hop:
+                self.learned_paths[msg.final_dest] = msg.next_hop
 
     def _rx_delivered(self, f: ControlFrame) -> None:
         msg = self.sessions.get(f.message_id)
