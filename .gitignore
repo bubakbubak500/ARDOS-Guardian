@@ -21,3 +21,8 @@ logs/
 
 # Generated icon (built on demand)
 guardian/assets/guardian.ico
+
+# Scratch files
+_commitmsg.txt
+_smoke*.py
+_icon_preview.png
