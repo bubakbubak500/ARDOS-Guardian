@@ -10,9 +10,12 @@ and connection-ready stubs where hardware/VARA must be present.
 from __future__ import annotations
 
 import datetime
+import os
+import tempfile
 import threading
 import time
 import webbrowser
+from tkinter import filedialog
 
 import customtkinter as ctk
 
@@ -21,6 +24,7 @@ from ..assets import get_ico_path, get_tray_image
 from ..config import StationConfig
 from ..protocol import ControlFrame, FrameType, Priority, Flags
 from ..install import hamlib_installer
+from ..message import Attachment, Folder, MailMessage, MessageStore, Status
 from ..radio import make_driver
 from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.rigctld_launcher import RigctldProcess
@@ -54,6 +58,10 @@ class GuardianApp(ctk.CTk):
         # Control-net: loopback (simulation) transport until the Phase-3 modem
         # exists. Our own orchestrator + on-demand virtual partner stations.
         self.heard = HeardStations()
+        self.mailstore = MessageStore()
+        self.mail_folder = Folder.INBOX
+        self.mail_selected = None
+        self._stored_inbound: set = set()
         self.channel_plan = ChannelPlan.load()
         self.scanner = ChannelScanner(
             self.radio, self.channel_plan, dwell=self.cfg.scan_dwell,
@@ -190,9 +198,10 @@ class GuardianApp(ctk.CTk):
     def _build_tabs(self) -> None:
         self.tabs = ctk.CTkTabview(self)
         self.tabs.grid(row=0, column=1, padx=16, pady=16, sticky="nsew")
-        for name in ("Dashboard", "Radio", "VARA", "Routing", "Net", "Mesh", "Messages", "Log"):
+        for name in ("Dashboard", "Mail", "Radio", "VARA", "Routing", "Net", "Mesh", "Messages", "Log"):
             self.tabs.add(name)
         self._build_dashboard(self.tabs.tab("Dashboard"))
+        self._build_mail_tab(self.tabs.tab("Mail"))
         self._build_radio_tab(self.tabs.tab("Radio"))
         self._build_vara_tab(self.tabs.tab("VARA"))
         self._build_routing_tab(self.tabs.tab("Routing"))
@@ -616,6 +625,29 @@ class GuardianApp(ctk.CTk):
     def _on_session_event(self, message, event: str) -> None:
         self.after(0, lambda: self.log(f"[{message.source}#{message.msg_id}] {event}"))
         self.after(0, self._refresh_sessions)
+        self.after(0, lambda: self._mail_track(message))
+
+    def _mail_track(self, message) -> None:
+        """Reflect session progress into the mailbox (status + inbound storage)."""
+        mid = message.msg_id
+        # Outbound: my queued/sending mail confirmed or failed.
+        if message.direction == "out" and mid in self.mailstore._index:
+            if message.state in (SessionState.DELIVERED, SessionState.CONFIRMED):
+                self.mailstore.set_status(mid, status=Status.DELIVERED, folder=Folder.SENT)
+            elif message.state is SessionState.FAILED:
+                self.mailstore.set_status(mid, status=Status.FAILED)
+        # Inbound: a real payload arrived — store it once.
+        if (message.direction == "in" and message.payload_bytes
+                and mid not in self._stored_inbound
+                and message.state in (SessionState.RECEIVED_OK, SessionState.DELIVERED)):
+            self._stored_inbound.add(mid)
+            try:
+                got = self.mailstore.store_incoming(message.payload_bytes, self.cfg.callsign,
+                                                    via=message.source)
+                self.log(f"Mail received: {got.summary()} -> {got.folder}")
+            except Exception as exc:  # noqa: BLE001 - bad bundle shouldn't crash UI
+                self.log(f"Could not store incoming #{mid}: {exc}")
+        self._refresh_mail_list()
 
     def _on_channel_frame(self, who: str, frame) -> None:
         ts = datetime.datetime.now().strftime("%H:%M:%S")
@@ -635,6 +667,250 @@ class GuardianApp(ctk.CTk):
         self.sessions_box.insert("end", f"{'ID':<6}{'STATION':<9}{'DIR':<4}{'NEXT':<9}{'FINAL':<9}{'STATE':<13}NOTE\n")
         for mid, stn, d, nh, fd, st, err in sorted(rows):
             self.sessions_box.insert("end", f"{mid:<6}{stn:<9}{d:<4}{nh:<9}{fd:<9}{st:<13}{err}\n")
+
+    # ---- Mail tab (Winlink-like mailbox) ------------------------------ #
+    _FOLDERS = [("Inbox", Folder.INBOX), ("Outbox", Folder.OUTBOX),
+                ("Sent", Folder.SENT), ("Transit", Folder.TRANSIT)]
+
+    def _build_mail_tab(self, tab) -> None:
+        tab.grid_columnconfigure(1, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+
+        side = ctk.CTkFrame(tab, width=170)
+        side.grid(row=0, column=0, padx=(10, 6), pady=10, sticky="ns")
+        ctk.CTkButton(side, text="✎  Compose", command=self._compose_mail).pack(
+            fill="x", padx=10, pady=(12, 8))
+        self.mail_folder_btns = {}
+        for label, key in self._FOLDERS:
+            b = ctk.CTkButton(side, text=label, anchor="w", fg_color="transparent",
+                              command=lambda k=key: self._select_folder(k))
+            b.pack(fill="x", padx=10, pady=2)
+            self.mail_folder_btns[key] = b
+        ctk.CTkButton(side, text="Refresh", fg_color=GREY, command=self._refresh_mail_list).pack(
+            fill="x", padx=10, pady=(12, 4))
+
+        right = ctk.CTkFrame(tab, fg_color="transparent")
+        right.grid(row=0, column=1, padx=(6, 10), pady=10, sticky="nsew")
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(1, weight=1)
+        right.grid_rowconfigure(2, weight=1)
+
+        self.mail_title = ctk.CTkLabel(right, text="Inbox", font=ctk.CTkFont(size=16, weight="bold"))
+        self.mail_title.grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.mail_list = ctk.CTkScrollableFrame(right, label_text="Messages")
+        self.mail_list.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
+        self.mail_list.grid_columnconfigure(0, weight=1)
+
+        reader = ctk.CTkFrame(right)
+        reader.grid(row=2, column=0, sticky="nsew")
+        reader.grid_columnconfigure(0, weight=1)
+        reader.grid_rowconfigure(0, weight=1)
+        self.mail_reader = ctk.CTkTextbox(reader, font=ctk.CTkFont(family="Consolas", size=12))
+        self.mail_reader.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 4))
+        self.mail_atts = ctk.CTkFrame(reader, fg_color="transparent")
+        self.mail_atts.grid(row=1, column=0, sticky="ew", padx=8)
+        self.mail_actions = ctk.CTkFrame(reader, fg_color="transparent")
+        self.mail_actions.grid(row=2, column=0, sticky="ew", padx=8, pady=6)
+
+        self._select_folder(Folder.INBOX)
+
+    def _select_folder(self, folder: str) -> None:
+        self.mail_folder = folder
+        for key, b in self.mail_folder_btns.items():
+            b.configure(fg_color=("#3B8ED0" if key == folder else "transparent"))
+        self._refresh_mail_list()
+
+    def _refresh_mail_list(self) -> None:
+        if not hasattr(self, "mail_list"):
+            return
+        counts = self.mailstore.counts()
+        for label, key in self._FOLDERS:
+            self.mail_folder_btns[key].configure(text=f"{label} ({counts.get(key, 0)})")
+        name = next((l for l, k in self._FOLDERS if k == self.mail_folder), self.mail_folder)
+        self.mail_title.configure(text=name)
+        for w in self.mail_list.winfo_children():
+            w.destroy()
+        rows = self.mailstore.list(self.mail_folder)
+        if not rows:
+            ctk.CTkLabel(self.mail_list, text="(empty)", text_color=GREY).grid(row=0, column=0, sticky="w", padx=6, pady=6)
+            return
+        for i, m in enumerate(rows):
+            via = f" via {m['next_hop']}" if m.get("next_hop") else ""
+            att = f" 📎{m['att']}" if m.get("att") else ""
+            txt = (f"#{m['msg_id']}  {m['source']}→{m['final_dest']}{via}\n"
+                   f"    {m.get('subject') or '(no subject)'}  ·  {m['status']}{att}  ·  {m['size']}B")
+            sel = (m["msg_id"] == self.mail_selected)
+            ctk.CTkButton(self.mail_list, text=txt, anchor="w", height=44,
+                          fg_color=("#2A4D69" if sel else "transparent"),
+                          command=lambda mid=m["msg_id"]: self._open_mail(mid)).grid(
+                row=i, column=0, sticky="ew", pady=1)
+
+    def _open_mail(self, msg_id: int) -> None:
+        self.mail_selected = msg_id
+        mail = self.mailstore.get(msg_id)
+        self._refresh_mail_list()
+        for w in self.mail_atts.winfo_children():
+            w.destroy()
+        for w in self.mail_actions.winfo_children():
+            w.destroy()
+        self.mail_reader.delete("1.0", "end")
+        if mail is None:
+            self.mail_reader.insert("end", "(message not found)")
+            return
+        prio = Priority(mail.priority).name if mail.priority in Priority._value2member_map_ else str(mail.priority)
+        path = " → ".join(mail.hops) if mail.hops else "-"
+        self.mail_reader.insert("end",
+            f"From:     {mail.source}\nTo:       {mail.final_dest}\n"
+            f"Subject:  {mail.subject}\nPriority: {prio}\nRoute:    {path}\n"
+            f"Status:   {mail.status}\n{'-'*48}\n{mail.body}\n")
+        if mail.attachments:
+            ctk.CTkLabel(self.mail_atts, text="Attachments:").pack(side="left", padx=(0, 6))
+            for a in mail.attachments:
+                ctk.CTkButton(self.mail_atts, text=f"💾 {a.name} ({a.size}B)", height=26,
+                              command=lambda att=a: self._save_attachment(att)).pack(side="left", padx=4)
+                ctk.CTkButton(self.mail_atts, text="Open", width=50, height=26, fg_color=GREY,
+                              command=lambda att=a: self._open_attachment(att)).pack(side="left", padx=(0, 8))
+        # Folder-specific actions.
+        if mail.folder == Folder.TRANSIT:
+            ctk.CTkButton(self.mail_actions, text="Deliver now", command=lambda: self._deliver_transit(msg_id)).pack(side="left", padx=4)
+        if mail.folder in (Folder.OUTBOX,):
+            ctk.CTkButton(self.mail_actions, text="Send now", command=lambda: self._send_mail(mail)).pack(side="left", padx=4)
+        ctk.CTkButton(self.mail_actions, text="Simulate receive (demo)", fg_color=AMBER,
+                      command=lambda: self._demo_receive(msg_id)).pack(side="left", padx=4)
+        ctk.CTkButton(self.mail_actions, text="Delete", fg_color=RED,
+                      command=lambda: self._delete_mail(msg_id)).pack(side="left", padx=4)
+
+    def _save_attachment(self, att: Attachment) -> None:
+        path = filedialog.asksaveasfilename(initialfile=att.name, title="Save attachment")
+        if path:
+            try:
+                with open(path, "wb") as fh:
+                    fh.write(att.data)
+                self.log(f"Saved attachment to {path}")
+            except OSError as exc:
+                self.log(f"Save failed: {exc}")
+
+    def _open_attachment(self, att: Attachment) -> None:
+        try:
+            p = os.path.join(tempfile.gettempdir(), att.name)
+            with open(p, "wb") as fh:
+                fh.write(att.data)
+            os.startfile(p)  # noqa: S606 - user-initiated open of their own attachment
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"Open failed: {exc}")
+
+    def _delete_mail(self, msg_id: int) -> None:
+        self.mailstore.delete(msg_id)
+        if self.mail_selected == msg_id:
+            self.mail_selected = None
+            self.mail_reader.delete("1.0", "end")
+            for w in self.mail_atts.winfo_children():
+                w.destroy()
+            for w in self.mail_actions.winfo_children():
+                w.destroy()
+        self._refresh_mail_list()
+        self.log(f"Deleted message #{msg_id}")
+
+    def _demo_receive(self, msg_id: int) -> None:
+        mail = self.mailstore.get(msg_id)
+        if mail is None:
+            return
+        got = self.mailstore.store_incoming(mail.to_bundle(), self.cfg.callsign, via=mail.source)
+        self.log(f"(demo) stored incoming #{got.msg_id} into {got.folder}")
+        self._select_folder(got.folder)
+
+    def _compose_mail(self) -> None:
+        win = ctk.CTkToplevel(self)
+        win.title("Compose message")
+        win.geometry("560x520")
+        win.transient(self)
+        win.grid_columnconfigure(1, weight=1)
+        win.grid_rowconfigure(3, weight=1)
+        atts: list[Attachment] = []
+
+        ctk.CTkLabel(win, text="To (final dest)").grid(row=0, column=0, padx=10, pady=8, sticky="w")
+        to = ctk.CTkEntry(win, placeholder_text="OK1CCC")
+        to.grid(row=0, column=1, columnspan=2, padx=10, pady=8, sticky="ew")
+        ctk.CTkLabel(win, text="Subject").grid(row=1, column=0, padx=10, pady=4, sticky="w")
+        subj = ctk.CTkEntry(win)
+        subj.grid(row=1, column=1, padx=10, pady=4, sticky="ew")
+        prio = ctk.CTkOptionMenu(win, values=[p.name for p in Priority], width=130)
+        prio.set(Priority.ROUTINE.name)
+        prio.grid(row=1, column=2, padx=10, pady=4)
+        ctk.CTkLabel(win, text="Message").grid(row=2, column=0, padx=10, pady=4, sticky="nw")
+        body = ctk.CTkTextbox(win)
+        body.grid(row=3, column=1, columnspan=2, padx=10, pady=4, sticky="nsew")
+
+        att_lbl = ctk.CTkLabel(win, text="No attachments", text_color=GREY)
+        att_lbl.grid(row=4, column=1, padx=10, pady=4, sticky="w")
+
+        def add_att():
+            paths = filedialog.askopenfilenames(title="Attach files")
+            for p in paths:
+                try:
+                    with open(p, "rb") as fh:
+                        atts.append(Attachment(os.path.basename(p), fh.read()))
+                except OSError as exc:
+                    self.log(f"Attach failed: {exc}")
+            total = sum(a.size for a in atts)
+            warn = "  ⚠ large for RF" if total > 50_000 else ""
+            att_lbl.configure(text=f"{len(atts)} file(s), {total} B{warn}")
+
+        ctk.CTkButton(win, text="📎 Attach", command=add_att).grid(row=4, column=0, padx=10, pady=4)
+
+        def finish(send: bool):
+            dest = to.get().strip().upper()
+            if send and not dest:
+                self.log("Compose: enter a destination")
+                return
+            mail = MailMessage(
+                msg_id=self.mailstore.next_id(), source=self.cfg.callsign,
+                final_dest=dest, subject=subj.get().strip(),
+                body=body.get("1.0", "end").rstrip("\n"), attachments=list(atts),
+                priority=Priority[prio.get()].value, created=time.time(),
+                hops=[self.cfg.callsign],
+                folder=Folder.OUTBOX if send else Folder.DRAFT,
+                status=Status.QUEUED if send else Status.DRAFT,
+            )
+            self.mailstore.add(mail)
+            self._safe(win.destroy)
+            if send:
+                self._send_mail(mail)
+            self._select_folder(mail.folder)
+
+        bar = ctk.CTkFrame(win, fg_color="transparent")
+        bar.grid(row=5, column=0, columnspan=3, padx=10, pady=10, sticky="e")
+        ctk.CTkButton(bar, text="Send", command=lambda: finish(True)).pack(side="left", padx=6)
+        ctk.CTkButton(bar, text="Save draft", fg_color=GREY, command=lambda: finish(False)).pack(side="left", padx=6)
+        ctk.CTkButton(bar, text="Cancel", fg_color=GREY, command=win.destroy).pack(side="left", padx=6)
+
+    def _send_mail(self, mail: MailMessage) -> None:
+        self.mailstore.set_status(mail.msg_id, status=Status.SENDING)
+        resolved = self.routes.next_hop(mail.final_dest) or mail.final_dest
+        if self.cfg.control_channel == "loopback" and self.sim_chk.get():
+            self._ensure_partner(resolved)
+        self.net.send_message(
+            final_dest=mail.final_dest, body=mail.subject, msg_id=mail.msg_id,
+            priority=Priority(mail.priority), payload_bytes=mail.to_bundle(),
+        )
+        est = mail.est_seconds()
+        self.log(f"Mail #{mail.msg_id} -> {mail.final_dest} queued ({mail.content_size()}B, ~{est}s on-air)")
+        self._refresh_mail_list()
+
+    def _deliver_transit(self, msg_id: int) -> None:
+        mail = self.mailstore.get(msg_id)
+        if mail is None:
+            return
+        self.mailstore.set_status(msg_id, status=Status.SENDING)
+        resolved = self.routes.next_hop(mail.final_dest) or mail.final_dest
+        if self.cfg.control_channel == "loopback" and self.sim_chk.get():
+            self._ensure_partner(resolved)
+        self.net.send_message(
+            final_dest=mail.final_dest, body=mail.subject, msg_id=mail.msg_id,
+            priority=Priority(mail.priority), payload_bytes=mail.to_bundle(),
+        )
+        self.log(f"Forwarding transit #{msg_id} toward {mail.final_dest}")
+        self._refresh_mail_list()
 
     # ---- Mesh tab (smart routing + scanning) -------------------------- #
     def _build_mesh_tab(self, tab) -> None:

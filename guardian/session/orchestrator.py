@@ -80,6 +80,7 @@ class Message:
     ttl: int = 5
     flags: Flags = Flags.NONE
     body: str = ""
+    payload_bytes: bytes | None = None   # transferable bundle (mail), if any
     direction: str = "out"         # "out" (I'm relaying/originating) | "in"
     state: SessionState = SessionState.IDLE
     attempts: int = 0
@@ -149,13 +150,14 @@ class Orchestrator:
         next_hop: str | None = None,
         ttl: int = 5,
         flags: Flags = Flags.NONE,
+        payload_bytes: bytes | None = None,
     ) -> Message:
         """Originate (or relay) a message toward final_dest."""
         final_dest = final_dest.strip().upper()
         msg = Message(
             msg_id=msg_id, source=self.callsign, final_dest=final_dest,
             next_hop="", priority=priority, ttl=ttl, flags=flags,
-            body=body, direction="out",
+            body=body, payload_bytes=payload_bytes, direction="out",
         )
         self.sessions[msg_id] = msg
 
@@ -234,7 +236,8 @@ class Orchestrator:
             msg_id=inbound.msg_id, source=self.callsign,
             final_dest=inbound.final_dest, next_hop="",
             priority=inbound.priority, ttl=inbound.ttl - 1,
-            flags=inbound.flags, body=inbound.body, direction="out",
+            flags=inbound.flags, body=inbound.body,
+            payload_bytes=inbound.payload_bytes, direction="out",
         )
         self.sessions[inbound.msg_id] = relay  # the outbound leg takes over
         hop, how = self._resolve_next_hop(relay.final_dest)

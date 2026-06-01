@@ -58,8 +58,9 @@ class VaraP2PBackend(PayloadBackend):
                 self.on_log(f"VARA P2P: link to {msg.next_hop} not established")
                 done(False)
                 return
-            self.vara.write_data(encode_envelope(msg.msg_id, msg.body.encode("utf-8")))
-            self.on_log(f"VARA P2P: payload #{msg.msg_id} sent to {msg.next_hop}")
+            data = msg.payload_bytes if msg.payload_bytes is not None else msg.body.encode("utf-8")
+            self.vara.write_data(encode_envelope(msg.msg_id, data))
+            self.on_log(f"VARA P2P: payload #{msg.msg_id} sent to {msg.next_hop} ({len(data)} bytes)")
             done(True)
         except Exception as exc:  # noqa: BLE001
             self.on_log(f"VARA P2P send failed: {exc}")
@@ -92,7 +93,8 @@ class VaraP2PBackend(PayloadBackend):
                 self.on_log(f"VARA P2P: CRC failed on #{mid}")
                 done(False)
                 return
-            msg.body = body.decode("utf-8", errors="replace")
+            msg.payload_bytes = body            # raw bundle for the mail store
+            msg.body = ""                       # body lives inside the bundle now
             self.on_log(f"VARA P2P: payload #{mid} received OK ({length} bytes)")
             done(True)
         except Exception as exc:  # noqa: BLE001

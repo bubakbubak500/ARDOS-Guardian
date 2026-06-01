@@ -32,6 +32,9 @@ radios. The aim is no per-radio CAT reverse-engineering.
 - **Live handshake (Net tab)**: drive sessions and watch the on-air channel
 - **System tray + custom icon**: minimise to tray; generated Guardian shield
   icon replaces the default Python/Tk one
+- **Winlink-like mail**: store-and-forward mailbox (Inbox / Outbox / Sent /
+  Transit), text **+ attachments** in a compressed bundle, Compose/read UI with
+  attachment Save/Open, route-history tracking, held-for-relay queue
 
 ## Roadmap
 

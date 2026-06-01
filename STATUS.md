@@ -32,6 +32,7 @@ RTS/DTR VOX fallback — no per-radio CAT reverse-engineering.
 | 3 | Control modem (AFSK + MFSK) + payload backends + audio channel | ✅ done* |
 | 4 | Smart routing / heard-stations | ✅ done |
 | 5 | Multi-channel scanning / mesh | ✅ done* |
+| 6 | Mail layer: store-and-forward + attachments | ✅ done |
 
 **Phases 4 & 5 done in software.** Heard-stations registry (populated from every
 RX frame), ROUTE_QUERY/ROUTE_OFFER route discovery, learned-path memory,
@@ -86,6 +87,9 @@ guardian/
     route_table.py    configurable dest -> preferred/backup next hop
     heard.py          heard-stations registry (Phase 4)
   radio/scanner.py    channel plan + tick-driven scanner (Phase 5)
+  message/            >>> Mail layer (Winlink-like) <<<
+    mail.py           MailMessage + Attachment + ZIP bundle (text + files + hops)
+    store.py          persistent mailbox: inbox/outbox/sent/transit + index
   radio/
     base.py           RadioDriver interface + NullRadio
     hamlib.py         rigctld TCP backend (freq/mode/PTT/S-meter)
@@ -208,7 +212,27 @@ and polish.
 
 ---
 
+## Mail layer (Winlink-like)
+
+`guardian/message/` + the **Mail** UI tab give a store-and-forward mailbox:
+- **MailMessage** = subject + body + attachments, serialised to a compressed
+  ZIP bundle (manifest + body.txt + att/) carried over VARA P2P inside the CRC
+  envelope. Route history (hops) travels in the manifest.
+- **MessageStore** persists to `%APPDATA%\Guardian\mail\` with folders
+  **Inbox** (for me), **Outbox** (queued), **Sent**, **Transit** (held to
+  forward for others — "waiting pickup"). Lightweight `index.json` + per-message
+  `.bundle` files.
+- **Mail tab**: folder sidebar with counts, message list, reading pane with
+  per-attachment Save/Open, Compose dialog (To/Subject/Body/Attach/Priority)
+  with a size + estimated on-air-time hint. Outbound status tracks the session
+  (Outbox→Sent on delivery); inbound bundles auto-file to Inbox or Transit.
+  "Simulate receive (demo)" lets you exercise the receive/read/attachment UX on
+  one PC without a radio.
+
 ## 8. Known issues / watch-list
+- **msg_id uniqueness**: ids are currently local (store max+1). In a real
+  multi-station mesh two stations could mint the same id and collide in the
+  store. Make ids globally unique (source-qualified) before multi-station use.
 - Taskbar/tray icon required an AppUserModelID + forced re-apply to override the
   pythonw default — verify it sticks after CustomTkinter theme changes.
 - `rigctl -l` model ids change between Hamlib versions — the live "Browse all"
