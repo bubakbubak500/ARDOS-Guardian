@@ -1,0 +1,21 @@
+{
+  "callsign": "OK1AAA",
+  "operator_name": "Pavel",
+  "radio_backend": "hamlib",
+  "radio": "IC-7300",
+  "rig_model": 3073,
+  "cat_port": "COM7",
+  "cat_baud": 0,
+  "rigctld_host": "127.0.0.1",
+  "rigctld_port": 4532,
+  "rigctld_autostart": false,
+  "rigctld_path": "rigctld",
+  "ptt_line": "RTS",
+  "audio_input": "USB Audio CODEC RX",
+  "audio_output": "USB Audio CODEC TX",
+  "vara_host": "127.0.0.1",
+  "vara_cmd_port": 8300,
+  "vara_data_port": 8301,
+  "default_ttl": 5,
+  "appearance": "System"
+}

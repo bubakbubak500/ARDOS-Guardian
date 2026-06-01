@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Guardian local state (per-station, not committed)
+config.json
+routes.json
+*.log
+logs/
+
+# Local Claude Code settings (personal, not shared)
+.claude/settings.local.json
+
+# Generated icon (built on demand)
+guardian/assets/guardian.ico
