@@ -24,6 +24,6 @@ Write-Host "Building Guardian.exe ..." -ForegroundColor Cyan
     --collect-submodules pystray `
     --collect-submodules PIL `
     --collect-submodules numpy `
-    "$root\guardian\__main__.py"
+    "$root\guardian_launch.py"
 
 Write-Host "Build complete: dist\Guardian\Guardian.exe" -ForegroundColor Green
