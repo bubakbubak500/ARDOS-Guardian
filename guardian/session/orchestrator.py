@@ -208,6 +208,49 @@ class Orchestrator:
             self._enter(msg, SessionState.CANCELLED)
             self._emit(msg, "cancelled by operator")
 
+    # ------------------------------------------------------------------ #
+    #  Bench testing — drive the payload (VARA) phase directly, bypassing #
+    #  the control-burst handshake. Lets you verify the VARA round-trip   #
+    #  on real radios before the on-air control modem is proven.          #
+    # ------------------------------------------------------------------ #
+    def force_send(self, final_dest, next_hop, msg_id, body="",
+                   payload_bytes=None, priority: Priority = Priority.ROUTINE,
+                   payload=None) -> "Message":
+        """[TEST] Jump straight to TRANSFERRING and push a payload over VARA,
+        as if a next hop had ACKed. No HAVE_MSG/ACK_HAVE exchange happens —
+        use this to test the VARA P2P / Winlink layer in isolation."""
+        backend = payload if payload is not None else self.payload
+        next_hop = next_hop.strip().upper()
+        msg = Message(
+            msg_id=msg_id, source=self.callsign,
+            final_dest=(final_dest or next_hop).strip().upper(),
+            next_hop=next_hop, priority=priority,
+            body=body, payload_bytes=payload_bytes, direction="out",
+        )
+        self.sessions[msg_id] = msg
+        self._enter(msg, SessionState.TRANSFERRING)
+        self._emit(msg, f"[BENCH] force-send to {next_hop} over VARA (control net bypassed)")
+        if backend is not None:
+            backend.start_send(msg, lambda ok, m=msg: self._on_send_done(m, ok))
+        return msg
+
+    def force_receive(self, source, final_dest, msg_id,
+                      priority: Priority = Priority.ROUTINE, payload=None) -> "Message":
+        """[TEST] Jump straight to RECEIVING and LISTEN on VARA for one payload,
+        as if a START_VARA had arrived. No HAVE_MSG/ACK_HAVE exchange happens."""
+        backend = payload if payload is not None else self.payload
+        msg = Message(
+            msg_id=msg_id, source=(source or "BENCH").strip().upper(),
+            final_dest=(final_dest or self.callsign).strip().upper(),
+            next_hop=self.callsign, priority=priority, direction="in",
+        )
+        self.sessions[msg_id] = msg
+        self._enter(msg, SessionState.RECEIVING)
+        self._emit(msg, "[BENCH] force-receive — VARA LISTEN (control net bypassed)")
+        if backend is not None:
+            backend.start_receive(msg, lambda ok, m=msg: self.notify_payload_delivered(m.msg_id, ok))
+        return msg
+
     def notify_payload_delivered(self, msg_id: int, ok: bool = True) -> None:
         """Called (by VARA layer or sim) when an inbound payload finished."""
         msg = self.sessions.get(msg_id)

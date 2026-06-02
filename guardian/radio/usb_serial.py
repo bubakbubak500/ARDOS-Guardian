@@ -45,6 +45,25 @@ class SerialAdapter:
         return f"{self.vid:04X}:{self.pid:04X}"
 
 
+def list_serial_ports() -> list[str]:
+    """COM ports as 'COMx — description' labels (the device is the first token).
+    Empty if pyserial is unavailable."""
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return []
+    out: list[str] = []
+    for p in list_ports.comports():
+        desc = (p.description or "").strip()
+        out.append(f"{p.device} — {desc}" if desc and desc.lower() != "n/a" else p.device)
+    return out
+
+
+def port_device(label: str) -> str:
+    """Extract the bare COM device from a 'COMx — description' label."""
+    return (label or "").split(" ", 1)[0].strip()
+
+
 def detect() -> list[SerialAdapter]:
     """Enumerate COM ports and identify the USB-serial chipset of each."""
     try:

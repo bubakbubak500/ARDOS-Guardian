@@ -48,6 +48,10 @@ class VaraClient:
         self.state = VaraState()
         # Callback for asynchronous command-port notifications (UI/log hook).
         self.on_notification: Callable[[str], None] | None = None
+        # Optional host-PTT hook: called with True/False when VARA signals
+        # "PTT ON"/"PTT OFF". Lets Guardian be the sole keyer (CI-V/RTS/DTR) so
+        # VARA never needs the COM port. None = VARA keys its own PTT as usual.
+        self.on_ptt: Callable[[bool], None] | None = None
 
     # --- connection management ------------------------------------------
     def connect(self, timeout: float = 3.0) -> None:
@@ -180,6 +184,14 @@ class VaraClient:
             self.state.link_state = "DISCONNECTED"
         elif upper.startswith("PENDING") or upper.startswith("CONNECTING"):
             self.state.link_state = "CONNECTING"
+        elif upper == "PTT ON" or upper == "PTT OFF":
+            # VARA wants to key/unkey. If a host-PTT hook is wired, Guardian does
+            # the actual keying (so VARA needs no COM port of its own).
+            if self.on_ptt is not None:
+                try:
+                    self.on_ptt(upper == "PTT ON")
+                except Exception:
+                    pass
         if self.on_notification is not None:
             try:
                 self.on_notification(text)

@@ -24,22 +24,96 @@ from .afsk import AFSKModem
 
 
 def list_audio_devices() -> tuple[list[str], list[str]]:
-    """Return (input_device_names, output_device_names). Empty if no backend."""
+    """Return (input_device_names, output_device_names). Empty if no backend.
+
+    Windows enumerates the *same* physical device once per host API (MME,
+    WASAPI, DirectSound, WDM-KS) — and MME even truncates names to 31 chars —
+    so one radio codec otherwise shows up 4+ times under slightly different
+    names. We list devices from a single host API (the default one) so each
+    real device appears exactly once. Falls back to a name-deduped full list if
+    the host-API metadata isn't available.
+    """
     try:
         import sounddevice as sd
     except Exception:
         return [], []
-    inputs, outputs = [], []
     try:
-        for d in sd.query_devices():
-            name = d.get("name", "")
-            if d.get("max_input_channels", 0) > 0:
-                inputs.append(name)
-            if d.get("max_output_channels", 0) > 0:
-                outputs.append(name)
+        devices = list(sd.query_devices())
     except Exception:
         return [], []
+
+    def collect(api_filter) -> tuple[list[str], list[str]]:
+        ins: list[str] = []
+        outs: list[str] = []
+        seen_in: set[str] = set()
+        seen_out: set[str] = set()
+        for d in devices:
+            if api_filter is not None and d.get("hostapi") != api_filter:
+                continue
+            name = (d.get("name", "") or "").strip()
+            if not name:
+                continue
+            if d.get("max_input_channels", 0) > 0 and name not in seen_in:
+                seen_in.add(name)
+                ins.append(name)
+            if d.get("max_output_channels", 0) > 0 and name not in seen_out:
+                seen_out.add(name)
+                outs.append(name)
+        return ins, outs
+
+    try:
+        default_api = sd.default.hostapi
+    except Exception:
+        default_api = None
+    inputs, outputs = collect(default_api)
+    if not inputs and not outputs:        # fallback: every API, deduped by name
+        inputs, outputs = collect(None)
     return inputs, outputs
+
+
+def default_device_names() -> tuple[str | None, str | None]:
+    """(default_input_name, default_output_name) for the default host API, or
+    (None, None) if unavailable. Lets the UI warn when the radio codec is also
+    the Windows default device — Windows would then mix system sounds into it
+    and compete for the device (and put PC beeps on the air)."""
+    try:
+        import sounddevice as sd
+        devs = list(sd.query_devices())
+        ha = sd.query_hostapis(sd.default.hostapi)
+    except Exception:
+        return None, None
+    di = ha.get("default_input_device", -1)
+    do = ha.get("default_output_device", -1)
+    in_name = (devs[di].get("name", "") or "").strip() if 0 <= di < len(devs) else None
+    out_name = (devs[do].get("name", "") or "").strip() if 0 <= do < len(devs) else None
+    return in_name, out_name
+
+
+def resolve_device(name: str, kind: str = "input"):
+    """Resolve a device *name* to a unique device *index* on the default host
+    API. Opening a stream by name is ambiguous on Windows because the same name
+    exists under MME/DirectSound/WASAPI/WDM-KS; an index is unambiguous. Returns
+    the int index, or the original name if it can't be resolved (let sd try)."""
+    if not name:
+        return None
+    try:
+        import sounddevice as sd
+        devices = list(sd.query_devices())
+        default_api = sd.default.hostapi
+    except Exception:
+        return name
+    ch_key = "max_input_channels" if kind == "input" else "max_output_channels"
+    target = name.strip()
+    # Prefer an exact-name match on the default host API…
+    for idx, d in enumerate(devices):
+        if (d.get("hostapi") == default_api and d.get(ch_key, 0) > 0
+                and (d.get("name", "") or "").strip() == target):
+            return idx
+    # …else the first exact-name match on any host API.
+    for idx, d in enumerate(devices):
+        if d.get(ch_key, 0) > 0 and (d.get("name", "") or "").strip() == target:
+            return idx
+    return name
 
 
 class AudioControlTransport(ControlTransport):

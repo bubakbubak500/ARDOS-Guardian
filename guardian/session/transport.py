@@ -28,6 +28,19 @@ class ControlTransport:
         raise NotImplementedError
 
 
+class NullTransport(ControlTransport):
+    """A control channel that does nothing — the app's default when the live
+    audio channel is OFF. send() is a no-op and no frames are ever delivered,
+    so the orchestrator exists but the radio stays idle until the operator
+    starts the audio control channel."""
+
+    def __init__(self) -> None:
+        self.on_frame = None
+
+    def send(self, frame: ControlFrame) -> None:
+        return None
+
+
 class _BusEndpoint(ControlTransport):
     def __init__(self, bus: "LoopbackBus", name: str):
         self._bus = bus

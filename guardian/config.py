@@ -64,6 +64,16 @@ class StationConfig:
     # VOX / dumb-radio PTT (only used when radio_backend == "vox")
     ptt_line: str = "RTS"         # "RTS" | "DTR"
 
+    # Experimental: let Guardian key the radio (via its own driver/rigctld) on
+    # VARA's "PTT ON"/"PTT OFF" command-channel signals, so VARA never needs the
+    # COM port. Generic across CI-V / RTS / DTR rigs — set VARA's own PTT to None.
+    vara_host_ptt: bool = False
+
+    # Experimental (Winlink mode): release the COM port + rigctld during the
+    # operator hand-off so Winlink's VARA can own the COM for PTT (older rigs
+    # without VOX). Reclaimed when the operator confirms the transfer.
+    vara_handoff_com: bool = False
+
     # Audio device hints (for VARA / wake detection later)
     audio_input: str = ""
     audio_output: str = ""
@@ -85,8 +95,8 @@ class StationConfig:
     # How the message payload is moved after the handshake.
     payload_backend: str = "vara_p2p"  # "vara_p2p" | "winlink_manual"
 
-    # Control-burst channel: "loopback" (simulation) | "audio" (real RF).
-    control_channel: str = "loopback"
+    # Control-burst channel: "off" (idle) | "audio" (real RF via the radio).
+    control_channel: str = "off"
 
     # Mesh / smart routing.
     auto_route: bool = True    # discover a next hop (ROUTE_QUERY) when none known

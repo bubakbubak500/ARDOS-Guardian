@@ -21,26 +21,52 @@ PromptFn = Callable[[str, object, DoneCb], None]
 class WinlinkManualBackend(PayloadBackend):
     name = "winlink_manual"
 
-    def __init__(self, prompt: PromptFn | None = None, on_log=None):
+    def __init__(self, prompt: PromptFn | None = None, on_log=None,
+                 on_acquire=None, on_release=None):
         self.prompt = prompt
         self.on_log = on_log or (lambda m: None)
+        # Soundcard handoff: free Guardian's control channel so the operator's
+        # own Winlink session can own the (single) codec, reclaim it after.
+        self.on_acquire = on_acquire
+        self.on_release = on_release
+
+    def _wrap(self, done: DoneCb) -> DoneCb:
+        """Reclaim the control channel once the operator confirms/cancels."""
+        def wrapped(ok: bool) -> None:
+            if self.on_release:
+                try:
+                    self.on_release()
+                except Exception:
+                    pass
+            done(ok)
+        return wrapped
 
     def start_send(self, msg, done: DoneCb) -> None:
         self.on_log(
             f"Winlink hand-off: send message #{msg.msg_id} to {msg.next_hop} "
             f"(final {msg.final_dest}) via your Winlink session."
         )
+        if self.on_acquire:
+            try:
+                self.on_acquire()
+            except Exception:
+                pass
         if self.prompt:
-            self.prompt("send", msg, done)
+            self.prompt("send", msg, self._wrap(done))
         else:
-            done(True)  # no UI wired (headless/test): assume operator handled it
+            self._wrap(done)(True)  # no UI wired (headless/test)
 
     def start_receive(self, msg, done: DoneCb) -> None:
         self.on_log(
             f"Winlink hand-off: expect message #{msg.msg_id} from {msg.source} "
             f"via Winlink. Confirm when received."
         )
+        if self.on_acquire:
+            try:
+                self.on_acquire()
+            except Exception:
+                pass
         if self.prompt:
-            self.prompt("receive", msg, done)
+            self.prompt("receive", msg, self._wrap(done))
         else:
-            done(True)
+            self._wrap(done)(True)

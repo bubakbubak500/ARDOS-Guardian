@@ -26,16 +26,17 @@ from ..protocol import ControlFrame, FrameType, Priority, Flags
 from ..install import hamlib_installer
 from ..message import Attachment, Folder, MailMessage, MessageStore, Status
 from ..message.forms import FORMS, form_names
-from ..radio import make_driver
+from ..radio import RadioState, make_driver
 from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.rigctld_launcher import RigctldProcess
 from ..modem import make_modem
-from ..modem.audio import AudioControlTransport, list_audio_devices
+from ..modem.audio import AudioControlTransport, default_device_names, list_audio_devices, resolve_device
 from ..payload import make_backend
 from ..radio.scanner import Channel, ChannelPlan, ChannelScanner
 from ..radio.usb_serial import detect as detect_usb_serial
+from ..radio.usb_serial import list_serial_ports, port_device
 from ..routing import HeardStations, Route, RouteTable
-from ..session import LoopbackBus, Orchestrator, SessionState
+from ..session import NullTransport, Orchestrator, SessionState
 from ..vara import VaraClient
 
 POLL_MS = 2000
@@ -55,9 +56,13 @@ class GuardianApp(ctk.CTk):
         self.rigctld = RigctldProcess(self.cfg.rigctld_path)
         self.vara = VaraClient(self.cfg.vara_host, self.cfg.vara_cmd_port, self.cfg.vara_data_port)
         self.vara.on_notification = self._on_vara_notification
+        self._apply_vara_host_ptt()
 
-        # Control-net: loopback (simulation) transport until the Phase-3 modem
-        # exists. Our own orchestrator + on-demand virtual partner stations.
+        # Control-net runs on the real audio modem over the radio. Until the
+        # operator starts the audio control channel it sits on a NullTransport
+        # (idle) — there is no on-PC loopback/simulation path.
+        if self.cfg.control_channel not in ("off", "audio"):
+            self.cfg.control_channel = "off"
         self.heard = HeardStations()
         self.mailstore = MessageStore()
         self.mail_folder = Folder.INBOX
@@ -69,13 +74,11 @@ class GuardianApp(ctk.CTk):
             on_change=lambda ch: self.log(f"Scan -> {ch.name} ({ch.freq_hz/1e6:.4f} MHz)"),
             on_log=self.log,
         )
-        self.bus = LoopbackBus(monitor=self._on_channel_frame)
-        self.partners: dict[str, Orchestrator] = {}
         self.audio_transport = None  # set when control channel = audio
         self._deliver_attempts: dict[int, float] = {}
         self._last_beacon = 0.0
         self._last_autodeliver = 0.0
-        self.net = self._build_net(self.bus.endpoint(self.cfg.callsign))
+        self.net = self._build_net(NullTransport())
 
         ctk.set_appearance_mode(self.cfg.appearance)
         ctk.set_default_color_theme("blue")
@@ -95,6 +98,13 @@ class GuardianApp(ctk.CTk):
         self.tray = None
         self._start_tray()
         self.log(f"{__app_name__} v{__version__} started. Station: {self.cfg.callsign}")
+        # Radio state is polled on a BACKGROUND thread — querying Hamlib means
+        # several blocking CI-V round-trips, which would otherwise freeze the UI
+        # (typing lag) every poll. The UI just reads the cached snapshot.
+        self._radio_state = RadioState(connected=False)
+        self._closing = False
+        self._radio_thread = threading.Thread(target=self._radio_poll_loop, name="radio-poll", daemon=True)
+        self._radio_thread.start()
         self._poll()
         self._net_loop()
 
@@ -238,9 +248,8 @@ class GuardianApp(ctk.CTk):
         self._safe(lambda: self.settings_tabs.set(section))
 
     # ---- Home (guided dashboard) -------------------------------------- #
-    MODES = ["Simulation", "Live · VARA P2P", "Live · Winlink"]
+    MODES = ["Live · VARA P2P", "Live · Winlink"]
     _MODE_DESC = {
-        "Simulation": "Try everything on this PC — no radio needed. Control frames run on a loopback channel.",
         "Live · VARA P2P": "On-air, Guardian moves the payload itself over VARA. Needs radio + audio + VARA.",
         "Live · Winlink": "On-air, you transfer the payload with your own Winlink session. Needs radio + audio.",
     }
@@ -274,7 +283,12 @@ class GuardianApp(ctk.CTk):
         ctk.CTkButton(actions, text="✎ Compose mail", command=self._compose_mail).pack(side="left", padx=6)
         ctk.CTkButton(actions, text="📬 Open Mail", fg_color=GREY, command=lambda: self.tabs.set("Mail")).pack(side="left", padx=6)
         ctk.CTkButton(actions, text="Connect radio", fg_color=GREY, command=self._connect_radio).pack(side="left", padx=6)
-        ctk.CTkButton(actions, text="Connect VARA", fg_color=GREY, command=self._connect_vara).pack(side="left", padx=6)
+        self.vara_btn = ctk.CTkButton(actions, text="Connect VARA", fg_color=GREY, command=self._connect_vara)
+        self.vara_btn.pack(side="left", padx=6)
+        self.channel_btn = ctk.CTkButton(actions, text="Start control ch.", command=self._toggle_control_channel)
+        self.channel_btn.pack(side="left", padx=6)
+        self._refresh_channel_btn()
+        self._refresh_mode_buttons()
 
         sig = ctk.CTkFrame(tab)
         sig.grid(row=3, column=0, padx=10, pady=6, sticky="ew")
@@ -310,8 +324,6 @@ class GuardianApp(ctk.CTk):
         return lbl
 
     def _current_mode(self) -> str:
-        if self.cfg.control_channel == "loopback":
-            return "Simulation"
         return "Live · VARA P2P" if self.cfg.payload_backend == "vara_p2p" else "Live · Winlink"
 
     def _set_mode_desc(self) -> None:
@@ -319,42 +331,42 @@ class GuardianApp(ctk.CTk):
 
     def _set_mode(self, mode: str) -> None:
         self._set_mode_desc()
-        if mode == "Simulation":
-            self._start_loopback_channel()
-        else:
-            self.cfg.payload_backend = "vara_p2p" if "VARA" in mode else "winlink_manual"
-            if hasattr(self, "payload_menu"):
-                self.payload_menu.set(self.cfg.payload_backend)
-            self.net.payload = self._payload_for_net()
-            self._start_audio_channel()
+        self.cfg.payload_backend = "vara_p2p" if "VARA" in mode else "winlink_manual"
+        if hasattr(self, "payload_menu"):
+            self.payload_menu.set(self.cfg.payload_backend)
+        self.net.payload = self._payload_for_net()
+        self._start_audio_channel()
         self.cfg.save()
         self._refresh_setup_checklist()
         self._refresh_station_card()
+        self._refresh_mode_buttons()
         self.log(f"Mode: {mode}")
 
     def _refresh_setup_checklist(self) -> None:
         if not hasattr(self, "checklist"):
             return
-        for w in self.checklist.winfo_children():
-            w.destroy()
         mode = self._current_mode()
         cs = self.cfg.callsign
         radio_ok = self._safe_bool(lambda: self.radio.is_open)
         audio_ok = self.audio_transport is not None
         vara_ok = self.vara.connected
+        # Rebuilding ~15 CustomTkinter widgets is expensive; only do it when the
+        # checklist state actually changes (otherwise it hitched every poll).
+        sig = (mode, bool(cs and cs != "NOCALL"), radio_ok, audio_ok, vara_ok)
+        if sig == getattr(self, "_checklist_sig", None):
+            return
+        self._checklist_sig = sig
+        for w in self.checklist.winfo_children():
+            w.destroy()
 
         steps = [("Set your callsign & station info",
                   bool(cs and cs != "NOCALL"), "Station")]
-        if mode == "Simulation":
-            steps.append(("Control channel: loopback (simulation)",
-                          self.cfg.control_channel == "loopback", "Channel"))
+        steps.append(("Connect your radio (Hamlib or VOX)", radio_ok, "Radio"))
+        steps.append(("Start the audio control channel", audio_ok, "Channel"))
+        if mode == "Live · VARA P2P":
+            steps.append(("Connect VARA (moves the payload)", vara_ok, "VARA"))
         else:
-            steps.append(("Connect your radio (Hamlib or VOX)", radio_ok, "Radio"))
-            steps.append(("Start the audio control channel", audio_ok, "Channel"))
-            if mode == "Live · VARA P2P":
-                steps.append(("Connect VARA (moves the payload)", vara_ok, "VARA"))
-            else:
-                steps.append(("Winlink: you'll transfer the payload yourself", None, "VARA"))
+            steps.append(("Winlink: you'll transfer the payload yourself", None, "VARA"))
         ready = all(s[1] for s in steps if s[1] is not None)
         steps.append((f"Ready — compose in Mail{'' if ready else ' (finish the steps above)'}", ready, None))
 
@@ -369,6 +381,17 @@ class GuardianApp(ctk.CTk):
                 ctk.CTkButton(self.checklist, text="Go", width=44, height=26,
                               command=lambda s=section: self._goto_settings(s)).grid(
                     row=i, column=2, padx=8, pady=3)
+
+    def _refresh_mode_buttons(self) -> None:
+        """In Live·Winlink the payload goes Winlink Express <-> VARA directly, so
+        Guardian must NOT connect to VARA (one master per VARA). Hide its Connect
+        VARA button in that mode; show it for VARA P2P."""
+        if not hasattr(self, "vara_btn"):
+            return
+        if self.cfg.payload_backend == "winlink_manual":
+            self.vara_btn.pack_forget()
+        elif self.vara_btn.winfo_manager() != "pack":   # not currently shown
+            self.vara_btn.pack(side="left", padx=6, before=self.channel_btn)
 
     @staticmethod
     def _safe_bool(fn) -> bool:
@@ -406,17 +429,19 @@ class GuardianApp(ctk.CTk):
         ctk.CTkLabel(tab, text="Control channel", font=ctk.CTkFont(size=15, weight="bold")).grid(
             row=0, column=0, columnspan=3, padx=14, pady=(12, 4), sticky="w")
         ctk.CTkLabel(tab, text="Channel").grid(row=1, column=0, padx=14, pady=6, sticky="w")
-        self.channel_seg = ctk.CTkSegmentedButton(tab, values=["loopback", "audio"], command=self._set_control_channel)
-        self.channel_seg.set(self.cfg.control_channel)
+        self.channel_seg = ctk.CTkSegmentedButton(tab, values=["off", "audio"], command=self._set_control_channel)
+        self.channel_seg.set(self.cfg.control_channel if self.cfg.control_channel in ("off", "audio") else "off")
         self.channel_seg.grid(row=1, column=1, padx=14, pady=6, sticky="w")
-        ctk.CTkLabel(tab, text="loopback = simulation on this PC · audio = real RF via the radio",
+        ctk.CTkLabel(tab, text="off = control net idle (frees the codec for VARA) · audio = real RF via the radio",
                      text_color=GREY).grid(row=2, column=1, padx=14, sticky="w")
 
         ctk.CTkLabel(tab, text="Audio input").grid(row=3, column=0, padx=14, pady=6, sticky="w")
-        self.audio_in_menu = ctk.CTkOptionMenu(tab, values=["(default)"])
+        self.audio_in_menu = ctk.CTkOptionMenu(tab, values=["(default)"],
+                                               command=lambda _=None: self._audio_default_warn())
         self.audio_in_menu.grid(row=3, column=1, padx=14, pady=6, sticky="ew")
         ctk.CTkLabel(tab, text="Audio output").grid(row=4, column=0, padx=14, pady=6, sticky="w")
-        self.audio_out_menu = ctk.CTkOptionMenu(tab, values=["(default)"])
+        self.audio_out_menu = ctk.CTkOptionMenu(tab, values=["(default)"],
+                                                command=lambda _=None: self._audio_default_warn())
         self.audio_out_menu.grid(row=4, column=1, padx=14, pady=6, sticky="ew")
         ctk.CTkButton(tab, text="Refresh devices", command=self._refresh_audio_devices).grid(
             row=3, column=2, padx=8, pady=6)
@@ -480,14 +505,19 @@ class GuardianApp(ctk.CTk):
 
         self._field(tab, 4, "Radio model name", "radio")
         self._field(tab, 5, "Hamlib rig model id", "rig_model")
-        self._field(tab, 6, "CAT / PTT COM port", "cat_port")
+
+        # CAT / PTT COM port — pick from the live list, no typing.
+        ctk.CTkLabel(tab, text="CAT / PTT COM port").grid(row=6, column=0, padx=14, pady=8, sticky="w")
+        cport = ctk.CTkFrame(tab, fg_color="transparent")
+        cport.grid(row=6, column=1, padx=14, pady=8, sticky="ew")
+        cport.grid_columnconfigure(0, weight=1)
+        self.cat_port_menu = ctk.CTkOptionMenu(cport, values=["(none)"])
+        self.cat_port_menu.grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(cport, text="↻", width=34, command=self._refresh_serial_ports).grid(row=0, column=1, padx=(8, 0))
+        self._refresh_serial_ports()
+
         self._field(tab, 7, "rigctld host", "rigctld_host")
         self._field(tab, 8, "rigctld port", "rigctld_port")
-
-        self.autostart_chk = ctk.CTkCheckBox(tab, text="Auto-start rigctld on connect")
-        if self.cfg.rigctld_autostart:
-            self.autostart_chk.select()
-        self.autostart_chk.grid(row=9, column=1, padx=14, pady=6, sticky="w")
 
         ctk.CTkLabel(tab, text="VOX PTT line").grid(row=10, column=0, padx=14, pady=8, sticky="w")
         self.ptt_menu = ctk.CTkOptionMenu(tab, values=["RTS", "DTR"])
@@ -497,9 +527,10 @@ class GuardianApp(ctk.CTk):
         btns = ctk.CTkFrame(tab, fg_color="transparent")
         btns.grid(row=11, column=0, columnspan=2, padx=10, pady=14, sticky="ew")
         ctk.CTkButton(btns, text="Save", command=self._save_config).pack(side="left", padx=6)
-        ctk.CTkButton(btns, text="Connect radio", command=self._connect_radio).pack(side="left", padx=6)
-        ctk.CTkButton(btns, text="Disconnect", fg_color=GREY, command=self._disconnect_radio).pack(side="left", padx=6)
+        self.radio_btn = ctk.CTkButton(btns, text="Connect radio", command=self._toggle_radio)
+        self.radio_btn.pack(side="left", padx=6)
         ctk.CTkButton(btns, text="Test PTT (2s)", fg_color=AMBER, command=self._test_ptt).pack(side="left", padx=6)
+        self._refresh_radio_btn()
 
         # Dependency helpers.
         tools = ctk.CTkFrame(tab)
@@ -531,18 +562,54 @@ class GuardianApp(ctk.CTk):
         self._field(tab, 3, "Command port", "vara_cmd_port")
         self._field(tab, 4, "Data port", "vara_data_port")
 
+        self.vara_hostptt_chk = ctk.CTkCheckBox(
+            tab, text="Guardian keys PTT for VARA (host PTT — experimental)",
+            command=self._toggle_vara_host_ptt)
+        if self.cfg.vara_host_ptt:
+            self.vara_hostptt_chk.select()
+        self.vara_hostptt_chk.grid(row=4, column=2, padx=14, pady=6, sticky="w")
+        ctk.CTkLabel(
+            tab, text="Guardian keys the rig (CI-V/RTS/DTR via Hamlib) on VARA's PTT signal, so VARA\n"
+                      "needs no COM port — generic across radios. Set VARA's own PTT to None/VOX.",
+            text_color=GREY, justify="left").grid(row=5, column=2, padx=14, sticky="w")
+
+        self.vara_handoffcom_chk = ctk.CTkCheckBox(
+            tab, text="Hand the COM port to Winlink during hand-off (experimental)",
+            command=self._toggle_vara_handoff_com)
+        if self.cfg.vara_handoff_com:
+            self.vara_handoffcom_chk.select()
+        self.vara_handoffcom_chk.grid(row=6, column=2, padx=14, pady=6, sticky="w")
+        ctk.CTkLabel(
+            tab, text="Live·Winlink only: release the COM port + rigctld while you transfer in\n"
+                      "Winlink (so its VARA can key PTT on rigs without VOX); reclaimed when you\n"
+                      "confirm the hand-off dialog.",
+            text_color=GREY, justify="left").grid(row=7, column=2, padx=14, sticky="w")
+
         btns = ctk.CTkFrame(tab, fg_color="transparent")
-        btns.grid(row=5, column=0, columnspan=2, padx=10, pady=14, sticky="ew")
+        btns.grid(row=6, column=0, columnspan=2, padx=10, pady=14, sticky="ew")
         ctk.CTkButton(btns, text="Save", command=self._save_config).pack(side="left", padx=6)
         ctk.CTkButton(btns, text="Connect VARA", command=self._connect_vara).pack(side="left", padx=6)
         ctk.CTkButton(btns, text="Disconnect", fg_color=GREY, command=self._disconnect_vara).pack(side="left", padx=6)
         ctk.CTkButton(btns, text="LISTEN ON", command=lambda: self._vara_cmd(lambda: self.vara.listen(True))).pack(side="left", padx=6)
 
-        ctk.CTkLabel(tab, text="VARA notifications:").grid(row=6, column=0, padx=14, pady=(10, 2), sticky="w")
+        ctk.CTkLabel(tab, text="VARA notifications:").grid(row=7, column=0, padx=14, pady=(10, 2), sticky="w")
         self.vara_box = ctk.CTkTextbox(tab, height=200)
-        self.vara_box.grid(row=7, column=0, columnspan=2, padx=14, pady=(0, 14), sticky="nsew")
-        tab.grid_rowconfigure(7, weight=1)
+        self.vara_box.grid(row=8, column=0, columnspan=2, padx=14, pady=(0, 14), sticky="nsew")
+        tab.grid_rowconfigure(8, weight=1)
         self._update_modem_label()
+
+    def _toggle_vara_host_ptt(self) -> None:
+        self.cfg.vara_host_ptt = bool(self.vara_hostptt_chk.get())
+        self._apply_vara_host_ptt()
+        self.log("VARA host-PTT " + ("ENABLED — Guardian will key the rig on VARA's PTT signal "
+                                     "(set VARA's own PTT to None)." if self.cfg.vara_host_ptt
+                                     else "disabled — VARA keys its own PTT."))
+
+    def _toggle_vara_handoff_com(self) -> None:
+        self.cfg.vara_handoff_com = bool(self.vara_handoffcom_chk.get())
+        self.log("Winlink COM hand-off " + ("ENABLED — COM/rigctld released during the hand-off "
+                                            "and reclaimed on confirm." if self.cfg.vara_handoff_com
+                                            else "disabled — Guardian keeps the COM."))
 
     def _switch_vara_mode(self, mode: str) -> None:
         # Remember the ports the user has typed for the *current* mode first.
@@ -622,8 +689,8 @@ class GuardianApp(ctk.CTk):
         ctk.CTkLabel(compose, text="Final destination").grid(row=1, column=0, padx=8, pady=4, sticky="w")
         self.n_final = ctk.CTkEntry(compose, placeholder_text="OK1CCC")
         self.n_final.grid(row=1, column=1, padx=8, pady=4, sticky="ew")
-        ctk.CTkLabel(compose, text="Next hop (blank = route)").grid(row=1, column=2, padx=8, pady=4, sticky="w")
-        self.n_next = ctk.CTkEntry(compose, placeholder_text="OK1DDD")
+        ctk.CTkLabel(compose, text="Next hop (optional)").grid(row=1, column=2, padx=8, pady=4, sticky="w")
+        self.n_next = ctk.CTkEntry(compose, placeholder_text="blank = route, else direct")
         self.n_next.grid(row=1, column=3, padx=8, pady=4, sticky="ew")
 
         ctk.CTkLabel(compose, text="Priority").grid(row=2, column=0, padx=8, pady=4, sticky="w")
@@ -638,11 +705,22 @@ class GuardianApp(ctk.CTk):
         actions = ctk.CTkFrame(compose, fg_color="transparent")
         actions.grid(row=5, column=0, columnspan=4, padx=4, pady=8, sticky="ew")
         ctk.CTkButton(actions, text="Send over net", command=self._net_send).pack(side="left", padx=6)
-        self.sim_chk = ctk.CTkCheckBox(actions, text="Simulate next-hop reply (loopback)")
-        self.sim_chk.select()
-        self.sim_chk.pack(side="left", padx=12)
         self.sim_note = ctk.CTkLabel(actions, text="", text_color=GREY)
         self.sim_note.pack(side="left", padx=6)
+
+        # Bench test: drive the VARA payload phase directly, bypassing the
+        # control-burst handshake. Lets you prove the VARA round-trip on real
+        # radios before the on-air control modem is verified. Uses the fields
+        # above (Next hop / Message). Keep the control channel on Loopback so
+        # the radio's codec stays free for VARA.
+        bench = ctk.CTkFrame(compose, fg_color="transparent")
+        bench.grid(row=6, column=0, columnspan=4, padx=4, pady=(0, 8), sticky="ew")
+        ctk.CTkLabel(bench, text="Bench test (bypass control net):",
+                     text_color=AMBER).pack(side="left", padx=6)
+        ctk.CTkButton(bench, text="Force SEND over VARA", width=170,
+                      command=self._bench_send).pack(side="left", padx=6)
+        ctk.CTkButton(bench, text="Force RECEIVE (LISTEN)", width=180,
+                      command=self._bench_receive).pack(side="left", padx=6)
 
         ctk.CTkLabel(tab, text="Sessions").grid(row=2, column=0, padx=14, pady=(4, 0), sticky="w")
         self.sessions_box = ctk.CTkTextbox(tab, height=140, font=ctk.CTkFont(family="Consolas", size=12))
@@ -658,16 +736,55 @@ class GuardianApp(ctk.CTk):
         if not final:
             self.log("Net send: enter a final destination")
             return
-        next_hop = self.n_next.get().strip().upper()
+        # Next hop is optional: explicit value wins; else use a route if one
+        # exists; else connect directly to the destination. So a single reachable
+        # station only needs the Final destination filled in.
+        explicit = self.n_next.get().strip().upper()
+        next_hop = explicit or (self.routes.next_hop(final) or final)
         msg_id = self.mailstore.next_id(self.cfg.callsign)
-        resolved = next_hop or (self.routes.next_hop(final) or final)
-        if self.sim_chk.get():
-            self._ensure_partner(resolved)
         msg = self.net.send_message(
             final_dest=final, body=self.n_body.get(), msg_id=msg_id,
-            priority=Priority[self.n_prio.get()], next_hop=next_hop or None,
+            priority=Priority[self.n_prio.get()], next_hop=next_hop,
         )
         self.log(f"Net: started session #{msg.msg_id} -> {msg.next_hop} (final {final})")
+
+    # ------------------------------------------------------------------ #
+    #  Bench test — exercise the VARA payload layer with no control net   #
+    # ------------------------------------------------------------------ #
+    def _bench_send(self) -> None:
+        final = self.n_final.get().strip().upper()
+        explicit = self.n_next.get().strip().upper()
+        if not (final or explicit):
+            self.log("Bench: enter a Final destination (and/or Next hop) callsign first")
+            return
+        # VARA always connects to the NEXT HOP, never the final destination.
+        # Resolve it from the route table when the Next-hop field is blank, so
+        # the bench matches the real routed path (e.g. final OK2IPW -> OK2MTW).
+        next_hop = explicit or (self.routes.next_hop(final) or final)
+        if not self.vara.connected:
+            self.log("Bench: VARA command port not connected — connect VARA first")
+            return
+        backend = self._make_payload_backend()
+        msg_id = self.mailstore.next_id(self.cfg.callsign)
+        self.net.force_send(
+            final_dest=final or next_hop,
+            next_hop=next_hop, msg_id=msg_id, body=self.n_body.get(),
+            priority=Priority[self.n_prio.get()], payload=backend,
+        )
+        self.log(f"Bench: force-send #{msg_id} -> {next_hop} (final {final or next_hop}) "
+                 f"over VARA (control net bypassed)")
+
+    def _bench_receive(self) -> None:
+        if not self.vara.connected:
+            self.log("Bench: VARA command port not connected — connect VARA first")
+            return
+        backend = self._make_payload_backend()
+        msg_id = self.mailstore.next_id(self.cfg.callsign)
+        source = self.n_next.get().strip().upper() or "BENCH"
+        self.net.force_receive(
+            source=source, final_dest=self.cfg.callsign, msg_id=msg_id, payload=backend,
+        )
+        self.log(f"Bench: force-receive #{msg_id} — VARA LISTEN (control net bypassed)")
 
     def _refresh_audio_devices(self) -> None:
         inputs, outputs = list_audio_devices()
@@ -680,32 +797,82 @@ class GuardianApp(ctk.CTk):
         if not inputs and not outputs:
             self.channel_status.configure(text="No audio backend/devices found.", text_color=AMBER)
         else:
-            self.channel_status.configure(text=f"{len(inputs)} in / {len(outputs)} out devices", text_color=GREY)
+            self._audio_default_warn(n_in=len(inputs), n_out=len(outputs))
+
+    def _audio_default_warn(self, n_in: int | None = None, n_out: int | None = None) -> bool:
+        """Warn (in channel_status) if a selected device is the Windows default —
+        Windows then competes for the codec and routes system sounds into it.
+        Returns True if the selection is clean (no clash)."""
+        in_name, out_name = default_device_names()
+        sel_in, sel_out = self.audio_in_menu.get(), self.audio_out_menu.get()
+        clash = []
+        if sel_in != "(default)" and in_name and sel_in.strip() == in_name:
+            clash.append("input")
+        if sel_out != "(default)" and out_name and sel_out.strip() == out_name:
+            clash.append("output")
+        if clash:
+            self.channel_status.configure(
+                text=("⚠ Selected " + " & ".join(clash) + " is the WINDOWS DEFAULT device. "
+                      "Windows will compete for it and mix system sounds into your TX. "
+                      "Open Windows Sound settings and set the default to your PC speakers/mic — "
+                      "leave the radio codec for Guardian/VARA only."),
+                text_color=AMBER)
+            return False
+        msg = "Audio devices OK"
+        if n_in is not None:
+            msg = f"{n_in} in / {n_out} out · radio codec is not the Windows default ✓"
+        self.channel_status.configure(text=msg, text_color=GREY)
+        return True
 
     def _set_control_channel(self, mode: str) -> None:
         if mode == "audio":
             self._start_audio_channel()
         else:
-            self._start_loopback_channel()
+            self._stop_audio_channel()
 
-    def _start_loopback_channel(self) -> None:
+    def _toggle_control_channel(self) -> None:
+        """Home-page toggle: same on/off as the Channel segmented button. Often
+        a quick off→on is all it takes to (re)open the codec cleanly."""
+        if self.audio_transport is not None:
+            self._stop_audio_channel()
+        else:
+            self._start_audio_channel()
+        self._refresh_channel_btn()
+
+    def _refresh_channel_btn(self, on: bool | None = None) -> None:
+        if not hasattr(self, "channel_btn"):
+            return
+        if on is None:
+            on = self.audio_transport is not None
+        if on:
+            self.channel_btn.configure(text="Control ch.: ON  (tap to stop)", fg_color=GREEN)
+        else:
+            self.channel_btn.configure(text="Start control ch.", fg_color=("#3B8ED0", "#1F6AA5"))
+
+    def _stop_audio_channel(self) -> None:
+        """Turn the control net OFF: stop the audio modem (frees the codec for
+        VARA) and drop back to an idle NullTransport."""
         if getattr(self, "audio_transport", None) is not None:
             self._safe(self.audio_transport.stop)
             self.audio_transport = None
-        self.cfg.control_channel = "loopback"
-        self.net = self._build_net(self.bus.endpoint(self.cfg.callsign))
-        self.sim_chk.configure(state="normal")
-        self.sim_chk.select()
-        self.channel_seg.set("loopback")
-        self.sim_note.configure(text="Loopback channel (simulation).")
-        self.channel_status.configure(text="Loopback (simulation) active.", text_color=GREY)
-        self.log("Control channel: loopback (simulation)")
+        self.cfg.control_channel = "off"
+        self.net = self._build_net(NullTransport())
+        self.channel_seg.set("off")
+        self.sim_note.configure(text="Control net off.")
+        self.channel_status.configure(text="Control net off (codec free for VARA).", text_color=GREY)
+        self.log("Control channel: off")
 
     def _start_audio_channel(self) -> None:
-        in_dev = None if self.audio_in_menu.get() == "(default)" else self.audio_in_menu.get()
-        out_dev = None if self.audio_out_menu.get() == "(default)" else self.audio_out_menu.get()
-        self.cfg.audio_input = in_dev or ""
-        self.cfg.audio_output = out_dev or ""
+        in_name = self.audio_in_menu.get()
+        out_name = self.audio_out_menu.get()
+        self.cfg.audio_input = "" if in_name == "(default)" else in_name
+        self.cfg.audio_output = "" if out_name == "(default)" else out_name
+        # Open by device INDEX, not name: a name like "USB Audio CODEC" exists
+        # under every Windows host API (MME/DirectSound/WASAPI/WDM-KS), so a
+        # name is ambiguous and sounddevice refuses it. resolve_device() picks
+        # the unique index on the default host API.
+        in_dev = None if in_name == "(default)" else resolve_device(in_name, "input")
+        out_dev = None if out_name == "(default)" else resolve_device(out_name, "output")
         modem = make_modem(self.cfg.active_modem())
         transport = AudioControlTransport(
             modem=modem, ptt=self._radio_ptt,
@@ -715,19 +882,23 @@ class GuardianApp(ctk.CTk):
         try:
             transport.start()
         except Exception as exc:  # noqa: BLE001 - no audio backend / bad device
-            self.log(f"Audio channel failed: {exc} — staying on loopback")
-            self.channel_seg.set("loopback")
+            self.log(f"Audio channel failed: {exc} — control net stays off")
+            self.cfg.control_channel = "off"
+            self.channel_seg.set("off")
             self.channel_status.configure(text=f"Audio failed: {exc}", text_color=RED)
             return
         self.audio_transport = transport
         self.cfg.control_channel = "audio"
         self.net = self._build_net(transport)
-        self.sim_chk.deselect()
-        self.sim_chk.configure(state="disabled")
         self.channel_seg.set("audio")
         self.sim_note.configure(text="LIVE audio over the radio.")
         self.channel_status.configure(text=f"Audio active ({modem.name}).", text_color=GREEN)
         self.log(f"Control channel: audio ({modem.name}) in={in_dev or 'default'} out={out_dev or 'default'}")
+        in_def, out_def = default_device_names()
+        if (in_name != "(default)" and in_def and in_name.strip() == in_def) or \
+           (out_name != "(default)" and out_def and out_name.strip() == out_def):
+            self.log("⚠ Selected audio device is the Windows DEFAULT — set Windows default to your "
+                     "PC speakers/mic so the radio codec is used only by Guardian/VARA.")
 
     def _radio_ptt(self, on: bool) -> None:
         try:
@@ -735,12 +906,67 @@ class GuardianApp(ctk.CTk):
         except Exception as exc:  # noqa: BLE001
             self.log(f"PTT error: {exc}")
 
+    def _apply_vara_host_ptt(self) -> None:
+        """Wire (or unwire) host-PTT: when enabled, Guardian keys the radio on
+        VARA's PTT ON/OFF, so VARA needs no COM port. Set VARA's own PTT to None."""
+        self.vara.on_ptt = self._radio_ptt if self.cfg.vara_host_ptt else None
+
     def _make_payload_backend(self):
+        # Winlink hand-off may also release the COM port (Winlink's own VARA can
+        # then own it for PTT on rigs without VOX). VARA P2P keeps the COM —
+        # Guardian needs rigctld to key PTT itself — so it only frees the codec.
+        if self.cfg.payload_backend == "winlink_manual":
+            acquire, release = self._winlink_acquire, self._winlink_release
+        else:
+            acquire, release = self._suspend_control_channel, self._resume_control_channel
         return make_backend(
             self.cfg.payload_backend, vara=self.vara,
             prompt=self._winlink_prompt, on_log=self.log,
             on_qsy=self._qsy_to, on_unqsy=self._qsy_restore,
+            on_acquire=acquire, on_release=release,
         )
+
+    def _suspend_control_channel(self) -> None:
+        """Release the soundcard so VARA (or Winlink) can own it. No-op unless
+        the control channel is the live audio modem sharing one codec."""
+        t = getattr(self, "audio_transport", None)
+        if t is not None:
+            self._safe(t.stop)
+            self.log("Control channel released — soundcard handed to VARA")
+
+    def _resume_control_channel(self) -> None:
+        """Reclaim the soundcard for the control modem after the payload phase."""
+        t = getattr(self, "audio_transport", None)
+        if t is not None and self.cfg.control_channel == "audio":
+            try:
+                t.start()
+                self.log("Control channel resumed — soundcard reclaimed")
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"Control channel resume failed: {exc}")
+
+    # ---- Winlink hand-off: free codec (+ optionally COM) for Winlink's VARA --
+    def _winlink_acquire(self) -> None:
+        self._suspend_control_channel()        # free the soundcard
+        if self.cfg.vara_handoff_com:
+            self._release_com()                # free the COM/rigctld too
+
+    def _winlink_release(self) -> None:
+        if self.cfg.vara_handoff_com:
+            self._reacquire_com()              # take the COM back first
+        self._resume_control_channel()         # then reclaim the soundcard
+
+    def _release_com(self) -> None:
+        """Drop the COM port (close radio, stop our rigctld) so Winlink's VARA
+        can open it for PTT. Reclaimed on operator confirmation."""
+        self._safe(self.radio.close)
+        self._safe(self.rigctld.stop)
+        self.log("COM/rigctld released — Winlink's VARA can use the COM for PTT")
+        self._refresh_radio_btn(False)
+
+    def _reacquire_com(self) -> None:
+        """Restart rigctld + reopen the radio after the Winlink transfer."""
+        self.log("Reclaiming COM/rigctld after Winlink hand-off…")
+        self._connect_radio()                  # ensure rigctld + open radio
 
     def _qsy_to(self, callsign: str) -> None:
         """Tune the radio to a station's configured frequency (VARA P2P only)."""
@@ -770,18 +996,10 @@ class GuardianApp(ctk.CTk):
         self._qsy_prev = None
 
     def _payload_for_net(self):
-        """Which payload backend the live orchestrator should use.
-
-        On the real audio channel, use the configured backend. In loopback
-        simulation, vara_p2p has no VARA so we run pure control-flow simulation
-        (payload=None, partner auto-completes); winlink_manual is a UI-only
-        dialog and is safe to preview in loopback.
-        """
-        if self.cfg.control_channel == "audio":
-            return self._make_payload_backend()
-        if self.cfg.payload_backend == "winlink_manual":
-            return self._make_payload_backend()
-        return None
+        """The payload backend the live orchestrator should use — always the
+        configured real backend (vara_p2p or winlink_manual). There is no
+        simulation path any more."""
+        return self._make_payload_backend()
 
     def _build_net(self, transport) -> Orchestrator:
         """Create an Orchestrator on `transport` with current mesh settings."""
@@ -795,6 +1013,7 @@ class GuardianApp(ctk.CTk):
         self.cfg.payload_backend = name
         self.net.payload = self._payload_for_net()
         self.log(f"Payload transport set to {name}")
+        self._refresh_mode_buttons()
         if hasattr(self, "db_station"):
             self._refresh_station_card()
 
@@ -833,16 +1052,6 @@ class GuardianApp(ctk.CTk):
         ctk.CTkButton(btns, text=cancel_label, fg_color=GREY, command=lambda: finish(False)).pack(side="left", padx=8)
         win.protocol("WM_DELETE_WINDOW", lambda: finish(False))
 
-    def _ensure_partner(self, callsign: str) -> None:
-        """Spin up a simulated remote station that completes the handshake."""
-        callsign = callsign.strip().upper()
-        if not callsign or callsign == self.cfg.callsign or callsign in self.partners:
-            return
-        self.partners[callsign] = Orchestrator(
-            callsign, self.bus.endpoint(callsign), auto_complete=True,
-            on_event=self._on_session_event,
-        )
-
     def _on_session_event(self, message, event: str) -> None:
         self.after(0, lambda: self.log(f"[{message.source}#{message.msg_id}] {event}"))
         self.after(0, self._refresh_sessions)
@@ -877,17 +1086,21 @@ class GuardianApp(ctk.CTk):
     def _refresh_sessions(self) -> None:
         if not hasattr(self, "sessions_box"):
             return
+        rows = sorted(
+            (m.msg_id, self.net.callsign, m.direction, m.next_hop, m.final_dest, m.state.value, m.error)
+            for m in self.net.sessions.values()
+        )
+        if rows:
+            text = f"{'ID':<6}{'STATION':<9}{'DIR':<4}{'NEXT':<9}{'FINAL':<9}{'STATE':<13}NOTE\n"
+            text += "".join(f"{mid:<6}{stn:<9}{d:<4}{nh:<9}{fd:<9}{st:<13}{err}\n"
+                            for mid, stn, d, nh, fd, st, err in rows)
+        else:
+            text = "(no sessions yet)\n"
+        if text == getattr(self, "_sessions_text", None):
+            return  # nothing changed — don't rewrite the textbox
+        self._sessions_text = text
         self.sessions_box.delete("1.0", "end")
-        rows = []
-        for o in [self.net, *self.partners.values()]:
-            for m in o.sessions.values():
-                rows.append((m.msg_id, o.callsign, m.direction, m.next_hop, m.final_dest, m.state.value, m.error))
-        if not rows:
-            self.sessions_box.insert("end", "(no sessions yet)\n")
-            return
-        self.sessions_box.insert("end", f"{'ID':<6}{'STATION':<9}{'DIR':<4}{'NEXT':<9}{'FINAL':<9}{'STATE':<13}NOTE\n")
-        for mid, stn, d, nh, fd, st, err in sorted(rows):
-            self.sessions_box.insert("end", f"{mid:<6}{stn:<9}{d:<4}{nh:<9}{fd:<9}{st:<13}{err}\n")
+        self.sessions_box.insert("end", text)
 
     # ---- Mail tab (Winlink-like mailbox) ------------------------------ #
     _FOLDERS = [("Inbox", Folder.INBOX), ("Outbox", Folder.OUTBOX),
@@ -1168,9 +1381,6 @@ class GuardianApp(ctk.CTk):
 
     def _send_mail(self, mail: MailMessage) -> None:
         self.mailstore.set_status(mail.msg_id, status=Status.SENDING)
-        resolved = self.routes.next_hop(mail.final_dest) or mail.final_dest
-        if self.cfg.control_channel == "loopback" and self.sim_chk.get():
-            self._ensure_partner(resolved)
         self.net.send_message(
             final_dest=mail.final_dest, body=mail.subject, msg_id=mail.msg_id,
             priority=Priority(mail.priority), payload_bytes=mail.to_bundle(),
@@ -1184,9 +1394,6 @@ class GuardianApp(ctk.CTk):
         if mail is None:
             return
         self.mailstore.set_status(msg_id, status=Status.SENDING)
-        resolved = self.routes.next_hop(mail.final_dest) or mail.final_dest
-        if self.cfg.control_channel == "loopback" and self.sim_chk.get():
-            self._ensure_partner(resolved)
         self.net.send_message(
             final_dest=mail.final_dest, body=mail.subject, msg_id=mail.msg_id,
             priority=Priority(mail.priority), payload_bytes=mail.to_bundle(),
@@ -1242,15 +1449,19 @@ class GuardianApp(ctk.CTk):
         if not hasattr(self, "heard_box"):
             return
         now = time.monotonic()
-        self.heard.prune(now)
+        self.heard.prune(now)            # always prune (cheap, keeps table honest)
         stations = self.heard.active(now)
-        self.heard_box.delete("1.0", "end")
-        self.heard_box.insert("end", f"{'STATION':<10}{'AGE':<7}{'SEEN':<6}{'LAST':<12}REACHES\n")
+        text = f"{'STATION':<10}{'AGE':<7}{'SEEN':<6}{'LAST':<12}REACHES\n"
         if not stations:
-            self.heard_box.insert("end", "(nothing heard yet)\n")
+            text += "(nothing heard yet)\n"
         for s in stations:
             reaches = ",".join(sorted(s.reaches)) or "-"
-            self.heard_box.insert("end", f"{s.callsign:<10}{int(s.age(now)):<7}{s.count:<6}{s.last_frame:<12}{reaches}\n")
+            text += f"{s.callsign:<10}{int(s.age(now)):<7}{s.count:<6}{s.last_frame:<12}{reaches}\n"
+        if text == getattr(self, "_heard_text", None):
+            return
+        self._heard_text = text
+        self.heard_box.delete("1.0", "end")
+        self.heard_box.insert("end", text)
 
     def _refresh_channels(self) -> None:
         self.channels_box.delete("1.0", "end")
@@ -1376,8 +1587,12 @@ class GuardianApp(ctk.CTk):
                 setattr(self.cfg, attr, raw)
         self.cfg.radio_backend = self.backend_menu.get()
         self.cfg.ptt_line = self.ptt_menu.get()
+        self.cfg.cat_port = self._selected_cat_port()
+        if hasattr(self, "vara_hostptt_chk"):
+            self.cfg.vara_host_ptt = bool(self.vara_hostptt_chk.get())
+        if hasattr(self, "vara_handoffcom_chk"):
+            self.cfg.vara_handoff_com = bool(self.vara_handoffcom_chk.get())
         self.cfg.appearance = self.appearance_menu.get()
-        self.cfg.rigctld_autostart = bool(self.autostart_chk.get())
         self.cfg.vara_mode = self.vara_mode_seg.get()
         self.cfg.control_channel = self.channel_seg.get()
         self.cfg.audio_input = "" if self.audio_in_menu.get() == "(default)" else self.audio_in_menu.get()
@@ -1389,6 +1604,7 @@ class GuardianApp(ctk.CTk):
         self.rigctld = RigctldProcess(self.cfg.rigctld_path)
         self.vara = VaraClient(self.cfg.vara_host, self.cfg.vara_cmd_port, self.cfg.vara_data_port)
         self.vara.on_notification = self._on_vara_notification
+        self._apply_vara_host_ptt()
         self.net.callsign = self.cfg.callsign.strip().upper()
         self.net.payload = self._payload_for_net()  # uses the rebuilt VARA client
         self.lbl_call.configure(text=self.cfg.callsign)
@@ -1521,15 +1737,45 @@ class GuardianApp(ctk.CTk):
                     row=0, column=1, padx=10, pady=8)
             self.log(f"USB: {a.device} {a.chipset} ({a.vidpid})")
 
+    def _refresh_serial_ports(self) -> None:
+        """Repopulate the COM-port dropdown from the live serial port list."""
+        ports = list_serial_ports()
+        vals = ports or ["(none)"]
+        self.cat_port_menu.configure(values=vals)
+        match = next((v for v in vals if port_device(v) == self.cfg.cat_port), None)
+        self.cat_port_menu.set(match or vals[0])
+
+    def _selected_cat_port(self) -> str:
+        sel = self.cat_port_menu.get()
+        return "" if sel == "(none)" else port_device(sel)
+
+    def _toggle_radio(self) -> None:
+        if self._safe_bool(lambda: self.radio.is_open):
+            self._disconnect_radio()
+        else:
+            self._connect_radio()
+        self._refresh_radio_btn()
+
+    def _refresh_radio_btn(self, connected: bool | None = None) -> None:
+        if not hasattr(self, "radio_btn"):
+            return
+        if connected is None:
+            connected = self._safe_bool(lambda: self.radio.is_open)
+        if connected:
+            self.radio_btn.configure(text="Disconnect radio", fg_color=GREY)
+        else:
+            self.radio_btn.configure(text="Connect radio", fg_color=("#3B8ED0", "#1F6AA5"))
+
     def _connect_radio(self) -> None:
-        # Auto-start rigctld if the operator asked us to (Hamlib backend only).
-        if self.backend_menu.get() == "hamlib" and self.autostart_chk.get():
+        # rigctld is required for the Hamlib backend, so always make sure a
+        # working one is up (reuse if responsive, replace if wedged). No checkbox.
+        if self.backend_menu.get() == "hamlib":
             try:
                 model = int(self._entries["rig_model"].get() or 0)
             except ValueError:
                 model = 0
-            msg = self.rigctld.start(
-                model, self._entries["cat_port"].get().strip(),
+            msg = self.rigctld.ensure(
+                model, self._selected_cat_port(),
                 int(self._entries["rigctld_port"].get() or 4532),
                 self.cfg.cat_baud,
             )
@@ -1539,10 +1785,12 @@ class GuardianApp(ctk.CTk):
             self.log(f"Radio connected via {self.radio.name}")
         except Exception as exc:  # noqa: BLE001 - surface any backend error
             self.log(f"Radio connect failed: {exc}")
+        self._refresh_radio_btn()
 
     def _disconnect_radio(self) -> None:
         self.radio.close()
         self.log("Radio disconnected")
+        self._refresh_radio_btn()
 
     def _test_ptt(self) -> None:
         try:
@@ -1675,9 +1923,19 @@ class GuardianApp(ctk.CTk):
     # ------------------------------------------------------------------ #
     #  Status polling + logging                                           #
     # ------------------------------------------------------------------ #
+    def _radio_poll_loop(self) -> None:
+        """Background: refresh the cached radio state without blocking the UI."""
+        while not self._closing:
+            try:
+                self._radio_state = self.radio.get_state()
+            except Exception:  # noqa: BLE001 - never let the poller die
+                self._radio_state = RadioState(connected=False)
+            time.sleep(1.0)
+
     def _poll(self) -> None:
-        rs = self.radio.get_state()
+        rs = self._radio_state          # cached snapshot from the background thread
         self._set_dot(self.dot_radio, rs.connected)
+        self._refresh_radio_btn(rs.connected)
         self._set_dot(self.dot_ptt, rs.ptt, on_color=AMBER)
         radio_txt = "Not connected"
         if rs.connected:
@@ -1693,10 +1951,12 @@ class GuardianApp(ctk.CTk):
             vara_txt = f"Connected\nMYCALL: {vs.mycall or '-'}\nLink: {vs.link_state}\nLast: {vs.last_notification or '-'}"
         self.db_vara.configure(text=vara_txt)
 
-        # Sidebar: control-channel + mode + mailbox counts.
+        # Sidebar: control-channel + mode + mailbox counts. The dot is GREEN only
+        # when the audio control modem is actually running (codec open), GREY
+        # otherwise — it reflects the real channel state, not the saved config.
         on_air = self.audio_transport is not None
-        self._set_dot(self.dot_channel, self.cfg.control_channel == "audio" or on_air,
-                      on_color=GREEN if on_air else AMBER)
+        self._set_dot(self.dot_channel, on_air)
+        self._refresh_channel_btn(on_air)
         self.lbl_mode.configure(text=self._current_mode())
         counts = self.mailstore.counts()
         unread = self.mailstore.unread(Folder.INBOX)
@@ -1740,21 +2000,19 @@ class GuardianApp(ctk.CTk):
         """Drive the control-net state machine and deliver queued frames."""
         now = time.monotonic()
         self.net.tick(now)
-        for partner in self.partners.values():
-            partner.tick(now)
         if self.audio_transport is not None:
             self.audio_transport.pump()      # deliver RX frames on this thread
-        for _ in range(8):
-            if self.bus.idle:
-                break
-            self.bus.pump()
         if self.scanner.enabled:
             self.scanner.tick(now)
             self._refresh_channels()
         self._maybe_beacon(now)
         self._auto_deliver_scan(now)
-        self._refresh_sessions()
-        self._refresh_heard()
+        # Rebuilding the session/heard tables is comparatively expensive; do it
+        # ~1 Hz, not every 250 ms tick, so typing stays smooth.
+        self._net_ticks = getattr(self, "_net_ticks", 0) + 1
+        if self._net_ticks % 4 == 0:
+            self._refresh_sessions()
+            self._refresh_heard()
         self.after(250, self._net_loop)
 
     def _maybe_beacon(self, now: float) -> None:
@@ -1808,6 +2066,7 @@ class GuardianApp(ctk.CTk):
         box.see("end")
 
     def _on_close(self) -> None:
+        self._closing = True            # stop the background radio poller
         try:
             self.cfg.appearance = self.appearance_menu.get()
             self.cfg.save()

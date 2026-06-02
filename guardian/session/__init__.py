@@ -1,7 +1,7 @@
 """Session orchestration — the VARA handshake state-machine (Phase 2)."""
 
 from .orchestrator import Message, Orchestrator, SessionState
-from .transport import ControlTransport, LoopbackBus
+from .transport import ControlTransport, LoopbackBus, NullTransport
 
 __all__ = [
     "Message",
@@ -9,4 +9,5 @@ __all__ = [
     "SessionState",
     "ControlTransport",
     "LoopbackBus",
+    "NullTransport",
 ]
