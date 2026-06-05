@@ -68,6 +68,12 @@ class GuardianApp(ctk.CTk):
         self.mail_folder = Folder.INBOX
         self.mail_selected = None
         self._stored_inbound: set = set()
+        # Message-tracking + net-awareness view state (built lazily per row/card,
+        # updated in place each refresh — never re-created per tick).
+        self._session_cards: dict = {}        # msg_id -> {frame, stage labels, …}
+        self._msg_progress: dict[int, int] = {}   # msg_id -> furthest milestone reached
+        self._msg_times: dict[int, list] = {}     # msg_id -> [started_str, updated_str]
+        self._heard_rows: dict = {}           # callsign -> {frame, dot, labels…}
         self.channel_plan = ChannelPlan.load()
         self.scanner = ChannelScanner(
             self.radio, self.channel_plan, dwell=self.cfg.scan_dwell,
@@ -84,8 +90,8 @@ class GuardianApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title(f"{__app_name__} — ARDOS Control Layer  v{__version__}")
-        self.geometry("1040x700")
-        self.minsize(900, 580)
+        self.geometry("1040x780")
+        self.minsize(900, 700)
         self._apply_icon()
 
         self.grid_columnconfigure(1, weight=1)
@@ -174,7 +180,7 @@ class GuardianApp(ctk.CTk):
     def _build_sidebar(self) -> None:
         bar = ctk.CTkFrame(self, width=210, corner_radius=0)
         bar.grid(row=0, column=0, sticky="nsew")
-        bar.grid_rowconfigure(11, weight=1)
+        bar.grid_rowconfigure(12, weight=1)
 
         ctk.CTkLabel(bar, text="GUARDIAN", font=ctk.CTkFont(size=22, weight="bold")).grid(
             row=0, column=0, padx=20, pady=(20, 0))
@@ -198,10 +204,12 @@ class GuardianApp(ctk.CTk):
 
         self.lbl_mailcount = ctk.CTkLabel(bar, text="", justify="left", text_color=GREY)
         self.lbl_mailcount.grid(row=10, column=0, padx=20, pady=(10, 0), sticky="w")
+        self.lbl_netcount = ctk.CTkLabel(bar, text="Net: quiet", justify="left", text_color=GREY)
+        self.lbl_netcount.grid(row=11, column=0, padx=20, pady=(8, 0), sticky="w")
 
         ctk.CTkButton(bar, text="⚙  Settings", fg_color=GREY,
                       command=lambda: self.tabs.set("⚙ Settings")).grid(
-            row=12, column=0, padx=20, pady=(8, 20), sticky="ew")
+            row=13, column=0, padx=20, pady=(8, 20), sticky="ew")
 
     def _status_row(self, parent, row: int, label: str):
         frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -676,6 +684,68 @@ class GuardianApp(ctk.CTk):
         self.log(f"Auto-QSY: {self.cfg.auto_qsy}")
 
     # ---- Net tab (live session orchestration) ------------------------- #
+    # ---- Message-tracking model -------------------------------------- #
+    # A message's life as a small set of operator-meaningful milestones, so a
+    # session can be shown as a "where is it now" progress strip rather than a
+    # raw state name. Two tracks: outbound (I'm sending/relaying) and inbound.
+    _OUT_STAGES = ["Queued", "Announced", "Acked", "Transfer", "Received", "Delivered"]
+    _IN_STAGES = ["Heard", "Acked", "Receiving", "Received", "Delivered"]
+
+    @property
+    def _OUT_INDEX(self):
+        return {
+            SessionState.IDLE: 0, SessionState.ROUTE_DISCOVERY: 0,
+            SessionState.ANNOUNCING: 1, SessionState.WAITING_BUSY: 1,
+            SessionState.STARTING_VARA: 2, SessionState.TRANSFERRING: 3,
+            SessionState.CONFIRMED: 4, SessionState.DELIVERED: 5,
+        }
+
+    @property
+    def _IN_INDEX(self):
+        return {
+            SessionState.HEARD: 0, SessionState.ACKED: 1,
+            SessionState.RECEIVING: 2, SessionState.RECEIVED_OK: 3,
+            SessionState.DELIVERED: 4,
+        }
+
+    def _milestone(self, msg):
+        """(stage names, furthest reached index, status) for a session.
+
+        status ∈ {"progress","done","failed"}. Progress is monotonic — a retry
+        or a stale frame can't drag the strip backwards."""
+        if msg.direction == "out":
+            stages, idx_map = self._OUT_STAGES, self._OUT_INDEX
+        else:
+            stages, idx_map = self._IN_STAGES, self._IN_INDEX
+        prev = self._msg_progress.get(msg.msg_id, 0)
+        reached = max(prev, idx_map.get(msg.state, prev))
+        self._msg_progress[msg.msg_id] = reached
+        if msg.state is SessionState.DELIVERED:
+            status = "done"
+        elif msg.state in (SessionState.FAILED, SessionState.CANCELLED):
+            status = "failed"
+        else:
+            status = "progress"
+        return stages, reached, status
+
+    @staticmethod
+    def _fmt_age(seconds: float) -> str:
+        s = int(seconds)
+        if s < 60:
+            return f"{s}s ago"
+        if s < 3600:
+            return f"{s // 60}m ago"
+        return f"{s // 3600}h ago"
+
+    @staticmethod
+    def _freshness(age: float) -> str:
+        """Colour a heard station by how recently we last heard it."""
+        if age < 120:
+            return GREEN          # fresh — reachable right now
+        if age < 600:
+            return AMBER          # getting stale
+        return GREY               # old, may be gone
+
     def _build_net_tab(self, tab) -> None:
         tab.grid_columnconfigure(0, weight=1)
 
@@ -722,9 +792,18 @@ class GuardianApp(ctk.CTk):
         ctk.CTkButton(bench, text="Force RECEIVE (LISTEN)", width=180,
                       command=self._bench_receive).pack(side="left", padx=6)
 
-        ctk.CTkLabel(tab, text="Sessions").grid(row=2, column=0, padx=14, pady=(4, 0), sticky="w")
-        self.sessions_box = ctk.CTkTextbox(tab, height=140, font=ctk.CTkFont(family="Consolas", size=12))
-        self.sessions_box.grid(row=3, column=0, padx=10, pady=(0, 8), sticky="nsew")
+        hdr = ctk.CTkFrame(tab, fg_color="transparent")
+        hdr.grid(row=2, column=0, padx=14, pady=(4, 0), sticky="ew")
+        ctk.CTkLabel(hdr, text="Message tracking",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
+        self.sessions_summary = ctk.CTkLabel(hdr, text="", text_color=GREY)
+        self.sessions_summary.pack(side="left", padx=10)
+        self.session_panel = ctk.CTkScrollableFrame(tab, height=170)
+        self.session_panel.grid(row=3, column=0, padx=10, pady=(2, 8), sticky="nsew")
+        self.session_panel.grid_columnconfigure(0, weight=1)
+        self._sessions_empty = ctk.CTkLabel(self.session_panel, text="(no messages yet)",
+                                            text_color=GREY)
+        self._sessions_empty.grid(row=0, column=0, padx=8, pady=8, sticky="w")
 
         ctk.CTkLabel(tab, text="On-air channel monitor").grid(row=4, column=0, padx=14, pady=(4, 0), sticky="w")
         self.channel_box = ctk.CTkTextbox(tab, height=140, font=ctk.CTkFont(family="Consolas", size=12))
@@ -1053,6 +1132,18 @@ class GuardianApp(ctk.CTk):
         win.protocol("WM_DELETE_WINDOW", lambda: finish(False))
 
     def _on_session_event(self, message, event: str) -> None:
+        now_s = datetime.datetime.now().strftime("%H:%M:%S")
+        t = self._msg_times.get(message.msg_id)
+        if t is None:
+            self._msg_times[message.msg_id] = [now_s, now_s]
+        else:
+            t[1] = now_s
+        # Advance the progress strip here, on every transition — so a stage the
+        # message passed through is remembered even if the next state (e.g. a
+        # failure) lands before the 1 Hz render runs.
+        idx_map = self._OUT_INDEX if message.direction == "out" else self._IN_INDEX
+        prev = self._msg_progress.get(message.msg_id, 0)
+        self._msg_progress[message.msg_id] = max(prev, idx_map.get(message.state, prev))
         self.after(0, lambda: self.log(f"[{message.source}#{message.msg_id}] {event}"))
         self.after(0, self._refresh_sessions)
         self.after(0, lambda: self._mail_track(message))
@@ -1084,23 +1175,89 @@ class GuardianApp(ctk.CTk):
         self.after(0, lambda: self._append(self.channel_box, f"{ts}  {who:<8} {frame.summary()}"))
 
     def _refresh_sessions(self) -> None:
-        if not hasattr(self, "sessions_box"):
+        if not hasattr(self, "session_panel"):
             return
-        rows = sorted(
-            (m.msg_id, self.net.callsign, m.direction, m.next_hop, m.final_dest, m.state.value, m.error)
-            for m in self.net.sessions.values()
-        )
-        if rows:
-            text = f"{'ID':<6}{'STATION':<9}{'DIR':<4}{'NEXT':<9}{'FINAL':<9}{'STATE':<13}NOTE\n"
-            text += "".join(f"{mid:<6}{stn:<9}{d:<4}{nh:<9}{fd:<9}{st:<13}{err}\n"
-                            for mid, stn, d, nh, fd, st, err in rows)
+        sessions = self.net.sessions
+        self._sessions_empty.grid_remove() if sessions else self._sessions_empty.grid()
+
+        # Build a card the first time we see a message; thereafter just update it
+        # in place (no widget churn per tick — see the typing-lag note in memory).
+        new_mid = False
+        for mid, msg in sessions.items():
+            if mid not in self._session_cards:
+                self._build_session_card(mid, msg)
+                new_mid = True
+            self._update_session_card(mid, msg)
+
+        # Re-order only when the membership changed: newest message on top.
+        if new_mid:
+            for row, mid in enumerate(sorted(self._session_cards, reverse=True)):
+                self._session_cards[mid]["frame"].grid(row=row + 1, column=0,
+                                                        padx=4, pady=4, sticky="ew")
+
+        live = sum(1 for m in sessions.values() if not m.state.terminal)
+        done = sum(1 for m in sessions.values() if m.state is SessionState.DELIVERED)
+        fail = sum(1 for m in sessions.values()
+                   if m.state in (SessionState.FAILED, SessionState.CANCELLED))
+        bits = []
+        if live:
+            bits.append(f"{live} in progress")
+        if done:
+            bits.append(f"{done} delivered")
+        if fail:
+            bits.append(f"{fail} failed")
+        self.sessions_summary.configure(text=" · ".join(bits))
+
+    def _build_session_card(self, mid: int, msg) -> None:
+        card = ctk.CTkFrame(self.session_panel)
+        card.grid_columnconfigure(0, weight=1)
+        head = ctk.CTkLabel(card, anchor="w", font=ctk.CTkFont(size=13, weight="bold"))
+        head.grid(row=0, column=0, padx=10, pady=(7, 0), sticky="ew")
+
+        strip = ctk.CTkFrame(card, fg_color="transparent")
+        strip.grid(row=1, column=0, padx=8, pady=(3, 0), sticky="w")
+        stages = self._OUT_STAGES if msg.direction == "out" else self._IN_STAGES
+        stage_lbls = []
+        for i, name in enumerate(stages):
+            if i:
+                ctk.CTkLabel(strip, text="›", text_color=GREY,
+                             font=ctk.CTkFont(size=12)).pack(side="left", padx=1)
+            lbl = ctk.CTkLabel(strip, text=f"○ {name}", text_color=GREY,
+                               font=ctk.CTkFont(size=12))
+            lbl.pack(side="left", padx=2)
+            stage_lbls.append(lbl)
+
+        note = ctk.CTkLabel(card, anchor="w", text_color=GREY, font=ctk.CTkFont(size=11))
+        note.grid(row=2, column=0, padx=10, pady=(2, 7), sticky="ew")
+        self._session_cards[mid] = {"frame": card, "head": head,
+                                    "stages": stage_lbls, "note": note}
+
+    def _update_session_card(self, mid: int, msg) -> None:
+        card = self._session_cards[mid]
+        stages, reached, status = self._milestone(msg)
+        arrow = "→" if msg.direction == "out" else "←"
+        via = f"  via {msg.next_hop}" if (msg.next_hop and msg.next_hop != msg.final_dest) else ""
+        card["head"].configure(
+            text=f"#{mid}  {msg.source} {arrow} {msg.final_dest}{via}   [{msg.priority.name}]")
+        for i, lbl in enumerate(card["stages"]):
+            name = stages[i]
+            if i < reached:
+                lbl.configure(text=f"✓ {name}", text_color=GREEN)
+            elif i == reached:
+                if status == "done":
+                    lbl.configure(text=f"✓ {name}", text_color=GREEN)
+                elif status == "failed":
+                    lbl.configure(text=f"✗ {name}", text_color=RED)
+                else:
+                    lbl.configure(text=f"● {name}", text_color=AMBER)
+            else:
+                lbl.configure(text=f"○ {name}", text_color=GREY)
+        times = self._msg_times.get(mid)
+        when = f"  ·  started {times[0]}, updated {times[1]}" if times else ""
+        if status == "failed" and msg.error:
+            card["note"].configure(text=f"⚠ {msg.error}{when}", text_color=RED)
         else:
-            text = "(no sessions yet)\n"
-        if text == getattr(self, "_sessions_text", None):
-            return  # nothing changed — don't rewrite the textbox
-        self._sessions_text = text
-        self.sessions_box.delete("1.0", "end")
-        self.sessions_box.insert("end", text)
+            card["note"].configure(text=f"{msg.state.value}{when}", text_color=GREY)
 
     # ---- Mail tab (Winlink-like mailbox) ------------------------------ #
     _FOLDERS = [("Inbox", Folder.INBOX), ("Outbox", Folder.OUTBOX),
@@ -1405,16 +1562,28 @@ class GuardianApp(ctk.CTk):
     def _build_mesh_tab(self, tab) -> None:
         tab.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(tab, text="Heard stations  (routing/relay options are in ⚙ Settings → Mesh)",
-                     font=ctk.CTkFont(size=15, weight="bold")).grid(
-            row=0, column=0, padx=14, pady=(10, 0), sticky="w")
-        self.heard_box = ctk.CTkTextbox(tab, height=150, font=ctk.CTkFont(family="Consolas", size=12))
-        self.heard_box.grid(row=1, column=0, padx=10, pady=(4, 8), sticky="nsew")
-        tab.grid_rowconfigure(1, weight=1)
+        hdr = ctk.CTkFrame(tab, fg_color="transparent")
+        hdr.grid(row=0, column=0, padx=14, pady=(10, 0), sticky="ew")
+        ctk.CTkLabel(hdr, text="Stations heard on the net",
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(side="left")
+        self.heard_summary = ctk.CTkLabel(hdr, text="", text_color=GREY)
+        self.heard_summary.pack(side="left", padx=10)
+        ctk.CTkLabel(tab, text="● heard <2 min   ● <10 min   ● older  ·  "
+                     "click a station to use it as your next hop",
+                     text_color=GREY, font=ctk.CTkFont(size=11)).grid(
+            row=1, column=0, padx=14, pady=(0, 2), sticky="w")
+        self.heard_panel = ctk.CTkScrollableFrame(tab)
+        self.heard_panel.grid(row=2, column=0, padx=10, pady=(2, 8), sticky="nsew")
+        self.heard_panel.grid_columnconfigure(0, weight=1)
+        self._heard_empty = ctk.CTkLabel(self.heard_panel, text="(nothing heard yet — "
+                                         "stations appear here when their control bursts arrive)",
+                                         text_color=GREY)
+        self._heard_empty.grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        tab.grid_rowconfigure(2, weight=1)
 
         # Channel scanning.
         scan = ctk.CTkFrame(tab)
-        scan.grid(row=2, column=0, padx=10, pady=8, sticky="nsew")
+        scan.grid(row=3, column=0, padx=10, pady=8, sticky="nsew")
         scan.grid_columnconfigure(6, weight=1)
         scan.grid_rowconfigure(2, weight=1)
         ctk.CTkLabel(scan, text="Channel scanning", font=ctk.CTkFont(size=15, weight="bold")).grid(
@@ -1446,22 +1615,87 @@ class GuardianApp(ctk.CTk):
                  f"auto_deliver={self.cfg.auto_deliver} beacon={self.cfg.beacon_enabled}")
 
     def _refresh_heard(self) -> None:
-        if not hasattr(self, "heard_box"):
+        if not hasattr(self, "heard_panel"):
             return
         now = time.monotonic()
         self.heard.prune(now)            # always prune (cheap, keeps table honest)
         stations = self.heard.active(now)
-        text = f"{'STATION':<10}{'AGE':<7}{'SEEN':<6}{'LAST':<12}REACHES\n"
-        if not stations:
-            text += "(nothing heard yet)\n"
+        present = {s.callsign for s in stations}
+
+        # Drop rows for stations that have aged out.
+        for call in list(self._heard_rows):
+            if call not in present:
+                self._heard_rows.pop(call)["frame"].destroy()
+
+        self._heard_empty.grid() if not stations else self._heard_empty.grid_remove()
+
+        added = False
         for s in stations:
-            reaches = ",".join(sorted(s.reaches)) or "-"
-            text += f"{s.callsign:<10}{int(s.age(now)):<7}{s.count:<6}{s.last_frame:<12}{reaches}\n"
-        if text == getattr(self, "_heard_text", None):
-            return
-        self._heard_text = text
-        self.heard_box.delete("1.0", "end")
-        self.heard_box.insert("end", text)
+            if s.callsign not in self._heard_rows:
+                self._build_heard_row(s.callsign)
+                added = True
+            self._update_heard_row(s, now)
+
+        # Order freshest-first. Rows are only re-gridded (not re-created), so this
+        # is cheap; do it whenever membership changed.
+        if added:
+            order = [s.callsign for s in stations]   # already freshest-first
+            for row, call in enumerate(order):
+                self._heard_rows[call]["frame"].grid(row=row + 1, column=0,
+                                                      padx=4, pady=3, sticky="ew")
+
+        relays = [s for s in stations if s.reaches]
+        bits = [f"{len(stations)} heard"]
+        if relays:
+            bits.append(f"{len(relays)} can relay")
+        self.heard_summary.configure(text=" · ".join(bits))
+
+        # Mirror a compact summary into the sidebar, visible from any tab.
+        if hasattr(self, "lbl_netcount"):
+            if not stations:
+                self.lbl_netcount.configure(text="Net: quiet")
+            else:
+                hint = f"\nRelay via {relays[0].callsign}" if relays else ""
+                self.lbl_netcount.configure(text=f"Net: {len(stations)} heard{hint}")
+
+    def _build_heard_row(self, call: str) -> None:
+        row = ctk.CTkFrame(self.heard_panel)
+        row.grid_columnconfigure(2, weight=1)
+        dot = ctk.CTkLabel(row, text="●", width=16, font=ctk.CTkFont(size=15))
+        dot.grid(row=0, column=0, padx=(8, 2), pady=5)
+        name = ctk.CTkLabel(row, text=call, width=80, anchor="w",
+                            font=ctk.CTkFont(size=13, weight="bold"))
+        name.grid(row=0, column=1, padx=2, pady=5, sticky="w")
+        meta = ctk.CTkLabel(row, text="", anchor="w", text_color=GREY,
+                            font=ctk.CTkFont(size=11))
+        meta.grid(row=0, column=2, padx=6, pady=5, sticky="w")
+        reaches = ctk.CTkLabel(row, text="", anchor="e", text_color=GREEN,
+                               font=ctk.CTkFont(size=11))
+        reaches.grid(row=0, column=3, padx=(6, 10), pady=5, sticky="e")
+        # The whole row is a click target: use this station as the next hop.
+        for w in (row, dot, name, meta, reaches):
+            w.configure(cursor="hand2")
+            w.bind("<Button-1>", lambda _e, c=call: self._use_as_next_hop(c))
+        self._heard_rows[call] = {"frame": row, "dot": dot, "meta": meta, "reaches": reaches}
+
+    def _use_as_next_hop(self, call: str) -> None:
+        """Click a heard station to drop it into the Net composer's next-hop."""
+        if hasattr(self, "n_next"):
+            self.n_next.delete(0, "end")
+            self.n_next.insert(0, call)
+        self.tabs.set("Net")
+        if hasattr(self, "n_final"):
+            self.n_final.focus_set()
+        self.log(f"Net: next hop set to {call} — add a destination + message, then Send over net")
+
+    def _update_heard_row(self, s, now: float) -> None:
+        row = self._heard_rows[s.callsign]
+        age = s.age(now)
+        row["dot"].configure(text_color=self._freshness(age))
+        snr = f"  ·  SNR {s.last_snr:.0f} dB" if s.last_snr is not None else ""
+        last = f"  ·  {s.last_frame}" if s.last_frame else ""
+        row["meta"].configure(text=f"heard {self._fmt_age(age)}  ·  ×{s.count}{snr}{last}")
+        row["reaches"].configure(text=("→ " + ", ".join(sorted(s.reaches))) if s.reaches else "")
 
     def _refresh_channels(self) -> None:
         self.channels_box.delete("1.0", "end")
