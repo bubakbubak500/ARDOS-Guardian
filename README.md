@@ -11,7 +11,8 @@ radios. The aim is no per-radio CAT reverse-engineering.
 
 ## What works today (Phase 1)
 
-- Modern CustomTkinter UI: Dashboard, Radio, VARA, Routing, Messages, Log
+- Native PySide6 operational UI with Light, Dark and Follow system themes
+- Task-oriented Home, Mail, Network and Log workspaces with native menus
 - Station profile (JSON) — load/save, lives in `%APPDATA%\Guardian\config.json`
 - **Control-burst protocol**: binary `ARD` frames with CRC-16, all frame types
   (`HAVE_MSG`, `ACK_HAVE`, `BUSY`, `ROUTE_QUERY`, `ROUTE_OFFER`, `START_VARA`,
@@ -29,9 +30,9 @@ radios. The aim is no per-radio CAT reverse-engineering.
 - **USB-serial adapter detection**: identifies the chipset (FTDI / CP210x /
   CH340 / PL2303) by VID:PID and links the official driver (no risky bundled
   kernel drivers)
-- **Live handshake (Net tab)**: drive sessions and watch the on-air channel
-- **System tray + custom icon**: minimise to tray; generated Guardian shield
-  icon replaces the default Python/Tk one
+- **Live handshake (Net tab)**: follow active sessions and watch the on-air channel
+- **Custom application icon**: generated Guardian shield replaces the default
+  Python icon
 - **Winlink-like mail**: store-and-forward mailbox (Inbox / Outbox / Sent /
   Transit), text **+ attachments** in a compressed bundle, Compose/read UI with
   attachment Save/Open, route-history tracking, held-for-relay queue
@@ -56,8 +57,9 @@ heard stations and toggles auto-route / auto-relay; channel scanning lives there
 too. (*) scanning needs a real radio to tune.
 
 \*Phase 3 is software-complete: AFSK 1200 (FM) and MFSK-16 (HF, ~0 dB SNR) modems
-with rate-1/2 K=7 convolutional FEC, audio device pickers, and a loopback↔audio
-control-channel selector. Remaining is on-air bring-up over a real radio + codec.
+with rate-1/2 K=7 convolutional FEC and audio device pickers. The production UI
+uses the real audio control channel; deterministic loopback remains an internal
+test transport. Remaining is on-air bring-up over a real radio + codec.
 
 ### Phase 3 — control modem + payload transport
 
@@ -72,17 +74,18 @@ control-channel selector. Remaining is on-air bring-up over a real radio + codec
   * **`winlink_manual`** — Guardian coordinates; the operator moves the message
     with their own Winlink session and confirms via a hand-off dialog.
 
-  Pick the transport in the **Net** tab; the orchestrator is unchanged either way.
+  The production UI uses the real audio transport; the orchestrator remains
+  transport-independent.
 
 ### Phase 2 — handshake state-machine
 
 `guardian/session/` implements the full control choreography
 (`HAVE_MSG → ACK_HAVE → START_VARA → payload → RECEIVED → DELIVERED`, plus
 `BUSY`/`CANCEL`, ACK timeouts, retransmits and backup-hop fallback). It runs
-over a pluggable control transport. Until the Phase-3 audio modem exists, the
-**Net** tab drives it over a loopback channel with simulated next-hop stations,
-so you can watch a real handshake (and the on-air channel monitor) end-to-end
-on one PC. The same orchestrator drops onto the real modem transport later.
+over a pluggable control transport. In the production UI the network is idle
+while the control channel is off and uses `AudioControlTransport` when the
+operator starts it. `LoopbackBus` is retained for deterministic automated
+tests only.
 
 ## Quick start (from source)
 
@@ -92,6 +95,11 @@ on one PC. The same orchestrator drops onto the real modem transport later.
 # run it:
 .\run.ps1
 ```
+
+Guardian starts in the operational Home workspace. Radio, VARA and the live
+audio control channel are started explicitly from Home or the Tools menu.
+Mail is composed into the Outbox and transmitted only after the live control
+channel has been started by the operator.
 
 ## Build a standalone .exe
 
@@ -108,14 +116,13 @@ network needed at runtime.
 Guardian connects to `rigctld`, not the COM port directly. You don't have to
 install Hamlib by hand:
 
-* **In-app:** Radio tab → **Install / locate Hamlib**. Guardian downloads the
+* **In-app:** Tools → **Station readiness**. Guardian downloads the
   official portable Hamlib build from github.com, verifies its SHA256, and
   unpacks it into `%APPDATA%\Guardian\hamlib`. No admin rights.
 * **At setup:** `.\setup.ps1 -WithHamlib` does the same during install.
 
-Then in the Radio tab: pick your rig from the **Radio** dropdown (or
-**Browse all…** for the full live list), tick **Auto-start rigctld on connect**,
-and click **Connect radio** — Guardian launches
+Then open **Settings → Station settings**, choose the Hamlib model and COM
+port, and click **Connect radio** on Home. Guardian launches
 `rigctld -m <model> -r <COM> -t <port>` for you and shuts it down on exit. If
 `rigctld` is already running, it reuses it (multiple apps can share one radio).
 
@@ -131,6 +138,8 @@ guardian/
   routing/             configurable route table
   radio/               base + hamlib (rigctld) + generic_vox drivers
   vara/                VARA TCP command/data client
-  ui/                  CustomTkinter main window
+  services/            snapshots, structured events and safe workers
+  qt/                  PySide6 operational workspaces and theme system
+  operations.py        non-blocking radio, VARA and session controller
   app.py               entry point  (python -m guardian)
 ```

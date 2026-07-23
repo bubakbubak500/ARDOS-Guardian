@@ -1,22 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules
+"""Portable PyInstaller definition for the Guardian Windows application."""
+
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_all
 
+
+root = Path(SPECPATH).resolve()
 datas = []
 binaries = []
 hiddenimports = []
-hiddenimports += collect_submodules('pystray')
-hiddenimports += collect_submodules('PIL')
-hiddenimports += collect_submodules('numpy')
-tmp_ret = collect_all('customtkinter')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('sounddevice')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+for package in ("sounddevice",):
+    package_datas, package_binaries, package_hiddenimports = collect_all(package)
+    datas += package_datas
+    binaries += package_binaries
+    hiddenimports += package_hiddenimports
 
-a = Analysis(
-    ['C:\\Users\\user\\Documents\\Guardian\\guardian_launch.py'],
-    pathex=[],
+analysis = Analysis(
+    [str(root / "guardian_launch.py")],
+    pathex=[str(root)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -27,14 +30,14 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
-pyz = PYZ(a.pure)
+pyz = PYZ(analysis.pure)
 
 exe = EXE(
     pyz,
-    a.scripts,
+    analysis.scripts,
     [],
     exclude_binaries=True,
-    name='Guardian',
+    name="Guardian",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -45,14 +48,16 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['C:\\Users\\user\\Documents\\Guardian\\guardian\\assets\\guardian.ico'],
+    icon=str(root / "guardian" / "assets" / "guardian.ico"),
+    version=str(root / "build" / "version_info.txt"),
 )
-coll = COLLECT(
+
+collection = COLLECT(
     exe,
-    a.binaries,
-    a.datas,
+    analysis.binaries,
+    analysis.datas,
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Guardian',
+    name="Guardian",
 )

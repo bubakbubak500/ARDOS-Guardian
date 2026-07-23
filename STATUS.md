@@ -122,15 +122,15 @@ guardian/
 UI (reorganised for a guided journey): operational tabs **Home · Mail · Net ·
 Mesh · Log** up front, all configuration under **⚙ Settings** (sections:
 Station, Radio, VARA, Channel, Mesh, Routing, Advanced). **Home** has an
-operating-mode selector (Simulation / Live·VARA P2P / Live·Winlink) and a
-mode-aware **setup checklist** that shows what to configure first (with "Go"
-buttons jumping to the right settings section) plus live status cards. The
-sidebar shows callsign, mode, Radio/VARA/PTT/Control-channel dots and mailbox counts.
+operating-mode selector (Live·VARA P2P / Live·Winlink) and a mode-aware
+**setup checklist** that shows what to configure first (with "Go" buttons
+jumping to the right settings section) plus live status cards. The sidebar
+shows callsign, mode, Radio/VARA/PTT/Control-channel dots and mailbox counts.
 
-The control flow is transport-agnostic: the orchestrator talks to a
-`ControlTransport` (LoopbackBus for sim, AudioControlTransport for real RF) and
-a `PayloadBackend` (vara_p2p or winlink_manual). Swapping either does not touch
-the state-machine.
+The control flow is transport-agnostic: the production UI uses
+`NullTransport` while idle and `AudioControlTransport` for real RF.
+`LoopbackBus` remains available to automated tests. Payload is handled by
+`vara_p2p` or `winlink_manual`; swapping either does not touch the state-machine.
 
 ---
 
@@ -153,8 +153,9 @@ the state-machine.
 - **Do NOT bundle USB-serial kernel drivers.** Admin-only, can brick working
   devices (esp. Prolific counterfeit lockouts), licensing grey area. Instead we
   detect the chipset and link the official driver.
-- **Stack:** Python 3.12, CustomTkinter (light, compiles cleanly), PyInstaller,
-  numpy, sounddevice, pyserial, pystray, Pillow.
+- **Stack:** bundled Python 3.11+, PySide6, PyInstaller/Inno Setup, numpy,
+  sounddevice, pyserial and Pillow. The production UI no longer depends on
+  Tk, CustomTkinter or pystray.
 
 ---
 

@@ -5,5 +5,6 @@ VARA FM message transfers over standard amateur radios (via Hamlib/rigctld
 or simple VOX/serial PTT).
 """
 
-__version__ = "0.1.0"
+from ._version import __version__
+
 __app_name__ = "Guardian"

@@ -17,9 +17,9 @@ def _set_app_user_model_id() -> None:
 
 def main() -> None:
     _set_app_user_model_id()
-    from .ui import GuardianApp
-    app = GuardianApp()
-    app.mainloop()
+    from .qt.app import main as qt_main
+
+    qt_main()
 
 
 if __name__ == "__main__":

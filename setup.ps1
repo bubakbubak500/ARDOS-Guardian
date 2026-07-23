@@ -1,5 +1,5 @@
 # One-time setup on a fresh PC: create venv + install dependencies.
-# Requires Python 3.10+ already installed (python.org or winget).
+# Requires Python 3.11+ already installed (python.org or winget).
 #   .\setup.ps1              # Python deps only
 #   .\setup.ps1 -WithHamlib  # also download the Hamlib radio-control binaries
 param([switch]$WithHamlib)
@@ -14,7 +14,7 @@ foreach ($cand in @("py -3.12", "py -3", "python")) {
     if ($cmd) { $pyExe = $cand; break }
 }
 if (-not $pyExe) {
-    Write-Host "No Python found. Install Python 3.12 from python.org and re-run." -ForegroundColor Red
+    Write-Host "No Python found. Install Python 3.11 or newer from python.org and re-run." -ForegroundColor Red
     exit 1
 }
 

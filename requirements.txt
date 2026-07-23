@@ -1,8 +1,7 @@
 # Guardian (ARDOS) runtime dependencies
-customtkinter>=5.2.2
 pyserial>=3.5
-pystray>=0.19.5
 pillow>=10.0.0
+PySide6-Essentials>=6.7,<7
 numpy>=1.26
 sounddevice>=0.4.6
 

@@ -1,0 +1,101 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Verify tag and project version
+        shell: pwsh
+        run: |
+          $version = python -c "from guardian import __version__; print(__version__)"
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match Guardian version $version."
+          }
+
+      - name: Test
+        run: python -m pytest
+
+      - name: Build application
+        shell: pwsh
+        run: .\build.ps1 -SkipTests
+
+      - name: Install Inno Setup
+        id: tools
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = Get-Item "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not $iscc) { throw "Inno Setup was not found." }
+          "iscc=$($iscc.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Build installer and update manifest
+        shell: pwsh
+        run: |
+          .\build_installer.ps1 `
+            -Compiler "${{ steps.tools.outputs.iscc }}" `
+            -ReleaseBaseUrl "https://github.com/bubakbubak500/ARDOS-Guardian/releases/latest/download"
+
+      - name: Package application and checksums
+        shell: pwsh
+        run: |
+          $version = python -c "from guardian import __version__; print(__version__)"
+          $installer = "release\Guardian-$version-setup-win-x64.exe"
+          $signature = Get-AuthenticodeSignature -FilePath $installer
+          if ($signature.Status -ne "NotSigned") {
+            throw "Unexpected installer signing state: $($signature.Status)"
+          }
+          Compress-Archive -Path "dist\Guardian\*" `
+            -DestinationPath "release\Guardian-$version-win-x64.zip"
+          Get-ChildItem "release\Guardian-$version-*" |
+            Get-FileHash -Algorithm SHA256 |
+            ForEach-Object {
+              "$($_.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($_.Path))"
+            } |
+            Set-Content release\SHA256SUMS.txt -Encoding ascii
+
+      - name: Attest release build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            release/Guardian-*-setup-win-x64.exe
+            release/Guardian-*-win-x64.zip
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = python -c "from guardian import __version__; print(__version__)"
+          gh release create "${{ github.ref_name }}" `
+            "release\Guardian-$version-setup-win-x64.exe" `
+            "release\Guardian-$version-win-x64.zip" `
+            "release\release-manifest.json" `
+            "release\SHA256SUMS.txt" `
+            --title "Guardian $version" `
+            --generate-notes `
+            --latest `
+            --verify-tag

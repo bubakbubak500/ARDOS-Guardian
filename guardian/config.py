@@ -88,6 +88,8 @@ class StationConfig:
     vara_fm_data_port: int = 8301
     vara_hf_cmd_port: int = 8300
     vara_hf_data_port: int = 8301
+    vara_fm_path: str = ""           # optional explicit VARAFM.exe location
+    vara_hf_path: str = ""           # optional explicit VARA.exe location
 
     # Control-burst modem: "auto" picks AFSK1200 for FM, MFSK16 for HF.
     control_modem: str = "auto"       # "auto" | "afsk1200" | "mfsk16"

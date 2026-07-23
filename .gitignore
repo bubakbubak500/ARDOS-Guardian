@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-build/
+.python311/
 venv/
 
 # PyInstaller
@@ -26,3 +28,12 @@ guardian/assets/guardian.ico
 _commitmsg.txt
 _smoke*.py
 _icon_preview.png
+.ui-baseline-data/
+.ui-baseline-data-frozen/
+.downloads/
+.build-temp/
+
+# Locally built release artifacts (the small manifest remains versioned)
+release/*.exe
+release/*.zip
+release/SHA256SUMS.txt

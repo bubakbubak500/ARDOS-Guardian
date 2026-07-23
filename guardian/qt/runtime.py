@@ -1,0 +1,166 @@
+"""Read-only runtime context for the Stage 3 Qt shell."""
+
+from __future__ import annotations
+
+import time
+
+from ..config import StationConfig
+from ..install import DependencyKind, DependencyStatus, hamlib_installer
+from ..install.dependencies import inspect_dependencies
+from ..message import Folder, MessageStore
+from ..operations import Operations
+from ..routing import HeardStations, RouteTable
+from ..updates import UpdateInfo, check_for_update, download_installer
+from ..services import (
+    DependencySnapshot,
+    EventBus,
+    MailboxSnapshot,
+    NetworkSnapshot,
+    SnapshotStore,
+    TaskResult,
+    WorkerPool,
+)
+
+
+class ShellRuntime:
+    """Publishes current local state without owning radio/protocol objects."""
+
+    def __init__(self) -> None:
+        self.config = StationConfig.load()
+        self.events = EventBus(history_limit=2_000)
+        self.snapshots = SnapshotStore()
+        self.workers = WorkerPool(max_workers=3, thread_name_prefix="guardian-qt")
+        self.dependency_statuses: tuple[DependencyStatus, ...] = ()
+        self.mailstore = MessageStore()
+        self.routes = RouteTable.load()
+        self.heard = HeardStations()
+        self.operations = Operations(
+            self.config,
+            self.events,
+            self.snapshots,
+            self.workers,
+            self.mailstore,
+            self.routes,
+            self.heard,
+        )
+        self.refresh()
+        self.request_dependency_refresh()
+        self.events.publish("Guardian Monitor shell started.", source="ui")
+
+    def refresh(self) -> None:
+        counts = self.mailstore.counts()
+        current_network = self.snapshots.read().network
+        self.snapshots.update(
+            mailbox=MailboxSnapshot(
+                inbox=counts.get(Folder.INBOX, 0),
+                unread=self.mailstore.unread(Folder.INBOX),
+                outbox=counts.get(Folder.OUTBOX, 0),
+                transit=counts.get(Folder.TRANSIT, 0),
+            ),
+            network=NetworkSnapshot(
+                active_sessions=current_network.active_sessions,
+                heard_stations=len(self.heard.active(time.monotonic())),
+                control_channel_active=current_network.control_channel_active,
+                scanner_active=current_network.scanner_active,
+            ),
+        )
+        self._refreshed_at = time.monotonic()
+
+    def drain_workers(self) -> None:
+        self.workers.drain()
+
+    def tick(self) -> None:
+        self.operations.tick()
+
+    def request_dependency_refresh(self) -> bool:
+        config = self.config
+
+        def completed(result: TaskResult) -> None:
+            if result.error is not None:
+                self.events.publish(
+                    f"Dependency scan failed: {result.error}",
+                    source="dependency",
+                )
+                return
+            self.dependency_statuses = tuple(result.value)
+            by_kind = {item.kind: item for item in self.dependency_statuses}
+            hamlib = by_kind[DependencyKind.HAMLIB]
+            vara_fm = by_kind[DependencyKind.VARA_FM]
+            vara_hf = by_kind[DependencyKind.VARA_HF]
+            self.snapshots.update(
+                dependencies=DependencySnapshot(
+                    hamlib_available=hamlib.available,
+                    hamlib_path=hamlib.executable,
+                    vara_fm_available=vara_fm.available,
+                    vara_hf_available=vara_hf.available,
+                )
+            )
+            self.events.publish("Dependency scan complete.", source="dependency")
+
+        return self.workers.submit(
+            "dependency-scan",
+            lambda: inspect_dependencies(config),
+            completed,
+        )
+
+    def install_hamlib(self, on_complete=None) -> bool:
+        self.events.publish("Installing verified Hamlib package…", source="dependency")
+
+        def install():
+            return hamlib_installer.install(
+                progress=lambda message: self.events.publish(
+                    message, source="dependency"
+                )
+            )
+
+        def completed(result: TaskResult) -> None:
+            if result.error is not None:
+                self.events.publish(
+                    f"Hamlib installation failed: {result.error}",
+                    source="dependency",
+                )
+            else:
+                self.config.rigctld_path = str(result.value)
+                self.config.save()
+                self.events.publish(
+                    "Hamlib installation completed.", source="dependency"
+                )
+                self.request_dependency_refresh()
+            if on_complete is not None:
+                on_complete(result)
+
+        return self.workers.submit("hamlib-install", install, completed)
+
+    def request_update_check(self, on_complete=None) -> bool:
+        def completed(result: TaskResult) -> None:
+            if result.error is not None:
+                self.events.publish(
+                    f"Update check failed: {result.error}",
+                    source="update",
+                )
+            elif result.value is None:
+                self.events.publish("Guardian is up to date.", source="update")
+            else:
+                self.events.publish(
+                    f"Guardian {result.value.version} is available.",
+                    source="update",
+                )
+            if on_complete is not None:
+                on_complete(result)
+
+        return self.workers.submit(
+            "update-check",
+            check_for_update,
+            completed,
+        )
+
+    def download_update(self, info: UpdateInfo, on_complete=None) -> bool:
+        return self.workers.submit(
+            "update-download",
+            lambda: download_installer(info),
+            on_complete,
+        )
+
+    def close(self) -> None:
+        self.operations.close()
+        self.workers.close(wait=False)
