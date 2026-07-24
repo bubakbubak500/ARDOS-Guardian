@@ -260,10 +260,15 @@ class ShellRuntime:
             completed,
         )
 
-    def download_update(self, info: UpdateInfo, on_complete=None) -> bool:
+    def download_update(
+        self,
+        info: UpdateInfo,
+        on_complete=None,
+        progress=None,
+    ) -> bool:
         return self.workers.submit(
             "update-download",
-            lambda: download_installer(info),
+            lambda: download_installer(info, progress=progress),
             on_complete,
         )
 

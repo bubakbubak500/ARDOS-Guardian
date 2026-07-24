@@ -17,6 +17,7 @@ class Response:
     def __init__(self, payload: bytes):
         self.payload = payload
         self.offset = 0
+        self.headers = {"Content-Length": str(len(payload))}
 
     def __enter__(self):
         return self
@@ -103,3 +104,24 @@ def test_download_is_published_only_after_sha256_verification(tmp_path) -> None:
             opener=opener_for(payload),
         )
     assert not (tmp_path / "invalid.exe").exists()
+
+
+def test_download_reports_byte_progress_through_verification(tmp_path) -> None:
+    payload = b"x" * (1024 * 1024 + 17)
+    info = UpdateInfo(
+        "0.3.0",
+        "https://github.com/example/project/releases/download/v0.3.0/setup.exe",
+        hashlib.sha256(payload).hexdigest(),
+    )
+    updates = []
+
+    download_installer(
+        info,
+        destination=tmp_path / "Guardian-0.3.0.exe",
+        opener=opener_for(payload),
+        progress=lambda received, total: updates.append((received, total)),
+    )
+
+    assert updates[0] == (0, len(payload))
+    assert updates[-1] == (len(payload), len(payload))
+    assert len(updates) >= 3

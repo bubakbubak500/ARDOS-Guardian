@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -140,6 +141,7 @@ def download_installer(
     destination: Path | None = None,
     opener=urlopen,
     timeout: float = 60.0,
+    progress: Callable[[int, int | None], None] | None = None,
 ) -> Path:
     _require_trusted_https(info.installer_url)
     target = destination or (
@@ -158,9 +160,27 @@ def download_installer(
                 getattr(response, "geturl", lambda: info.installer_url)()
             )
             _require_trusted_https(final_url)
+            total: int | None = None
+            headers = getattr(response, "headers", None)
+            content_length = (
+                headers.get("Content-Length")
+                if headers is not None and hasattr(headers, "get")
+                else None
+            )
+            if content_length:
+                try:
+                    total = int(content_length)
+                except (TypeError, ValueError):
+                    total = None
+            received = 0
+            if progress is not None:
+                progress(received, total)
             while chunk := response.read(1024 * 1024):
                 digest.update(chunk)
                 out.write(chunk)
+                received += len(chunk)
+                if progress is not None:
+                    progress(received, total)
     except OSError as exc:
         temporary.unlink(missing_ok=True)
         raise UpdateError(dual(
