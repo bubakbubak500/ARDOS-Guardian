@@ -78,6 +78,7 @@ jobs:
             Set-Content release\SHA256SUMS.txt -Encoding ascii
 
       - name: Attest release build provenance
+        if: ${{ !github.event.repository.private }}
         uses: actions/attest@v4
         with:
           subject-path: |
