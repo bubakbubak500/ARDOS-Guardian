@@ -4,6 +4,7 @@ import json
 import pytest
 
 from guardian.updates import (
+    DEFAULT_MANIFEST_URL,
     UpdateError,
     UpdateInfo,
     check_for_update,
@@ -38,6 +39,9 @@ def opener_for(payload: bytes):
 
 
 def test_version_comparison_handles_different_component_counts() -> None:
+    assert DEFAULT_MANIFEST_URL.endswith(
+        "/releases/latest/download/release-manifest.json"
+    )
     assert is_newer("0.2.0", "0.1.9")
     assert is_newer("1.0", "0.9.99")
     assert not is_newer("0.1", "0.1.0")
@@ -65,6 +69,13 @@ def test_manifest_requires_trusted_https_and_reports_new_version() -> None:
 
     with pytest.raises(UpdateError, match="HTTPS"):
         check_for_update("http://raw.githubusercontent.com/a/b/main/x.json")
+
+    with pytest.raises(UpdateError, match="large"):
+        check_for_update(
+            "https://github.com/example/project/releases/latest/download/"
+            "release-manifest.json",
+            opener=opener_for(b"{" + b" " * 1_000_000),
+        )
 
 
 def test_download_is_published_only_after_sha256_verification(tmp_path) -> None:

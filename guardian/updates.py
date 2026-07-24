@@ -15,12 +15,13 @@ from .config import config_dir
 from .i18n import dual
 
 DEFAULT_MANIFEST_URL = (
-    "https://raw.githubusercontent.com/bubakbubak500/"
-    "ARDOS-Guardian/main/release/release-manifest.json"
+    "https://github.com/bubakbubak500/ARDOS-Guardian/"
+    "releases/latest/download/release-manifest.json"
 )
 ALLOWED_DOWNLOAD_HOSTS = {
     "github.com",
     "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
     "raw.githubusercontent.com",
 }
 _VERSION_PART = re.compile(r"\d+")
@@ -64,7 +65,15 @@ def _require_trusted_https(url: str, *, manifest: bool = False) -> None:
             "Update URLs must use HTTPS.",
             "Adresy aktualizací musí používat HTTPS.",
         ))
-    allowed = {"raw.githubusercontent.com"} if manifest else ALLOWED_DOWNLOAD_HOSTS
+    allowed = (
+        {
+            "github.com",
+            "release-assets.githubusercontent.com",
+            "raw.githubusercontent.com",
+        }
+        if manifest
+        else ALLOWED_DOWNLOAD_HOSTS
+    )
     if parsed.hostname not in allowed:
         raise UpdateError(dual(
             f"Untrusted update host: {parsed.hostname or '(none)'}",
@@ -86,7 +95,17 @@ def check_for_update(
     )
     try:
         with opener(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8-sig"))
+            final_url = str(
+                getattr(response, "geturl", lambda: manifest_url)()
+            )
+            _require_trusted_https(final_url, manifest=True)
+            raw = response.read(1_000_001)
+            if len(raw) > 1_000_000:
+                raise UpdateError(dual(
+                    "The update manifest is unexpectedly large.",
+                    "Manifest aktualizace je neočekávaně velký.",
+                ))
+            payload = json.loads(raw.decode("utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise UpdateError(dual(
             f"Could not read the update manifest: {exc}",
@@ -135,6 +154,10 @@ def download_installer(
     digest = hashlib.sha256()
     try:
         with opener(request, timeout=timeout) as response, temporary.open("wb") as out:
+            final_url = str(
+                getattr(response, "geturl", lambda: info.installer_url)()
+            )
+            _require_trusted_https(final_url)
             while chunk := response.read(1024 * 1024):
                 digest.update(chunk)
                 out.write(chunk)

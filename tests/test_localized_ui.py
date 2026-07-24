@@ -127,8 +127,11 @@ def test_help_is_detailed_searchable_and_bilingual() -> None:
     dialog = HelpDialog()
     try:
         dialog.search.setText("SHA-256")
-        assert dialog.topics.count() == 1
-        assert "Aktualizace" in dialog.topics.item(0).text()
+        assert dialog.topics.count() >= 1
+        assert any(
+            "Aktualizace" in dialog.topics.item(index).text()
+            for index in range(dialog.topics.count())
+        )
     finally:
         dialog.close()
         set_language(Language.ENGLISH)

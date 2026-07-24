@@ -90,12 +90,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $version = python -c "from guardian import __version__; print(__version__)"
+          $notes = "docs\RELEASE_NOTES_$version.md"
+          if (-not (Test-Path -LiteralPath $notes)) {
+            throw "Release notes are missing: $notes"
+          }
           gh release create "${{ github.ref_name }}" `
             "release\Guardian-$version-setup-win-x64.exe" `
             "release\Guardian-$version-win-x64.zip" `
             "release\release-manifest.json" `
             "release\SHA256SUMS.txt" `
             --title "Guardian $version" `
-            --generate-notes `
+            --notes-file $notes `
             --latest `
             --verify-tag

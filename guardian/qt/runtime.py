@@ -5,7 +5,12 @@ from __future__ import annotations
 import time
 
 from ..config import StationConfig
-from ..install import DependencyKind, DependencyStatus, hamlib_installer
+from ..install import (
+    DependencyKind,
+    DependencyStatus,
+    hamlib_installer,
+    vara_installer,
+)
 from ..install.dependencies import inspect_dependencies
 from ..i18n import dual
 from ..message import Folder, MessageStore
@@ -189,6 +194,69 @@ class ShellRuntime:
         return self.workers.submit(
             "update-check",
             check_for_update,
+            completed,
+        )
+
+    def download_vara(
+        self,
+        kind: DependencyKind,
+        destination,
+        on_complete=None,
+    ) -> bool:
+        package = vara_installer.package_for(kind)
+        task_name = f"vara-download-{kind.value}"
+        if self.workers.is_active(task_name):
+            return False
+        self.events.publish(
+            dual(
+                f"Downloading verified {package.product} {package.version}…",
+                f"Stahuji ověřený {package.product} {package.version}…",
+            ),
+            source="dependency",
+        )
+        last_percent = -10
+
+        def progress(received: int, total: int) -> None:
+            nonlocal last_percent
+            percent = received * 100 // total
+            if percent < last_percent + 10 and percent != 100:
+                return
+            last_percent = percent
+            self.events.publish(
+                dual(
+                    f"{package.product} download: {percent}%",
+                    f"Stahování {package.product}: {percent} %",
+                ),
+                source="dependency",
+            )
+
+        def completed(result: TaskResult) -> None:
+            if result.error is not None:
+                self.events.publish(
+                    dual(
+                        f"{package.product} download failed: {result.error}",
+                        f"Stažení {package.product} selhalo: {result.error}",
+                    ),
+                    source="dependency",
+                )
+            else:
+                self.events.publish(
+                    dual(
+                        f"Verified {package.product} installer is ready.",
+                        f"Ověřený instalátor {package.product} je připraven.",
+                    ),
+                    source="dependency",
+                )
+            if on_complete is not None:
+                on_complete(result)
+
+        return self.workers.submit(
+            task_name,
+            lambda: vara_installer.download_and_extract(
+                kind,
+                destination,
+                progress=progress,
+            ),
             completed,
         )
 

@@ -12,7 +12,7 @@ from ..config import StationConfig
 from ..i18n import dual
 from . import hamlib_installer
 
-VARA_OFFICIAL_URL = "https://rosmodem.wordpress.com/"
+VARA_OFFICIAL_URL = "https://downloads.winlink.org/VARA%20Products/"
 
 
 class DependencyKind(StrEnum):
@@ -110,10 +110,11 @@ def inspect_dependencies(config: StationConfig) -> tuple[DependencyStatus, ...]:
             bool(vara_fm),
             vara_fm,
             vara_fm or dual(
-                "Not found. Download it from the VARA author's website.",
-                "Nenalezeno. Stáhněte jej z webu autora VARA.",
+                "Not found. Guardian can download the pinned official archive.",
+                "Nenalezeno. Guardian může stáhnout připnutý oficiální archiv.",
             ),
             official_url=VARA_OFFICIAL_URL,
+            can_install=True,
         ),
         DependencyStatus(
             DependencyKind.VARA_HF,
@@ -121,9 +122,10 @@ def inspect_dependencies(config: StationConfig) -> tuple[DependencyStatus, ...]:
             bool(vara_hf),
             vara_hf,
             vara_hf or dual(
-                "Not found. Download it from the VARA author's website.",
-                "Nenalezeno. Stáhněte jej z webu autora VARA.",
+                "Not found. Guardian can download the pinned official archive.",
+                "Nenalezeno. Guardian může stáhnout připnutý oficiální archiv.",
             ),
             official_url=VARA_OFFICIAL_URL,
+            can_install=True,
         ),
     )

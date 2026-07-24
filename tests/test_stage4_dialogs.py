@@ -3,9 +3,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from guardian.config import StationConfig
+from guardian.install.dependencies import DependencyKind, DependencyStatus
 from guardian.qt.diagnostics_dialog import DiagnosticsDialog
 from guardian.qt.readiness_dialog import ReadinessDialog
 from guardian.qt.runtime import ShellRuntime
@@ -62,5 +63,54 @@ def test_readiness_and_diagnostics_are_non_transmitting(tmp_path) -> None:
         assert settings.value("onboarding/completed", type=bool)
     finally:
         diagnostics.close()
+        readiness.close()
+        runtime.close()
+
+
+def test_readiness_offers_direct_vara_downloads(tmp_path) -> None:
+    _application()
+    settings = QSettings(
+        str(tmp_path / "vara-readiness.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    runtime.dependency_statuses = (
+        DependencyStatus(
+            DependencyKind.HAMLIB,
+            "Hamlib / rigctld",
+            True,
+            "rigctld.exe",
+            "rigctld.exe",
+        ),
+        DependencyStatus(
+            DependencyKind.VARA_FM,
+            "VARA FM",
+            False,
+            None,
+            "missing",
+            "https://downloads.winlink.org/VARA%20Products/",
+            True,
+        ),
+        DependencyStatus(
+            DependencyKind.VARA_HF,
+            "VARA HF",
+            False,
+            None,
+            "missing",
+            "https://downloads.winlink.org/VARA%20Products/",
+            True,
+        ),
+    )
+    readiness = ReadinessDialog(runtime, settings)
+    try:
+        readiness._scan_pending = False
+        readiness._render()
+        labels = {
+            button.text()
+            for button in readiness.findChildren(QPushButton)
+        }
+        assert "Download and install…" in labels
+        assert "Official page" in labels
+    finally:
         readiness.close()
         runtime.close()

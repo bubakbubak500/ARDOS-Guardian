@@ -19,8 +19,10 @@ Completed: 2026-07-24
   template. The built-in bilingual help contains ten searchable operator
   topics.
 - First-run readiness detects Hamlib, VARA FM and VARA HF. Hamlib installation
-  remains verified and consent-based; separately licensed VARA software opens
-  its official source.
+  remains verified and consent-based. Separately licensed VARA software can be
+  downloaded only from the official Winlink distribution host using the exact
+  version, size and SHA-256 pinned in Guardian, with separate download and
+  launch confirmations.
 - Update checks use an HTTPS GitHub manifest. Download and launch each require
   explicit consent, and a downloaded installer is accepted only after SHA-256
   verification.
@@ -32,14 +34,14 @@ Completed: 2026-07-24
 
 ## Verification
 
-- Automated tests: **43 passed**
+- Automated tests: **47 passed**
 - Python bytecode compilation: passed
 - Frozen `Guardian.exe` smoke: remained running and responsive
 - Native Windows visual smoke: Light and Dark at 1366×768 passed
 - Installer: Inno Setup 6.7.3 compiled successfully
-- Installer size: 39,911,384 bytes
+- Installer size: 39,917,918 bytes
 - Installer SHA-256:
-  `e3fcb7024dc5ad1f820ae01ccc57c86754558960e065773057cf148545e0301e`
+  `ca5af20699d01624db65a039896397718ed90ca625217a62442b3bd81bad2478`
 - Signature status: unsigned (expected for this development build)
 
 The hardware-safe smoke test verifies that startup and background ticks do not
@@ -51,7 +53,7 @@ payload backends and deterministic protocol behavior.
 
 ## Local artifact
 
-`release/Guardian-0.1.0-setup-win-x64.exe`
+`release/Guardian-0.2.0-setup-win-x64.exe`
 
 The installer is intentionally excluded from Git. The release manifest is
 versioned, while the GitHub workflow will rebuild and publish binaries only when

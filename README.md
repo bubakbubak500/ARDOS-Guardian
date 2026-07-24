@@ -1,17 +1,35 @@
-# Guardian — ARDOS control & routing layer
+# Guardian — resilient ARDOS radio messaging
 
-Guardian is a Python/Windows control layer that sits **in front of VARA FM**.
-It announces, negotiates and orchestrates message transfers over standard
-amateur radios using short *control bursts* (metadata only), while the actual
-message body travels over VARA FM.
+Guardian is a Windows desktop application for composing, routing, relaying, and
+tracking store-and-forward messages over amateur radio. Short ARDOS control
+frames negotiate each transfer while VARA FM or VARA HF carries the message
+bundle. The native English/Czech interface combines a mailbox, routes, heard
+stations, station readiness, diagnostics, updates, and detailed operator help.
 
-It talks to radios through **Hamlib / `rigctld`** (hundreds of supported rigs,
-Windows + Linux) with a simple serial **RTS/DTR PTT** fallback for dumb VOX
-radios. The aim is no per-radio CAT reverse-engineering.
+Guardian controls radios through **Hamlib / `rigctld`** with a serial RTS/DTR
+PTT fallback. VARA remains separately licensed third-party software and is never
+bundled or silently installed.
 
-## What works today (Phase 1)
+## Download
+
+Download the current Windows installer from
+[GitHub Releases](https://github.com/bubakbubak500/ARDOS-Guardian/releases/latest).
+Python and all required Python libraries are included.
+
+The application checks this same release channel for updates. It downloads an
+installer only after confirmation, validates its SHA-256 against the release
+manifest, and asks again before launching it.
+
+> [!WARNING]
+> Current development releases are not Authenticode-signed. Windows can display
+> **Unknown publisher** or a Microsoft Defender SmartScreen warning. Download
+> only from this repository's Releases page and compare against
+> `SHA256SUMS.txt`. GitHub build-provenance attestations accompany each release.
+
+## Product capabilities
 
 - Native PySide6 operational UI with Light, Dark and Follow system themes
+- Complete English/Czech interface and searchable operator help
 - Task-oriented Home, Mail, Network and Log workspaces with native menus
 - Station profile (JSON) — load/save, lives in `%APPDATA%\Guardian\config.json`
 - **Control-burst protocol**: binary `ARD` frames with CRC-16, all frame types
@@ -24,6 +42,10 @@ radios. The aim is no per-radio CAT reverse-engineering.
 - **VARA client**: TCP command/data connection with async notification reader
 - **VARA FM + HF**: one-click mode switch, per-mode ports, auto-selected
   control-burst modem (AFSK 1200 for FM, MFSK-16 for HF)
+- **Consent-driven VARA setup**: Station readiness can download the exact
+  reviewed VARA FM/HF archive from the official Winlink distribution server,
+  enforce the version, size and SHA-256 pinned in this Guardian release, then
+  separately ask before launching the vendor installer
 - **One-click Hamlib install**: downloads + SHA256-verifies the official
   portable build; radios picked by name (curated list + live `rigctl -l`);
   optional rigctld auto-start
@@ -36,6 +58,11 @@ radios. The aim is no per-radio CAT reverse-engineering.
 - **Winlink-like mail**: store-and-forward mailbox (Inbox / Outbox / Sent /
   Transit), text **+ attachments** in a compressed bundle, Compose/read UI with
   attachment Save/Open, route-history tracking, held-for-relay queue
+- **Structured traffic**: interoperable plaintext ICS-213, ICS-214 and IARU
+  emergency-message templates, plus a clearly identified local SITREP template
+
+See [Product description](PRODUCT.md) for intended use and boundaries and
+[Security policy](SECURITY.md) before distributing a build.
 
 ## Roadmap
 
@@ -87,10 +114,19 @@ while the control channel is off and uses `AudioControlTransport` when the
 operator starts it. `LoopbackBus` is retained for deterministic automated
 tests only.
 
-## Quick start (from source)
+## Quick start
+
+1. Install Guardian from the latest GitHub Release.
+2. Open **Operation → Station readiness**.
+3. Set the station callsign and radio control in **Settings → Station settings**.
+4. Locate or install Hamlib and the selected VARA FM/HF product.
+5. Connect the radio and VARA, then explicitly start the control channel.
+6. Compose mail into Outbox and send it only when the station is ready for RF.
+
+For development from source:
 
 ```powershell
-# one-time, on any PC with Python 3.12:
+# one-time, on any PC with Python 3.11 or later:
 .\setup.ps1
 # run it:
 .\run.ps1
@@ -108,8 +144,9 @@ channel has been started by the operator.
 # -> dist\Guardian\Guardian.exe
 ```
 
-The build is fully local (PyInstaller), so it can be produced on each PC — no
-network needed at runtime.
+PyInstaller bundles the interpreter and libraries. Normal operation needs no
+separate Python installation; network access is used only for actions such as
+updates or explicitly requested external-tool downloads.
 
 ## Radio setup (Hamlib path)
 
@@ -120,6 +157,10 @@ install Hamlib by hand:
   official portable Hamlib build from github.com, verifies its SHA256, and
   unpacks it into `%APPDATA%\Guardian\hamlib`. No admin rights.
 * **At setup:** `.\setup.ps1 -WithHamlib` does the same during install.
+
+VARA FM/HF can be downloaded from **Operation → Station readiness**. Guardian
+pins the reviewed official archive hash; the proprietary vendor installer and
+its licence remain under the operator's control.
 
 Then open **Settings → Station settings**, choose the Hamlib model and COM
 port, and click **Connect radio** on Home. Guardian launches

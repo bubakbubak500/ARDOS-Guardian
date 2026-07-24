@@ -314,9 +314,11 @@ def help_topics() -> list[HelpTopic]:
             paths, PATH and common installation directories without launching
             the tools or transmitting.</p>
             <p>Guardian may download the official portable Hamlib package only
-            after consent and validates published integrity data. VARA is
-            separately licensed, so Guardian opens the author's official source
-            and lets the operator install or locate the executable.</p>
+            after consent and validates published integrity data. For separately
+            licensed VARA, Guardian can download only the reviewed official
+            Winlink-hosted archive whose URL, size and SHA-256 are pinned in this
+            release. Download and vendor-installer launch require separate
+            confirmations.</p>
             <p>For normal operation set a real callsign, satisfy Hamlib only if
             the Hamlib backend is selected, and install the VARA flavor selected
             for the current workflow.</p>
@@ -327,9 +329,11 @@ def help_topics() -> list[HelpTopic]:
             VARA jsou externí rádiové nástroje. Průvodce kontroluje zadané cesty,
             PATH a běžné instalační adresáře, aniž programy spouští nebo vysílá.</p>
             <p>Guardian může až po souhlasu stáhnout oficiální přenosný balíček
-            Hamlib a ověřuje zveřejněné údaje integrity. VARA má samostatnou
-            licenci, proto Guardian otevře oficiální zdroj autora a instalaci
-            nebo výběr programu ponechá operátorovi.</p>
+            Hamlib a ověřuje zveřejněné údaje integrity. Pro samostatně
+            licencovanou VARA smí stáhnout jen prověřený oficiální archiv
+            hostovaný Winlinkem, jehož URL, velikost a SHA-256 jsou připnuté v
+            této verzi. Stažení a spuštění instalátoru dodavatele vyžadují dvě
+            samostatná potvrzení.</p>
             <p>Pro běžný provoz nastavte skutečnou volací značku, zajistěte
             Hamlib jen při zvoleném backendu Hamlib a nainstalujte variantu VARA
             použitou v aktuálním postupu.</p>

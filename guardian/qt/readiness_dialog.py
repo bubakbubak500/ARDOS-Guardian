@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings, QTimer, QUrl
+from PySide6.QtCore import QSettings, QStandardPaths, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
@@ -17,8 +17,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..config import config_dir
 from ..i18n import dual, tr
-from ..install import DependencyKind
+from ..install import DependencyKind, vara_installer
 from ..services import TaskResult
 from .runtime import ShellRuntime
 
@@ -80,9 +81,11 @@ class ReadinessDialog(QDialog):
         self.timer.setInterval(100)
         self.timer.timeout.connect(self._tick)
         self.timer.start()
+        self._scan_pending = False
         self._rescan()
 
     def _rescan(self) -> None:
+        self._scan_pending = True
         self.rescan.setEnabled(False)
         self.summary.setProperty("statusRole", "info")
         self.summary.setText(
@@ -96,8 +99,11 @@ class ReadinessDialog(QDialog):
 
     def _tick(self) -> None:
         self.runtime.drain_workers()
+        if not self._scan_pending:
+            return
         if self.runtime.workers.is_active("dependency-scan"):
             return
+        self._scan_pending = False
         self.rescan.setEnabled(True)
         self._render()
 
@@ -117,8 +123,8 @@ class ReadinessDialog(QDialog):
                 "Nenalezeno. Guardian může nainstalovat ověřenou přenosnou verzi.",
             )
         return dual(
-            "Not found. Download it from the VARA author's website.",
-            "Nenalezeno. Stáhněte VARA z oficiálního webu autora.",
+            "Not found. Guardian can download and verify the pinned official archive.",
+            "Nenalezeno. Guardian může stáhnout a ověřit připnutý oficiální archiv.",
         )
 
     def _render(self) -> None:
@@ -160,27 +166,46 @@ class ReadinessDialog(QDialog):
                     )
                 )
                 action.clicked.connect(self._install_hamlib)
+                self.grid.addWidget(action, row, 3)
             elif status.kind in (DependencyKind.VARA_FM, DependencyKind.VARA_HF):
-                action.setText(
-                    dual("Open official source", "Otevřít oficiální zdroj")
-                    if not status.available
-                    else dual("Locate another…", "Vybrat jiný…")
-                )
                 if status.available:
+                    action.setText(dual("Locate another…", "Vybrat jiný…"))
                     action.clicked.connect(
                         lambda _checked=False, kind=status.kind: self._locate(kind)
                     )
+                    self.grid.addWidget(action, row, 3)
                 else:
+                    action_host = QWidget()
+                    action_layout = QHBoxLayout(action_host)
+                    action_layout.setContentsMargins(0, 0, 0, 0)
+                    action_layout.setSpacing(6)
+                    action.setText(
+                        dual(
+                            "Download and install…",
+                            "Stáhnout a instalovat…",
+                        )
+                    )
+                    action.setObjectName("primaryAction")
                     action.clicked.connect(
+                        lambda _checked=False, kind=status.kind:
+                        self._download_vara(kind)
+                    )
+                    official = QPushButton(
+                        dual("Official page", "Oficiální stránka")
+                    )
+                    official.clicked.connect(
                         lambda _checked=False, url=status.official_url:
                         QDesktopServices.openUrl(QUrl(url))
                     )
+                    action_layout.addWidget(action)
+                    action_layout.addWidget(official)
+                    self.grid.addWidget(action_host, row, 3)
             else:
                 action.setText(dual("Locate…", "Vybrat…"))
                 action.clicked.connect(
                     lambda _checked=False, kind=status.kind: self._locate(kind)
                 )
-            self.grid.addWidget(action, row, 3)
+                self.grid.addWidget(action, row, 3)
         self.grid.setColumnStretch(2, 1)
 
         cfg = self.runtime.config
@@ -242,6 +267,122 @@ class ReadinessDialog(QDialog):
             self._render()
 
         self.runtime.install_hamlib(completed)
+
+    def _download_vara(self, kind: DependencyKind) -> None:
+        package = vara_installer.package_for(kind)
+        answer = QMessageBox.question(
+            self,
+            dual(
+                f"Download {package.product}?",
+                f"Stáhnout {package.product}?",
+            ),
+            dual(
+                f"Download {package.product} {package.version} "
+                f"({package.size_megabytes:.1f} MB) from the official Winlink "
+                "distribution server?\n\nVARA is proprietary third-party "
+                "software maintained by its author. Guardian accepts only the "
+                "exact archive whose size and SHA-256 are pinned in this "
+                "Guardian release.",
+                f"Stáhnout {package.product} {package.version} "
+                f"({package.size_megabytes:.1f} MB) z oficiálního distribučního "
+                "serveru Winlink?\n\nVARA je proprietární software třetí strany "
+                "udržovaný svým autorem. Guardian přijme pouze přesný archiv, "
+                "jehož velikost a SHA-256 jsou připnuté v této verzi Guardianu.",
+            ),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        downloads = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation
+        )
+        destination = (
+            downloads + "/Guardian External Tools"
+            if downloads
+            else str(config_dir() / "downloads")
+        )
+        self.rescan.setEnabled(False)
+        self.summary.setProperty("statusRole", "info")
+        self.summary.setText(
+            "◐ "
+            + dual(
+                f"Downloading and verifying {package.product}…",
+                f"Stahuji a ověřuji {package.product}…",
+            )
+        )
+
+        def completed(result: TaskResult) -> None:
+            self.rescan.setEnabled(True)
+            if result.error is not None:
+                QMessageBox.critical(
+                    self,
+                    dual(
+                        f"{package.product} download",
+                        f"Stažení {package.product}",
+                    ),
+                    str(result.error),
+                )
+                self._render()
+                return
+            installer = result.value
+            launch = QMessageBox.question(
+                self,
+                dual(
+                    "Launch verified installer?",
+                    "Spustit ověřený instalátor?",
+                ),
+                dual(
+                    f"The {package.product} archive passed the pinned SHA-256 "
+                    f"check and was saved to:\n{installer}\n\nLaunch the vendor "
+                    "installer now? Windows may request administrator approval.",
+                    f"Archiv {package.product} prošel kontrolou připnutého "
+                    f"SHA-256 a byl uložen do:\n{installer}\n\nSpustit nyní "
+                    "instalátor dodavatele? Windows může vyžádat oprávnění správce.",
+                ),
+            )
+            if launch == QMessageBox.StandardButton.Yes:
+                try:
+                    vara_installer.launch_installer(installer)
+                except Exception as exc:
+                    QMessageBox.critical(
+                        self,
+                        dual(
+                            "Cannot launch installer",
+                            "Instalátor nelze spustit",
+                        ),
+                        str(exc),
+                    )
+                    return
+                QMessageBox.information(
+                    self,
+                    package.product,
+                    dual(
+                        "Complete the vendor setup, then choose Scan again. "
+                        "Guardian does not accept licence terms on your behalf.",
+                        "Dokončete instalaci dodavatele a poté zvolte Zkontrolovat "
+                        "znovu. Guardian za vás nepřijímá licenční podmínky.",
+                    ),
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    package.product,
+                    dual(
+                        f"The verified installer remains saved at:\n{installer}",
+                        f"Ověřený instalátor zůstává uložen zde:\n{installer}",
+                    ),
+                )
+            self._render()
+
+        if not self.runtime.download_vara(kind, destination, completed):
+            self.rescan.setEnabled(True)
+            QMessageBox.information(
+                self,
+                package.product,
+                dual(
+                    "A download of this package is already running.",
+                    "Stahování tohoto balíčku již probíhá.",
+                ),
+            )
 
     def _locate(self, kind: DependencyKind) -> None:
         names = {

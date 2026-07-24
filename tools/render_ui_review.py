@@ -14,8 +14,10 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from guardian.i18n import Language, set_language
+from guardian.install.dependencies import DependencyKind, DependencyStatus
 from guardian.qt.help_dialog import HelpDialog
 from guardian.qt.mail_workspace import ComposeDialog
+from guardian.qt.readiness_dialog import ReadinessDialog
 from guardian.qt.runtime import ShellRuntime
 from guardian.qt.shell import GuardianMainWindow
 from guardian.qt.theme import ThemeController, ThemePreference
@@ -66,6 +68,39 @@ def main() -> int:
     help_dialog = HelpDialog()
     help_dialog.resize(1050, 720)
     _save(help_dialog, args.output / "help-cs.png", application)
+
+    runtime.dependency_statuses = (
+        DependencyStatus(
+            DependencyKind.HAMLIB,
+            "Hamlib / rigctld",
+            True,
+            r"C:\Guardian\hamlib\rigctld.exe",
+            r"C:\Guardian\hamlib\rigctld.exe",
+        ),
+        DependencyStatus(
+            DependencyKind.VARA_FM,
+            "VARA FM",
+            False,
+            None,
+            "missing",
+            "https://downloads.winlink.org/VARA%20Products/",
+            True,
+        ),
+        DependencyStatus(
+            DependencyKind.VARA_HF,
+            "VARA HF",
+            False,
+            None,
+            "missing",
+            "https://downloads.winlink.org/VARA%20Products/",
+            True,
+        ),
+    )
+    readiness = ReadinessDialog(runtime, settings)
+    readiness._scan_pending = False
+    readiness._render()
+    readiness.resize(1040, 520)
+    _save(readiness, args.output / "readiness-vara-cs.png", application)
 
     theme.deleteLater()
     runtime.close()

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ardos-guardian"
 dynamic = ["version"]
-description = "ARDOS control and routing layer for VARA FM/HF"
+description = "Store-and-forward ARDOS messaging and routing for VARA FM/HF"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,6 +24,12 @@ dev = [
 
 [project.gui-scripts]
 guardian = "guardian.app:main"
+
+[project.urls]
+Homepage = "https://github.com/bubakbubak500/ARDOS-Guardian"
+Documentation = "https://github.com/bubakbubak500/ARDOS-Guardian#readme"
+Releases = "https://github.com/bubakbubak500/ARDOS-Guardian/releases"
+Issues = "https://github.com/bubakbubak500/ARDOS-Guardian/issues"
 
 [tool.setuptools.dynamic]
 version = {attr = "guardian._version.__version__"}
