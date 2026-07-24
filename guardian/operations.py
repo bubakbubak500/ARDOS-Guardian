@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from .config import StationConfig
+from .install.dependencies import find_vara_fm, find_vara_hf
 from .i18n import dual
 from .message import Folder, MessageStore, Status
 from .modem import make_modem
@@ -66,6 +69,7 @@ class Operations:
         self._last_radio_poll = 0.0
         self._stored_inbound: set[int] = set()
         self._qsy_previous: int | None = None
+        self._vara_process: subprocess.Popen | None = None
         self.winlink_prompt: WinlinkPrompt | None = None
         self.net = self._build_net(NullTransport())
 
@@ -185,10 +189,50 @@ class Operations:
         return self.workers.submit("radio-control", operation, completed)
 
     def connect_vara(self) -> bool:
-        def operation() -> None:
-            self.vara.connect()
+        def operation() -> str | None:
+            self.vara.host = self.config.vara_host
+            self.vara.cmd_port = self.config.vara_cmd_port
+            self.vara.data_port = self.config.vara_data_port
+            started = None
+            try:
+                self.vara.connect(timeout=0.5)
+            except OSError as first_error:
+                executable = self._selected_vara_executable()
+                if executable is None:
+                    mode = self.config.vara_mode.upper()
+                    raise RuntimeError(
+                        dual(
+                            f"VARA {mode} is not running and its executable "
+                            "is not available",
+                            f"VARA {mode} neběží a její program není k dispozici",
+                        )
+                    ) from first_error
+                if self._vara_process is None or self._vara_process.poll() is not None:
+                    self._vara_process = subprocess.Popen(
+                        [executable],
+                        cwd=str(Path(executable).parent),
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    started = f"VARA {self.config.vara_mode.upper()}"
+                deadline = time.monotonic() + 10.0
+                last_error: OSError = first_error
+                while time.monotonic() < deadline:
+                    time.sleep(0.25)
+                    try:
+                        self.vara.connect(timeout=0.5)
+                        break
+                    except OSError as exc:
+                        last_error = exc
+                else:
+                    raise TimeoutError(
+                        f"{self.config.vara_mode.upper()} did not open "
+                        f"{self.config.vara_host}:{self.config.vara_cmd_port}"
+                    ) from last_error
             if self.config.callsign != "NOCALL":
                 self.vara.set_mycall(self.config.callsign)
+            return started
 
         def completed(result: TaskResult) -> None:
             if result.error:
@@ -201,6 +245,14 @@ class Operations:
                     source="vara",
                 )
             else:
+                if result.value:
+                    self._log(
+                        dual(
+                            f"{result.value} was started by Guardian.",
+                            f"{result.value} byla spuštěna Guardianem.",
+                        ),
+                        source="vara",
+                    )
                 self._log(
                     dual(
                         f"VARA connected at {self.config.vara_host}:"
@@ -213,6 +265,14 @@ class Operations:
             self._update_vara_snapshot()
 
         return self.workers.submit("vara-control", operation, completed)
+
+    def _selected_vara_executable(self) -> str | None:
+        host = self.config.vara_host.strip().lower()
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            return None
+        if self.config.vara_mode.upper() == "HF":
+            return find_vara_hf(self.config.vara_hf_path)
+        return find_vara_fm(self.config.vara_fm_path)
 
     def disconnect_vara(self) -> bool:
         def completed(result: TaskResult) -> None:

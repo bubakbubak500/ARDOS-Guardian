@@ -6,6 +6,7 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from guardian.qt.runtime import ShellRuntime
+from guardian.services import MailboxSnapshot
 from guardian.qt.shell import GuardianMainWindow
 from guardian.qt.theme import DARK_TOKENS, LIGHT_TOKENS, ThemePreference
 
@@ -61,6 +62,28 @@ def test_theme_preference_is_persisted(tmp_path) -> None:
         assert settings.value("ui/theme") == "dark"
         assert window.theme_controller.tokens is DARK_TOKENS
         assert application.styleSheet()
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_station_context_shows_actionable_mail_state(tmp_path) -> None:
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-context.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    runtime.snapshots.update(
+        mailbox=MailboxSnapshot(inbox=2, unread=1, outbox=3, transit=1)
+    )
+    window = GuardianMainWindow(runtime, settings)
+    try:
+        window._refresh()
+        text = window.context_activity.text()
+        assert "Unread messages: 1" in text
+        assert "Waiting to send: 3" in text
+        assert window.context_activity.isVisibleTo(window)
     finally:
         window.close()
         runtime.close()

@@ -5,14 +5,13 @@ from __future__ import annotations
 import time
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -22,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from ..routing import Route
 from ..i18n import dual, tr
+from .inputs import FrequencySpinBox, UppercaseLineEdit
 from .runtime import ShellRuntime
 
 
@@ -66,12 +66,13 @@ class NetworkWorkspace(QWidget):
             )
         layout.addWidget(self.routes_table, 1)
         form = QFormLayout()
-        self.destination = QLineEdit()
-        self.preferred = QLineEdit()
-        self.backup = QLineEdit()
-        self.frequency = QSpinBox()
-        self.frequency.setRange(0, 2_147_483_647)
-        self.mode = QLineEdit()
+        self.destination = UppercaseLineEdit()
+        self.preferred = UppercaseLineEdit()
+        self.backup = UppercaseLineEdit()
+        self.frequency = FrequencySpinBox()
+        self.mode = QComboBox()
+        self.mode.addItem(tr("network.mode_vara_fm"), "FM")
+        self.mode.addItem(tr("network.mode_vara_hf"), "USB")
         form.addRow(tr("network.destination"), self.destination)
         form.addRow(tr("network.preferred"), self.preferred)
         form.addRow(tr("network.backup"), self.backup)
@@ -117,7 +118,7 @@ class NetworkWorkspace(QWidget):
     def _save_route(self) -> None:
         destination = self.destination.text().strip().upper()
         preferred = self.preferred.text().strip().upper()
-        if not destination or not preferred:
+        if not destination:
             QMessageBox.warning(
                 self,
                 tr("network.routes"),
@@ -130,14 +131,19 @@ class NetworkWorkspace(QWidget):
                 preferred,
                 self.backup.text(),
                 self.frequency.value(),
-                self.mode.text(),
+                self.mode.currentData(),
             )
         )
         self.runtime.routes.save()
+        route_description = (
+            dual(f"via {preferred}", f"přes {preferred}")
+            if preferred
+            else dual("directly", "přímo")
+        )
         self.runtime.events.publish(
             dual(
-                f"Route {destination} via {preferred} saved.",
-                f"Trasa {destination} přes {preferred} byla uložena.",
+                f"Route {destination} saved {route_description}.",
+                f"Trasa {destination} byla uložena {route_description}.",
             ),
             source="network",
         )
@@ -167,7 +173,11 @@ class NetworkWorkspace(QWidget):
                 route.destination,
                 route.preferred,
                 route.backup,
-                str(route.freq_hz or ""),
+                (
+                    self.frequency.textFromValue(route.freq_hz)
+                    if route.freq_hz
+                    else ""
+                ),
                 route.mode,
             )
             for column, value in enumerate(values):

@@ -53,7 +53,7 @@ def test_network_workspace_persists_normalised_route(tmp_path) -> None:
         workspace.destination.setText("ok1ccc")
         workspace.preferred.setText("ok1ddd")
         workspace.frequency.setValue(145_500_000)
-        workspace.mode.setText("fm")
+        workspace.mode.setCurrentIndex(workspace.mode.findData("FM"))
         workspace._save_route()
 
         route = runtime.routes.lookup("OK1CCC")
@@ -62,6 +62,27 @@ def test_network_workspace_persists_normalised_route(tmp_path) -> None:
         assert route.freq_hz == 145_500_000
         assert route.mode == "FM"
         assert workspace.routes_table.rowCount() == 1
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_network_workspace_allows_direct_route_and_formats_operator_inputs() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.routes = RouteTable()
+    workspace = NetworkWorkspace(runtime)
+    try:
+        workspace.destination.setText("ok1aaa")
+        workspace.frequency.setValue(144_520_000)
+        workspace._save_route()
+
+        route = runtime.routes.lookup("OK1AAA")
+        assert route is not None
+        assert route.preferred == ""
+        assert workspace.destination.text() == "OK1AAA"
+        assert workspace.frequency.text() == "144.520 MHz"
+        assert workspace.routes_table.item(0, 3).text() == "144.520 MHz"
     finally:
         workspace.close()
         runtime.close()

@@ -146,6 +146,26 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Radio: {radio}  ·  Control modem: {modem}",
         "Rádio: {radio}  ·  Řídicí modem: {modem}",
     ),
+    "context.unread": (
+        "Unread messages: {count}",
+        "Nepřečtené zprávy: {count}",
+    ),
+    "context.outbox": (
+        "Waiting to send: {count}",
+        "Čeká na odeslání: {count}",
+    ),
+    "context.transit": (
+        "Waiting to relay: {count}",
+        "Čeká na předání: {count}",
+    ),
+    "context.sessions": (
+        "Active transfers: {count}",
+        "Aktivní přenosy: {count}",
+    ),
+    "context.vara_connecting": (
+        "VARA is establishing a link",
+        "VARA navazuje spojení",
+    ),
     "context.not_configured": ("not configured", "nenastaveno"),
     "ready.identity": ("Station identity", "Identita stanice"),
     "ready.needs_setup": ("Needs setup", "Vyžaduje nastavení"),
@@ -253,7 +273,9 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.destination": ("Destination", "Cíl"),
     "network.preferred": ("Preferred hop", "Upřednostněný mezilehlý bod"),
     "network.backup": ("Backup", "Záložní bod"),
-    "network.frequency": ("Frequency (Hz)", "Frekvence (Hz)"),
+    "network.frequency": ("Frequency", "Frekvence"),
+    "network.mode_vara_fm": ("VARA FM (FM)", "VARA FM (FM)"),
+    "network.mode_vara_hf": ("VARA HF (USB)", "VARA HF (USB)"),
     "network.mode": ("Mode", "Režim"),
     "network.add": ("Add or replace route", "Přidat nebo nahradit trasu"),
     "network.remove": ("Remove selected", "Odstranit vybranou"),
@@ -267,8 +289,8 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.snr": ("Last SNR", "Poslední SNR"),
     "network.last_frame": ("Last frame", "Poslední rámec"),
     "network.route_required": (
-        "Destination and preferred next hop are required.",
-        "Cíl a upřednostněný mezilehlý bod jsou povinné.",
+        "Enter a destination. The preferred hop may stay empty for a direct route.",
+        "Zadejte cíl. Pro přímou trasu může upřednostněný mezilehlý bod zůstat prázdný.",
     ),
     "log.title": ("Log", "Provozní log"),
     "log.all": ("All", "Vše"),

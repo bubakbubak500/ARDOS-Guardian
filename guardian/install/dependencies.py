@@ -54,9 +54,8 @@ def _windows_roots() -> tuple[Path, Path, Path]:
 
 
 def find_vara_fm(explicit: str = "") -> str | None:
-    direct = _existing_file(explicit)
-    if direct:
-        return direct
+    if explicit:
+        return _existing_file(explicit)
     on_path = shutil.which("VARAFM.exe")
     if on_path:
         return on_path
@@ -71,9 +70,8 @@ def find_vara_fm(explicit: str = "") -> str | None:
 
 
 def find_vara_hf(explicit: str = "") -> str | None:
-    direct = _existing_file(explicit)
-    if direct:
-        return direct
+    if explicit:
+        return _existing_file(explicit)
     on_path = shutil.which("VARA.exe")
     if on_path:
         return on_path

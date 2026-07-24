@@ -183,9 +183,11 @@ class Orchestrator:
         if hop:
             return hop, "manual"
         if self.routes is not None:
-            r = self.routes.next_hop(final_dest)
-            if r:
-                return r, "route"
+            route = self.routes.lookup(final_dest)
+            if route is not None:
+                if route.preferred:
+                    return route.preferred, "route"
+                return final_dest, "direct route"
         if final_dest in self.learned_paths:
             return self.learned_paths[final_dest], "learned"
         if self.heard.is_heard(final_dest, self._now):
@@ -388,7 +390,7 @@ class Orchestrator:
         dest = f.destination
         can = (
             dest == self.callsign
-            or (self.routes is not None and self.routes.next_hop(dest))
+            or (self.routes is not None and self.routes.lookup(dest) is not None)
             or dest in self.learned_paths
             or self.heard.is_heard(dest, self._now)
         )

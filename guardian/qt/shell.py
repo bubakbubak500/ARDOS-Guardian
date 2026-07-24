@@ -242,9 +242,13 @@ class GuardianMainWindow(QMainWindow):
         )
         self.context_detail = QLabel()
         self.context_detail.setObjectName("Metadata")
+        self.context_activity = QLabel()
+        self.context_activity.setObjectName("ContextActivity")
+        self.context_activity.setWordWrap(True)
         context_layout.addWidget(section)
         context_layout.addWidget(self.context_value)
         context_layout.addWidget(self.context_detail)
+        context_layout.addWidget(self.context_activity)
         context_layout.addStretch()
         layout.addWidget(context, 1)
 
@@ -444,6 +448,22 @@ class GuardianMainWindow(QMainWindow):
         )
 
         mailbox = snapshot.mailbox
+        context_items = []
+        if mailbox.unread:
+            context_items.append(tr("context.unread", count=mailbox.unread))
+        if mailbox.outbox:
+            context_items.append(tr("context.outbox", count=mailbox.outbox))
+        if mailbox.transit:
+            context_items.append(tr("context.transit", count=mailbox.transit))
+        if snapshot.network.active_sessions:
+            context_items.append(
+                tr("context.sessions", count=snapshot.network.active_sessions)
+            )
+        if snapshot.vara.link_state == "CONNECTING":
+            context_items.append(tr("context.vara_connecting"))
+        self.context_activity.setText("  ·  ".join(context_items))
+        self.context_activity.setVisible(bool(context_items))
+
         values = {
             "inbox": mailbox.inbox,
             "unread": mailbox.unread,

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from ..config import StationConfig
 from ..i18n import Language, dual, language, set_language, tr
 from .theme import ThemePreference
+from .inputs import UppercaseLineEdit
 
 _CALLSIGN = re.compile(r"^[A-Z0-9/]{3,16}$")
 
@@ -150,7 +151,7 @@ class SettingsDialog(QDialog):
                 "Identita stanice se používá v každém řídicím rámci a zprávě.",
             ),
         )
-        self.callsign = QLineEdit(self.config.callsign)
+        self.callsign = UppercaseLineEdit(self.config.callsign)
         self.callsign.setMaxLength(16)
         self.callsign.setPlaceholderText("OK1AAA")
         self.operator_name = QLineEdit(self.config.operator_name)

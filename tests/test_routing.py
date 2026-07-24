@@ -26,3 +26,10 @@ def test_route_table_round_trip_and_remove(tmp_path: Path) -> None:
     )
     restored.remove("ok1aaa")
     assert restored.lookup("OK1AAA") is None
+
+
+def test_empty_preferred_hop_represents_a_direct_route() -> None:
+    table = RouteTable([Route("OK1AAA", "")])
+
+    assert table.lookup("ok1aaa") == Route("OK1AAA", "")
+    assert table.next_hop("ok1aaa") is None

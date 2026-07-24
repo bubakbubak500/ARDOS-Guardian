@@ -170,6 +170,10 @@ QLabel#MetricLabel, QLabel#Metadata {{
     color: {tokens.text_secondary};
     font-size: {tokens.metadata_font_px}px;
 }}
+QLabel#ContextActivity {{
+    color: {tokens.info};
+    font-weight: 600;
+}}
 QLabel[statusRole="success"] {{ color: {tokens.success}; font-weight: 600; }}
 QLabel[statusRole="warning"] {{ color: {tokens.warning}; font-weight: 600; }}
 QLabel[statusRole="danger"] {{ color: {tokens.danger}; font-weight: 600; }}

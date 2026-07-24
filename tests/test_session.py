@@ -1,4 +1,5 @@
 from guardian.session import LoopbackBus, Orchestrator, SessionState
+from guardian.routing import Route, RouteTable
 
 
 def _drain(bus: LoopbackBus, *stations: Orchestrator, now: float = 1.0) -> None:
@@ -39,4 +40,20 @@ def test_no_route_with_auto_route_disabled_attempts_destination_directly() -> No
     message = sender.send_message("OK9ZZZ", "hello", msg_id=101)
 
     assert message.next_hop == "OK9ZZZ"
+    assert message.state is SessionState.ANNOUNCING
+
+
+def test_configured_empty_hop_is_direct_even_with_discovery_enabled() -> None:
+    bus = LoopbackBus()
+    routes = RouteTable([Route("OK1AAA", "")])
+    sender = Orchestrator(
+        "OK7PS",
+        bus.endpoint("sender"),
+        routes=routes,
+        auto_route=True,
+    )
+
+    message = sender.send_message("OK1AAA", "hello", msg_id=102)
+
+    assert message.next_hop == "OK1AAA"
     assert message.state is SessionState.ANNOUNCING

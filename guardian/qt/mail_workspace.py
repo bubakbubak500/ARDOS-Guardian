@@ -32,6 +32,7 @@ from ..i18n import language, tr
 from ..message import Attachment, Folder, MailMessage, Status
 from ..message.forms import FORMS
 from ..protocol import Priority
+from .inputs import UppercaseLineEdit
 from .runtime import ShellRuntime
 
 
@@ -54,7 +55,7 @@ class ComposeDialog(QDialog):
 
         outer = QVBoxLayout(self)
         header = QFormLayout()
-        self.destination = QLineEdit()
+        self.destination = UppercaseLineEdit()
         self.destination.setPlaceholderText("OK1AAA")
         self.template = QComboBox()
         self.template.addItem(tr("compose.template_plain"), "Plain")
