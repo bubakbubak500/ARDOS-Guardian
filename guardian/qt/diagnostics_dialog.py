@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..config import DEFAULT_CONFIG_PATH, config_dir
+from ..i18n import dual, tr
 from .runtime import ShellRuntime
 
 
@@ -27,15 +28,17 @@ class DiagnosticsDialog(QDialog):
     def __init__(self, runtime: ShellRuntime, parent=None) -> None:
         super().__init__(parent)
         self.runtime = runtime
-        self.setWindowTitle("Guardian diagnostics")
+        self.setWindowTitle(dual("Guardian diagnostics", "Diagnostika Guardianu"))
         self.setMinimumSize(760, 520)
         outer = QVBoxLayout(self)
-        heading = QLabel("Diagnostics")
+        heading = QLabel(dual("Diagnostics", "Diagnostika"))
         heading.setObjectName("PanelHeader")
-        detail = QLabel(
+        detail = QLabel(dual(
             "This report contains station configuration and local paths, but no "
-            "message bodies or attachments. Export only when you choose."
-        )
+            "message bodies or attachments. Export only when you choose.",
+            "Tato zpráva obsahuje nastavení stanice a místní cesty, nikoli však "
+            "obsah zpráv ani přílohy. Exportuje se pouze na váš pokyn.",
+        ))
         detail.setObjectName("Metadata")
         detail.setWordWrap(True)
         outer.addWidget(heading)
@@ -43,10 +46,15 @@ class DiagnosticsDialog(QDialog):
         self.viewer = QPlainTextEdit()
         self.viewer.setReadOnly(True)
         outer.addWidget(self.viewer, 1)
-        export = QPushButton("Export diagnostic report…")
+        export = QPushButton(dual(
+            "Export diagnostic report…", "Exportovat diagnostickou zprávu…"
+        ))
         export.clicked.connect(self._export)
         outer.addWidget(export)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText(
+            tr("common.close")
+        )
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
         self.viewer.setPlainText(
@@ -82,9 +90,9 @@ class DiagnosticsDialog(QDialog):
     def _export(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Guardian diagnostics",
+            dual("Export Guardian diagnostics", "Export diagnostiky Guardianu"),
             "guardian-diagnostics.json",
-            "JSON files (*.json)",
+            dual("JSON files (*.json)", "Soubory JSON (*.json)"),
         )
         if path:
             with open(path, "w", encoding="utf-8") as handle:

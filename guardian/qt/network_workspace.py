@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..routing import Route
+from ..i18n import dual, tr
 from .runtime import ShellRuntime
 
 
@@ -30,12 +31,12 @@ class NetworkWorkspace(QWidget):
         self.runtime = runtime
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 8, 10, 8)
-        title = QLabel("Network")
+        title = QLabel(tr("network.title"))
         title.setObjectName("PanelHeader")
         outer.addWidget(title)
         tabs = QTabWidget()
-        tabs.addTab(self._routes_page(), "Routes")
-        tabs.addTab(self._heard_page(), "Heard stations")
+        tabs.addTab(self._routes_page(), tr("network.routes"))
+        tabs.addTab(self._heard_page(), tr("network.heard"))
         outer.addWidget(tabs, 1)
         self.refresh()
 
@@ -44,14 +45,25 @@ class NetworkWorkspace(QWidget):
         layout = QVBoxLayout(page)
         self.routes_table = QTableWidget(0, 5)
         self.routes_table.setHorizontalHeaderLabels(
-            ["Destination", "Preferred hop", "Backup", "Frequency (Hz)", "Mode"]
+            [
+                tr("network.destination"),
+                tr("network.preferred"),
+                tr("network.backup"),
+                tr("network.frequency"),
+                tr("network.mode"),
+            ]
         )
         self.routes_table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
-        self.routes_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
+        route_header = self.routes_table.horizontalHeader()
+        route_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        route_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column in (2, 3, 4):
+            route_header.setSectionResizeMode(
+                column,
+                QHeaderView.ResizeMode.ResizeToContents,
+            )
         layout.addWidget(self.routes_table, 1)
         form = QFormLayout()
         self.destination = QLineEdit()
@@ -60,17 +72,17 @@ class NetworkWorkspace(QWidget):
         self.frequency = QSpinBox()
         self.frequency.setRange(0, 2_147_483_647)
         self.mode = QLineEdit()
-        form.addRow("Destination", self.destination)
-        form.addRow("Preferred next hop", self.preferred)
-        form.addRow("Backup", self.backup)
-        form.addRow("Frequency (Hz)", self.frequency)
-        form.addRow("Mode", self.mode)
+        form.addRow(tr("network.destination"), self.destination)
+        form.addRow(tr("network.preferred"), self.preferred)
+        form.addRow(tr("network.backup"), self.backup)
+        form.addRow(tr("network.frequency"), self.frequency)
+        form.addRow(tr("network.mode"), self.mode)
         layout.addLayout(form)
         actions = QHBoxLayout()
-        add = QPushButton("Add or replace route")
+        add = QPushButton(tr("network.add"))
         add.setObjectName("primaryAction")
         add.clicked.connect(self._save_route)
-        remove = QPushButton("Remove selected")
+        remove = QPushButton(tr("network.remove"))
         remove.clicked.connect(self._remove_route)
         actions.addWidget(add)
         actions.addStretch()
@@ -82,13 +94,19 @@ class NetworkWorkspace(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         detail = QLabel(
-            "Stations appear here only after a real control frame is received."
+            tr("network.heard_hint")
         )
         detail.setObjectName("Metadata")
         layout.addWidget(detail)
         self.heard_table = QTableWidget(0, 5)
         self.heard_table.setHorizontalHeaderLabels(
-            ["Callsign", "Age", "Frames", "Last SNR", "Last frame"]
+            [
+                tr("network.callsign"),
+                tr("network.age"),
+                tr("network.frames"),
+                tr("network.snr"),
+                tr("network.last_frame"),
+            ]
         )
         self.heard_table.horizontalHeader().setSectionResizeMode(
             4, QHeaderView.ResizeMode.Stretch
@@ -102,8 +120,8 @@ class NetworkWorkspace(QWidget):
         if not destination or not preferred:
             QMessageBox.warning(
                 self,
-                "Route",
-                "Destination and preferred next hop are required.",
+                tr("network.routes"),
+                tr("network.route_required"),
             )
             return
         self.runtime.routes.add(
@@ -117,7 +135,10 @@ class NetworkWorkspace(QWidget):
         )
         self.runtime.routes.save()
         self.runtime.events.publish(
-            f"Route {destination} via {preferred} saved.",
+            dual(
+                f"Route {destination} via {preferred} saved.",
+                f"Trasa {destination} přes {preferred} byla uložena.",
+            ),
             source="network",
         )
         self.refresh()
@@ -130,7 +151,10 @@ class NetworkWorkspace(QWidget):
         self.runtime.routes.remove(destination)
         self.runtime.routes.save()
         self.runtime.events.publish(
-            f"Route {destination} removed.",
+            dual(
+                f"Route {destination} removed.",
+                f"Trasa {destination} byla odstraněna.",
+            ),
             source="network",
         )
         self.refresh()

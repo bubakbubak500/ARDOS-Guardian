@@ -1,11 +1,11 @@
-"""Task-oriented Guardian settings dialog."""
+"""Task-oriented, bilingual Guardian settings dialog."""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QSettings, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import StationConfig
+from ..i18n import Language, dual, language, set_language, tr
 from .theme import ThemePreference
 
 _CALLSIGN = re.compile(r"^[A-Z0-9/]{3,16}$")
@@ -44,7 +45,7 @@ class PathField(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         self.edit = QLineEdit(value)
-        browse = QPushButton("Browse…")
+        browse = QPushButton(dual("Browse…", "Procházet…"))
         browse.clicked.connect(self._browse)
         layout.addWidget(self.edit, 1)
         layout.addWidget(browse)
@@ -52,9 +53,12 @@ class PathField(QWidget):
     def _browse(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select executable",
+            dual("Select executable", "Vyberte spustitelný soubor"),
             self.edit.text(),
-            f"Executable ({self.executable});;All files (*)",
+            dual(
+                f"Executable ({self.executable});;All files (*)",
+                f"Spustitelný soubor ({self.executable});;Všechny soubory (*)",
+            ),
         )
         if path:
             self.edit.setText(path)
@@ -71,19 +75,19 @@ class SettingsDialog(QDialog):
         config: StationConfig,
         theme: ThemePreference,
         parent=None,
+        *,
+        settings: QSettings | None = None,
     ) -> None:
         super().__init__(parent)
         self.config = config
-        self.setWindowTitle("Guardian settings")
-        self.setMinimumSize(760, 590)
+        self.settings = settings or QSettings()
+        self.setWindowTitle(tr("settings.title"))
+        self.setMinimumSize(800, 620)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)
         outer.setSpacing(8)
-        intro = QLabel(
-            "Settings are grouped by operator task. Changes are validated before "
-            "they are written to the station profile."
-        )
+        intro = QLabel(tr("settings.intro"))
         intro.setObjectName("Metadata")
         intro.setWordWrap(True)
         outer.addWidget(intro)
@@ -106,6 +110,15 @@ class SettingsDialog(QDialog):
             | QDialogButtonBox.StandardButton.Cancel
             | QDialogButtonBox.StandardButton.Apply
         )
+        self.buttons.button(QDialogButtonBox.StandardButton.Save).setText(
+            tr("common.save")
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(
+            tr("common.cancel")
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Apply).setText(
+            tr("common.apply")
+        )
         self.buttons.accepted.connect(self._save_and_accept)
         self.buttons.rejected.connect(self.reject)
         self.buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(
@@ -119,7 +132,9 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setHorizontalSpacing(16)
         layout.setVerticalSpacing(10)
-        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
         label = QLabel(description)
         label.setObjectName("Metadata")
         label.setWordWrap(True)
@@ -129,26 +144,37 @@ class SettingsDialog(QDialog):
 
     def _build_identity(self) -> None:
         form = self._page(
-            "Station",
-            "Your station identity is used in every control frame and message.",
+            tr("settings.station"),
+            dual(
+                "Your station identity is used in every control frame and message.",
+                "Identita stanice se používá v každém řídicím rámci a zprávě.",
+            ),
         )
         self.callsign = QLineEdit(self.config.callsign)
         self.callsign.setMaxLength(16)
         self.callsign.setPlaceholderText("OK1AAA")
         self.operator_name = QLineEdit(self.config.operator_name)
-        form.addRow("Callsign", self.callsign)
-        form.addRow("Operator name", self.operator_name)
+        form.addRow(dual("Callsign", "Volací značka"), self.callsign)
+        form.addRow(dual("Operator name", "Jméno operátora"), self.operator_name)
 
     def _build_radio(self) -> None:
         form = self._page(
-            "Radio control",
-            "Choose how Guardian keys and tunes the radio. Hamlib uses rigctld; "
-            "VOX uses only an RTS/DTR serial PTT line.",
+            tr("settings.radio"),
+            dual(
+                "Choose how Guardian keys and tunes the radio. Hamlib uses "
+                "rigctld; VOX uses only an RTS/DTR serial PTT line.",
+                "Zvolte způsob klíčování a ladění rádia. Hamlib používá rigctld; "
+                "VOX používá pouze sériovou linku PTT RTS/DTR.",
+            ),
         )
         self.radio_backend = QComboBox()
-        self.radio_backend.addItem("No radio control", "none")
+        self.radio_backend.addItem(
+            dual("No radio control", "Bez řízení rádia"), "none"
+        )
         self.radio_backend.addItem("Hamlib / rigctld", "hamlib")
-        self.radio_backend.addItem("VOX / serial PTT", "vox")
+        self.radio_backend.addItem(
+            dual("VOX / serial PTT", "VOX / sériové PTT"), "vox"
+        )
         index = self.radio_backend.findData(self.config.radio_backend)
         self.radio_backend.setCurrentIndex(max(0, index))
         self.radio_name = QLineEdit(self.config.radio)
@@ -162,28 +188,35 @@ class SettingsDialog(QDialog):
         self.ptt_line = QComboBox()
         self.ptt_line.addItems(["RTS", "DTR"])
         self.ptt_line.setCurrentText(self.config.ptt_line)
-        form.addRow("Control method", self.radio_backend)
-        form.addRow("Radio model/name", self.radio_name)
-        form.addRow("Hamlib model ID", self.rig_model)
-        form.addRow("CAT / PTT serial port", self.cat_port)
-        form.addRow("CAT baud (0 = automatic)", self.cat_baud)
-        form.addRow("rigctld host", self.rigctld_host)
-        form.addRow("rigctld port", self.rigctld_port)
-        form.addRow("rigctld executable", self.rigctld_path)
-        form.addRow("VOX PTT line", self.ptt_line)
+        form.addRow(dual("Control method", "Způsob řízení"), self.radio_backend)
+        form.addRow(dual("Radio model/name", "Model / název rádia"), self.radio_name)
+        form.addRow(dual("Hamlib model ID", "ID modelu Hamlib"), self.rig_model)
+        form.addRow(dual("CAT / PTT serial port", "Sériový port CAT / PTT"), self.cat_port)
+        form.addRow(dual("CAT baud (0 = automatic)", "Rychlost CAT (0 = automaticky)"), self.cat_baud)
+        form.addRow(dual("rigctld host", "Adresa rigctld"), self.rigctld_host)
+        form.addRow(dual("rigctld port", "Port rigctld"), self.rigctld_port)
+        form.addRow(dual("rigctld executable", "Program rigctld"), self.rigctld_path)
+        form.addRow(dual("VOX PTT line", "Linka PTT pro VOX"), self.ptt_line)
 
     def _build_vara(self) -> None:
         form = self._page(
-            "VARA & payload",
-            "Select the active VARA flavor and whether Guardian transfers the "
-            "payload directly or coordinates a manual Winlink hand-off.",
+            tr("settings.vara"),
+            dual(
+                "Select the active VARA flavor and whether Guardian transfers "
+                "the payload directly or coordinates a manual Winlink hand-off.",
+                "Zvolte variantu VARA a zda Guardian přenese obsah přímo, nebo "
+                "bude koordinovat ruční předání přes Winlink.",
+            ),
         )
         self.vara_mode = QComboBox()
         self.vara_mode.addItems(["FM", "HF"])
         self.vara_mode.setCurrentText(self.config.vara_mode)
         self.payload_backend = QComboBox()
         self.payload_backend.addItem("Guardian VARA P2P", "vara_p2p")
-        self.payload_backend.addItem("Manual Winlink hand-off", "winlink_manual")
+        self.payload_backend.addItem(
+            dual("Manual Winlink hand-off", "Ruční předání přes Winlink"),
+            "winlink_manual",
+        )
         self.payload_backend.setCurrentIndex(
             max(0, self.payload_backend.findData(self.config.payload_backend))
         )
@@ -195,80 +228,126 @@ class SettingsDialog(QDialog):
         self.vara_fm_path = PathField(self.config.vara_fm_path, "VARAFM.exe")
         self.vara_hf_path = PathField(self.config.vara_hf_path, "VARA.exe")
         self.control_modem = QComboBox()
-        self.control_modem.addItem("Automatic for FM/HF", "auto")
+        self.control_modem.addItem(
+            dual("Automatic for FM/HF", "Automaticky podle FM/HF"), "auto"
+        )
         self.control_modem.addItem("AFSK 1200", "afsk1200")
         self.control_modem.addItem("MFSK 16", "mfsk16")
         self.control_modem.setCurrentIndex(
             max(0, self.control_modem.findData(self.config.control_modem))
         )
-        form.addRow("Active VARA mode", self.vara_mode)
-        form.addRow("Payload workflow", self.payload_backend)
-        form.addRow("VARA host", self.vara_host)
-        form.addRow("VARA FM command port", self.vara_fm_cmd)
-        form.addRow("VARA FM data port", self.vara_fm_data)
-        form.addRow("VARA FM executable", self.vara_fm_path)
-        form.addRow("VARA HF command port", self.vara_hf_cmd)
-        form.addRow("VARA HF data port", self.vara_hf_data)
-        form.addRow("VARA HF executable", self.vara_hf_path)
-        form.addRow("Control-burst modem", self.control_modem)
+        form.addRow(dual("Active VARA mode", "Aktivní režim VARA"), self.vara_mode)
+        form.addRow(dual("Payload workflow", "Způsob přenosu"), self.payload_backend)
+        form.addRow(dual("VARA host", "Adresa VARA"), self.vara_host)
+        form.addRow(dual("VARA FM command port", "Příkazový port VARA FM"), self.vara_fm_cmd)
+        form.addRow(dual("VARA FM data port", "Datový port VARA FM"), self.vara_fm_data)
+        form.addRow(dual("VARA FM executable", "Program VARA FM"), self.vara_fm_path)
+        form.addRow(dual("VARA HF command port", "Příkazový port VARA HF"), self.vara_hf_cmd)
+        form.addRow(dual("VARA HF data port", "Datový port VARA HF"), self.vara_hf_data)
+        form.addRow(dual("VARA HF executable", "Program VARA HF"), self.vara_hf_path)
+        form.addRow(dual("Control-burst modem", "Modem řídicích rámců"), self.control_modem)
 
     def _build_network(self) -> None:
         form = self._page(
-            "Network behavior",
-            "Control automatic routing and delivery behavior. These options do "
-            "not change payload encoding.",
+            tr("settings.network"),
+            dual(
+                "Control automatic routing and delivery behavior. These "
+                "options do not change payload encoding.",
+                "Nastavte automatické směrování a doručování. Tyto volby "
+                "nemění kódování přenášeného obsahu.",
+            ),
         )
         self.default_ttl = _spin(1, 32, self.config.default_ttl)
-        self.auto_route = QCheckBox("Discover routes when no manual route exists")
+        self.auto_route = QCheckBox(
+            dual(
+                "Discover routes when no manual route exists",
+                "Vyhledat trasu, pokud není nastavena ručně",
+            )
+        )
         self.auto_route.setChecked(self.config.auto_route)
-        self.auto_relay = QCheckBox("Relay messages for other stations")
+        self.auto_relay = QCheckBox(
+            dual("Relay messages for other stations", "Předávat zprávy jiným stanicím")
+        )
         self.auto_relay.setChecked(self.config.auto_relay)
-        self.auto_deliver = QCheckBox("Deliver queued mail when a hop is heard")
+        self.auto_deliver = QCheckBox(
+            dual(
+                "Deliver queued mail when a hop is heard",
+                "Doručit zprávy z fronty po zaslechnutí další stanice",
+            )
+        )
         self.auto_deliver.setChecked(self.config.auto_deliver)
-        self.auto_qsy = QCheckBox("Tune automatically before VARA P2P")
+        self.auto_qsy = QCheckBox(
+            dual(
+                "Tune automatically before VARA P2P",
+                "Automaticky přeladit před VARA P2P",
+            )
+        )
         self.auto_qsy.setChecked(self.config.auto_qsy)
-        self.beacon_enabled = QCheckBox("Transmit presence beacons")
+        self.beacon_enabled = QCheckBox(
+            dual("Transmit presence beacons", "Vysílat majáky přítomnosti")
+        )
         self.beacon_enabled.setChecked(self.config.beacon_enabled)
         self.beacon_interval = _spin(15, 86_400, int(self.config.beacon_interval))
         self.scan_dwell = _spin(1, 300, int(self.config.scan_dwell))
-        form.addRow("Default hop limit (TTL)", self.default_ttl)
+        form.addRow(dual("Default hop limit (TTL)", "Výchozí limit skoků (TTL)"), self.default_ttl)
         form.addRow(self.auto_route)
         form.addRow(self.auto_relay)
         form.addRow(self.auto_deliver)
         form.addRow(self.auto_qsy)
         form.addRow(self.beacon_enabled)
-        form.addRow("Beacon interval (seconds)", self.beacon_interval)
-        form.addRow("Channel scan dwell (seconds)", self.scan_dwell)
+        form.addRow(dual("Beacon interval (seconds)", "Interval majáku (sekundy)"), self.beacon_interval)
+        form.addRow(dual("Channel scan dwell (seconds)", "Doba poslechu kanálu (sekundy)"), self.scan_dwell)
 
     def _build_appearance(self, theme: ThemePreference) -> None:
         form = self._page(
-            "Appearance",
-            "The Monitor theme is applied immediately after Save or Apply.",
+            tr("settings.appearance"),
+            dual(
+                "Theme and language are applied immediately after Save or Apply.",
+                "Motiv a jazyk se použijí ihned po uložení nebo použití změn.",
+            ),
         )
         self.theme = QComboBox()
-        self.theme.addItem("Follow Windows", ThemePreference.SYSTEM.value)
-        self.theme.addItem("Light", ThemePreference.LIGHT.value)
-        self.theme.addItem("Dark", ThemePreference.DARK.value)
+        self.theme.addItem(tr("theme.system"), ThemePreference.SYSTEM.value)
+        self.theme.addItem(tr("theme.light"), ThemePreference.LIGHT.value)
+        self.theme.addItem(tr("theme.dark"), ThemePreference.DARK.value)
         self.theme.setCurrentIndex(max(0, self.theme.findData(theme.value)))
-        form.addRow("Theme", self.theme)
+        self.language = QComboBox()
+        self.language.addItem("English", Language.ENGLISH.value)
+        self.language.addItem("Čeština", Language.CZECH.value)
+        current = str(self.settings.value("ui/language", language().value))
+        self.language.setCurrentIndex(max(0, self.language.findData(current)))
+        form.addRow(tr("menu.theme"), self.theme)
+        form.addRow(tr("settings.language"), self.language)
 
     @property
     def selected_theme(self) -> ThemePreference:
         return ThemePreference(self.theme.currentData())
+
+    @property
+    def selected_language(self) -> Language:
+        return Language(self.language.currentData())
 
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
         callsign = self.callsign.text().strip().upper()
         if callsign != "NOCALL" and not _CALLSIGN.fullmatch(callsign):
             errors.append(
-                "Callsign must contain 3–16 letters, digits or '/' characters."
+                dual(
+                    "Callsign must contain 3–16 letters, digits or '/' characters.",
+                    "Volací značka musí obsahovat 3–16 písmen, číslic nebo znak '/'.",
+                )
             )
         if not self.rigctld_host.text().strip():
-            errors.append("rigctld host cannot be empty.")
+            errors.append(dual("rigctld host cannot be empty.", "Adresa rigctld nesmí být prázdná."))
         if not self.vara_host.text().strip():
-            errors.append("VARA host cannot be empty.")
+            errors.append(dual("VARA host cannot be empty.", "Adresa VARA nesmí být prázdná."))
         if self.radio_backend.currentData() == "hamlib" and self.rig_model.value() < 1:
-            errors.append("Choose a Hamlib model ID when Hamlib control is enabled.")
+            errors.append(
+                dual(
+                    "Choose a Hamlib model ID when Hamlib control is enabled.",
+                    "Při řízení přes Hamlib zvolte ID modelu rádia.",
+                )
+            )
         for label, field in (
             ("rigctld", self.rigctld_path),
             ("VARA FM", self.vara_fm_path),
@@ -276,7 +355,12 @@ class SettingsDialog(QDialog):
         ):
             value = field.text()
             if value and Path(value).suffix.lower() == ".exe" and not Path(value).is_file():
-                errors.append(f"{label} executable does not exist: {value}")
+                errors.append(
+                    dual(
+                        f"{label} executable does not exist: {value}",
+                        f"Program {label} neexistuje: {value}",
+                    )
+                )
         return errors
 
     def apply(self) -> bool:
@@ -318,6 +402,10 @@ class SettingsDialog(QDialog):
         cfg.scan_dwell = float(self.scan_dwell.value())
         cfg.appearance = self.selected_theme.value.title()
         cfg.save()
+        selected_language = self.selected_language
+        self.settings.setValue("ui/language", selected_language.value)
+        self.settings.sync()
+        set_language(selected_language)
         self.saved.emit()
         return True
 

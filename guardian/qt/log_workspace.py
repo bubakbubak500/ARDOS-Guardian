@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from .runtime import ShellRuntime
+from ..i18n import tr
 
 
 class LogWorkspace(QWidget):
@@ -24,15 +25,18 @@ class LogWorkspace(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 8, 10, 8)
         top = QHBoxLayout()
-        title = QLabel("Log")
+        title = QLabel(tr("log.title"))
         title.setObjectName("PanelHeader")
         self.level = QComboBox()
-        self.level.addItems(["All", "Info", "Warning", "Error"])
+        self.level.addItem(tr("log.all"), "all")
+        self.level.addItem(tr("log.info"), "info")
+        self.level.addItem(tr("log.warning"), "warning")
+        self.level.addItem(tr("log.error"), "error")
         self.level.currentTextChanged.connect(self.refresh)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Filter events")
+        self.search.setPlaceholderText(tr("log.filter"))
         self.search.textChanged.connect(self.refresh)
-        copy = QPushButton("Copy visible")
+        copy = QPushButton(tr("log.copy"))
         copy.clicked.connect(lambda: self.viewer.selectAll())
         copy.clicked.connect(self._copy)
         top.addWidget(title)
@@ -51,7 +55,7 @@ class LogWorkspace(QWidget):
         self.viewer.moveCursor(QTextCursor.MoveOperation.End)
 
     def refresh(self) -> None:
-        level = self.level.currentText().lower()
+        level = str(self.level.currentData())
         needle = self.search.text().strip().lower()
         lines: list[str] = []
         for event in self.runtime.events.history():

@@ -214,6 +214,33 @@ QTreeWidget {{
     border: 1px solid {tokens.panel_border};
     selection-background-color: {tokens.selected};
 }}
+QTabWidget::pane {{
+    background: {tokens.surface_1};
+    border: 1px solid {tokens.panel_border};
+    top: -1px;
+}}
+QTabBar::tab {{
+    color: {tokens.text_secondary};
+    background: {tokens.surface_2};
+    border: 1px solid {tokens.panel_border};
+    border-bottom-color: {tokens.panel_border};
+    padding: {tokens.spacing_2}px {tokens.spacing_4}px;
+    min-width: 92px;
+}}
+QTabBar::tab:hover {{
+    color: {tokens.text_primary};
+    background: {tokens.hovered};
+}}
+QTabBar::tab:selected {{
+    color: {tokens.text_primary};
+    background: {tokens.surface_1};
+    border-bottom: 2px solid {tokens.accent};
+    font-weight: 600;
+}}
+QTabBar::tab:disabled {{
+    color: {tokens.disabled};
+    background: {tokens.surface_2};
+}}
 QHeaderView::section {{
     background: {tokens.surface_3};
     color: {tokens.text_secondary};

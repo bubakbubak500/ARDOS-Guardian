@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 from . import __version__
 from .config import config_dir
+from .i18n import dual
 
 DEFAULT_MANIFEST_URL = (
     "https://raw.githubusercontent.com/bubakbubak500/"
@@ -40,7 +41,10 @@ class UpdateInfo:
 def version_key(value: str) -> tuple[int, ...]:
     parts = tuple(int(item) for item in _VERSION_PART.findall(value))
     if not parts:
-        raise UpdateError(f"Invalid version: {value!r}")
+        raise UpdateError(dual(
+            f"Invalid version: {value!r}",
+            f"Neplatná verze: {value!r}",
+        ))
     return parts
 
 
@@ -56,10 +60,16 @@ def is_newer(candidate: str, current: str = __version__) -> bool:
 def _require_trusted_https(url: str, *, manifest: bool = False) -> None:
     parsed = urlparse(url)
     if parsed.scheme != "https":
-        raise UpdateError("Update URLs must use HTTPS.")
+        raise UpdateError(dual(
+            "Update URLs must use HTTPS.",
+            "Adresy aktualizací musí používat HTTPS.",
+        ))
     allowed = {"raw.githubusercontent.com"} if manifest else ALLOWED_DOWNLOAD_HOSTS
     if parsed.hostname not in allowed:
-        raise UpdateError(f"Untrusted update host: {parsed.hostname or '(none)'}")
+        raise UpdateError(dual(
+            f"Untrusted update host: {parsed.hostname or '(none)'}",
+            f"Nedůvěryhodný server aktualizace: {parsed.hostname or '(žádný)'}",
+        ))
 
 
 def check_for_update(
@@ -78,7 +88,10 @@ def check_for_update(
         with opener(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise UpdateError(f"Could not read the update manifest: {exc}") from exc
+        raise UpdateError(dual(
+            f"Could not read the update manifest: {exc}",
+            f"Manifest aktualizace nelze načíst: {exc}",
+        )) from exc
     try:
         info = UpdateInfo(
             version=str(payload["version"]),
@@ -87,12 +100,18 @@ def check_for_update(
             notes_url=str(payload.get("notes_url", "")),
         )
     except (KeyError, TypeError) as exc:
-        raise UpdateError("The update manifest is incomplete.") from exc
+        raise UpdateError(dual(
+            "The update manifest is incomplete.",
+            "Manifest aktualizace není úplný.",
+        )) from exc
     _require_trusted_https(info.installer_url)
     if info.notes_url:
         _require_trusted_https(info.notes_url)
     if not re.fullmatch(r"[0-9a-f]{64}", info.sha256):
-        raise UpdateError("The update manifest has an invalid SHA-256 value.")
+        raise UpdateError(dual(
+            "The update manifest has an invalid SHA-256 value.",
+            "Manifest aktualizace obsahuje neplatnou hodnotu SHA-256.",
+        ))
     return info if is_newer(info.version, current_version) else None
 
 
@@ -121,9 +140,15 @@ def download_installer(
                 out.write(chunk)
     except OSError as exc:
         temporary.unlink(missing_ok=True)
-        raise UpdateError(f"Could not download the installer: {exc}") from exc
+        raise UpdateError(dual(
+            f"Could not download the installer: {exc}",
+            f"Instalátor nelze stáhnout: {exc}",
+        )) from exc
     if digest.hexdigest().lower() != info.sha256.lower():
         temporary.unlink(missing_ok=True)
-        raise UpdateError("Downloaded installer failed SHA-256 verification.")
+        raise UpdateError(dual(
+            "Downloaded installer failed SHA-256 verification.",
+            "Stažený instalátor neprošel ověřením SHA-256.",
+        ))
     temporary.replace(target)
     return target

@@ -32,6 +32,7 @@ _icon_preview.png
 .ui-baseline-data-frozen/
 .downloads/
 .build-temp/
+artifacts/
 
 # Locally built release artifacts (the small manifest remains versioned)
 release/*.exe

@@ -9,6 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from ..config import StationConfig
+from ..i18n import dual
 from . import hamlib_installer
 
 VARA_OFFICIAL_URL = "https://rosmodem.wordpress.com/"
@@ -97,7 +98,10 @@ def inspect_dependencies(config: StationConfig) -> tuple[DependencyStatus, ...]:
             "Hamlib / rigctld",
             bool(hamlib),
             hamlib,
-            hamlib or "Not found. Guardian can install a verified portable build.",
+            hamlib or dual(
+                "Not found. Guardian can install a verified portable build.",
+                "Nenalezeno. Guardian může nainstalovat ověřenou přenosnou verzi.",
+            ),
             can_install=True,
         ),
         DependencyStatus(
@@ -105,7 +109,10 @@ def inspect_dependencies(config: StationConfig) -> tuple[DependencyStatus, ...]:
             "VARA FM",
             bool(vara_fm),
             vara_fm,
-            vara_fm or "Not found. Download it from the VARA author's website.",
+            vara_fm or dual(
+                "Not found. Download it from the VARA author's website.",
+                "Nenalezeno. Stáhněte jej z webu autora VARA.",
+            ),
             official_url=VARA_OFFICIAL_URL,
         ),
         DependencyStatus(
@@ -113,7 +120,10 @@ def inspect_dependencies(config: StationConfig) -> tuple[DependencyStatus, ...]:
             "VARA HF",
             bool(vara_hf),
             vara_hf,
-            vara_hf or "Not found. Download it from the VARA author's website.",
+            vara_hf or dual(
+                "Not found. Download it from the VARA author's website.",
+                "Nenalezeno. Stáhněte jej z webu autora VARA.",
+            ),
             official_url=VARA_OFFICIAL_URL,
         ),
     )

@@ -7,6 +7,7 @@ import time
 from ..config import StationConfig
 from ..install import DependencyKind, DependencyStatus, hamlib_installer
 from ..install.dependencies import inspect_dependencies
+from ..i18n import dual
 from ..message import Folder, MessageStore
 from ..operations import Operations
 from ..routing import HeardStations, RouteTable
@@ -45,7 +46,10 @@ class ShellRuntime:
         )
         self.refresh()
         self.request_dependency_refresh()
-        self.events.publish("Guardian Monitor shell started.", source="ui")
+        self.events.publish(
+            dual("Guardian Monitor shell started.", "Guardian Monitor byl spuštěn."),
+            source="ui",
+        )
 
     def refresh(self) -> None:
         counts = self.mailstore.counts()
@@ -78,7 +82,10 @@ class ShellRuntime:
         def completed(result: TaskResult) -> None:
             if result.error is not None:
                 self.events.publish(
-                    f"Dependency scan failed: {result.error}",
+                    dual(
+                        f"Dependency scan failed: {result.error}",
+                        f"Kontrola závislostí selhala: {result.error}",
+                    ),
                     source="dependency",
                 )
                 return
@@ -95,7 +102,13 @@ class ShellRuntime:
                     vara_hf_available=vara_hf.available,
                 )
             )
-            self.events.publish("Dependency scan complete.", source="dependency")
+            self.events.publish(
+                dual(
+                    "Dependency scan complete.",
+                    "Kontrola závislostí byla dokončena.",
+                ),
+                source="dependency",
+            )
 
         return self.workers.submit(
             "dependency-scan",
@@ -104,7 +117,13 @@ class ShellRuntime:
         )
 
     def install_hamlib(self, on_complete=None) -> bool:
-        self.events.publish("Installing verified Hamlib package…", source="dependency")
+        self.events.publish(
+            dual(
+                "Installing verified Hamlib package…",
+                "Instaluji ověřený balíček Hamlib…",
+            ),
+            source="dependency",
+        )
 
         def install():
             return hamlib_installer.install(
@@ -116,14 +135,21 @@ class ShellRuntime:
         def completed(result: TaskResult) -> None:
             if result.error is not None:
                 self.events.publish(
-                    f"Hamlib installation failed: {result.error}",
+                    dual(
+                        f"Hamlib installation failed: {result.error}",
+                        f"Instalace Hamlibu selhala: {result.error}",
+                    ),
                     source="dependency",
                 )
             else:
                 self.config.rigctld_path = str(result.value)
                 self.config.save()
                 self.events.publish(
-                    "Hamlib installation completed.", source="dependency"
+                    dual(
+                        "Hamlib installation completed.",
+                        "Instalace Hamlibu byla dokončena.",
+                    ),
+                    source="dependency",
                 )
                 self.request_dependency_refresh()
             if on_complete is not None:
@@ -135,14 +161,26 @@ class ShellRuntime:
         def completed(result: TaskResult) -> None:
             if result.error is not None:
                 self.events.publish(
-                    f"Update check failed: {result.error}",
+                    dual(
+                        f"Update check failed: {result.error}",
+                        f"Kontrola aktualizace selhala: {result.error}",
+                    ),
                     source="update",
                 )
             elif result.value is None:
-                self.events.publish("Guardian is up to date.", source="update")
+                self.events.publish(
+                    dual(
+                        "Guardian is up to date.",
+                        "Guardian je aktuální.",
+                    ),
+                    source="update",
+                )
             else:
                 self.events.publish(
-                    f"Guardian {result.value.version} is available.",
+                    dual(
+                        f"Guardian {result.value.version} is available.",
+                        f"Je dostupný Guardian {result.value.version}.",
+                    ),
                     source="update",
                 )
             if on_complete is not None:

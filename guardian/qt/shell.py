@@ -23,8 +23,10 @@ from PySide6.QtWidgets import (
 
 from .. import __app_name__, __version__
 from ..assets import get_ico_path
+from ..i18n import dual, tr
 from ..services import ApplicationSnapshot
 from .diagnostics_dialog import DiagnosticsDialog
+from .help_dialog import HelpDialog
 from .log_workspace import LogWorkspace
 from .mail_workspace import MailWorkspace
 from .network_workspace import NetworkWorkspace
@@ -99,63 +101,71 @@ class GuardianMainWindow(QMainWindow):
         QTimer.singleShot(5_000, self._check_for_updates_silently)
 
     def _build_menu(self) -> None:
-        file_menu = self.menuBar().addMenu("&File")
-        exit_action = QAction("Exit", self)
+        file_menu = self.menuBar().addMenu(tr("menu.file"))
+        exit_action = QAction(tr("menu.exit"), self)
         exit_action.setShortcut("Alt+F4")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        view_menu = self.menuBar().addMenu("&View")
+        view_menu = self.menuBar().addMenu(tr("menu.view"))
         self.workspace_actions: dict[str, QAction] = {}
         workspace_group = QActionGroup(self)
         workspace_group.setExclusive(True)
-        for index, label in enumerate(("Home", "Mail", "Network", "Log")):
+        workspace_labels = (
+            ("home", tr("menu.home")),
+            ("mail", tr("menu.mail")),
+            ("network", tr("menu.network")),
+            ("log", tr("menu.log")),
+        )
+        for index, (name, label) in enumerate(workspace_labels):
             action = QAction(label, self)
             action.setCheckable(True)
             action.setChecked(index == 0)
             action.triggered.connect(
-                lambda _checked=False, name=label.lower():
+                lambda _checked=False, name=name:
                 self._show_workspace(name)
             )
             workspace_group.addAction(action)
             view_menu.addAction(action)
-            self.workspace_actions[label.lower()] = action
+            self.workspace_actions[name] = action
 
-        tools_menu = self.menuBar().addMenu("&Tools")
-        connect_radio = QAction("Connect / disconnect radio", self)
+        tools_menu = self.menuBar().addMenu(tr("menu.tools"))
+        connect_radio = QAction(tr("menu.radio_toggle"), self)
         connect_radio.triggered.connect(self._toggle_radio)
         tools_menu.addAction(connect_radio)
-        connect_vara = QAction("Connect / disconnect VARA", self)
+        connect_vara = QAction(tr("menu.vara_toggle"), self)
         connect_vara.triggered.connect(self._toggle_vara)
         tools_menu.addAction(connect_vara)
-        control_channel = QAction("Start / stop control channel", self)
+        control_channel = QAction(tr("menu.control_toggle"), self)
         control_channel.triggered.connect(self._toggle_control)
         tools_menu.addAction(control_channel)
         tools_menu.addSeparator()
-        readiness = QAction("Station readiness", self)
+        readiness = QAction(tr("menu.readiness"), self)
         readiness.triggered.connect(self._show_readiness)
         tools_menu.addAction(readiness)
-        diagnostics = QAction("Diagnostics", self)
+        diagnostics = QAction(tr("menu.diagnostics"), self)
         diagnostics.triggered.connect(self._show_diagnostics)
         tools_menu.addAction(diagnostics)
         tools_menu.addSeparator()
-        updates = QAction("Check for updates", self)
+        updates = QAction(tr("menu.updates"), self)
         updates.triggered.connect(self._check_for_updates)
         tools_menu.addAction(updates)
 
-        settings_menu = self.menuBar().addMenu("&Settings")
-        configuration = QAction("Station settings", self)
-        configuration.setShortcut("Ctrl+,")
-        configuration.triggered.connect(self._show_settings)
-        settings_menu.addAction(configuration)
-        theme_menu = settings_menu.addMenu("Theme")
+        settings_menu = self.menuBar().addMenu(tr("menu.settings"))
+        self.station_settings_action = QAction(
+            tr("menu.station_settings"),
+            self,
+        )
+        self.station_settings_action.triggered.connect(self._show_settings)
+        settings_menu.addAction(self.station_settings_action)
+        theme_menu = settings_menu.addMenu(tr("menu.theme"))
         group = QActionGroup(self)
         group.setExclusive(True)
         self.theme_actions: dict[ThemePreference, QAction] = {}
         labels = {
-            ThemePreference.SYSTEM: "Follow system",
-            ThemePreference.LIGHT: "Light",
-            ThemePreference.DARK: "Dark",
+            ThemePreference.SYSTEM: tr("theme.system"),
+            ThemePreference.LIGHT: tr("theme.light"),
+            ThemePreference.DARK: tr("theme.dark"),
         }
         for preference, label in labels.items():
             action = QAction(label, self)
@@ -169,8 +179,12 @@ class GuardianMainWindow(QMainWindow):
             theme_menu.addAction(action)
             self.theme_actions[preference] = action
 
-        help_menu = self.menuBar().addMenu("&Help")
-        about = QAction("About Guardian", self)
+        help_menu = self.menuBar().addMenu(tr("menu.help"))
+        user_guide = QAction(tr("menu.user_guide"), self)
+        user_guide.triggered.connect(self._show_help)
+        help_menu.addAction(user_guide)
+        help_menu.addSeparator()
+        about = QAction(tr("menu.about"), self)
         about.triggered.connect(self._show_about)
         help_menu.addAction(about)
 
@@ -205,7 +219,7 @@ class GuardianMainWindow(QMainWindow):
         outer.addWidget(self._build_status_strip())
 
         self.statusBar().showMessage(
-            "Guardian operational workspace ready"
+            tr("shell.ready")
         )
 
     def _build_operational_header(self) -> QFrame:
@@ -219,7 +233,7 @@ class GuardianMainWindow(QMainWindow):
         context_layout = QVBoxLayout(context)
         context_layout.setContentsMargins(0, 0, 0, 0)
         context_layout.setSpacing(4)
-        section = QLabel("STATION CONTEXT")
+        section = QLabel(tr("shell.station_context"))
         section.setObjectName("SectionLabel")
         self.context_value = QLabel()
         self.context_value.setObjectName("ContextValue")
@@ -239,22 +253,19 @@ class GuardianMainWindow(QMainWindow):
         operation_layout = QVBoxLayout(operation)
         operation_layout.setContentsMargins(0, 0, 0, 0)
         operation_layout.setSpacing(4)
-        operation_title = QLabel("OPERATION")
+        operation_title = QLabel(tr("shell.operation"))
         operation_title.setObjectName("SectionLabel")
         self.operation_state = StatusIndicator()
-        self.operation_state.set_status("inactive", "Station idle")
-        operation_detail = QLabel(
-            "Connect hardware explicitly, then start the audio control channel "
-            "when the station is ready to exchange ARDOS frames."
-        )
+        self.operation_state.set_status("inactive", tr("shell.station_idle"))
+        operation_detail = QLabel(tr("shell.operation_detail"))
         operation_detail.setObjectName("Metadata")
         operation_detail.setWordWrap(True)
         controls = QHBoxLayout()
-        self.radio_button = QPushButton("Connect radio")
+        self.radio_button = QPushButton(tr("shell.connect_radio"))
         self.radio_button.clicked.connect(self._toggle_radio)
-        self.vara_button = QPushButton("Connect VARA")
+        self.vara_button = QPushButton(tr("shell.connect_vara"))
         self.vara_button.clicked.connect(self._toggle_vara)
-        self.control_button = QPushButton("Start control")
+        self.control_button = QPushButton(tr("shell.start_control"))
         self.control_button.setObjectName("primaryAction")
         self.control_button.clicked.connect(self._toggle_control)
         controls.addWidget(self.radio_button)
@@ -274,12 +285,12 @@ class GuardianMainWindow(QMainWindow):
         layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(20)
         self.metrics = {
-            "inbox": MetricItem("Inbox"),
-            "unread": MetricItem("Unread"),
-            "outbox": MetricItem("Outbox"),
-            "transit": MetricItem("Transit"),
-            "sessions": MetricItem("Sessions"),
-            "heard": MetricItem("Heard"),
+            "inbox": MetricItem(tr("metric.inbox")),
+            "unread": MetricItem(tr("metric.unread")),
+            "outbox": MetricItem(tr("metric.outbox")),
+            "transit": MetricItem(tr("metric.transit")),
+            "sessions": MetricItem(tr("metric.sessions")),
+            "heard": MetricItem(tr("metric.heard")),
         }
         for item in self.metrics.values():
             layout.addWidget(item)
@@ -293,18 +304,22 @@ class GuardianMainWindow(QMainWindow):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
 
-        heading = QLabel("Station readiness")
+        heading = QLabel(tr("readiness.title"))
         heading.setObjectName("PanelHeader")
-        description = QLabel(
-            "A concise view of the components required for normal operation."
-        )
+        description = QLabel(tr("readiness.short"))
         description.setObjectName("Metadata")
         layout.addWidget(heading)
         layout.addWidget(description)
 
         self.readiness = QTreeWidget()
         self.readiness.setColumnCount(3)
-        self.readiness.setHeaderLabels(["Component", "State", "Detail"])
+        self.readiness.setHeaderLabels(
+            [
+                tr("readiness.component"),
+                tr("readiness.state"),
+                tr("readiness.detail"),
+            ]
+        )
         self.readiness.setRootIsDecorated(False)
         self.readiness.setAlternatingRowColors(True)
         self.readiness.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
@@ -313,9 +328,7 @@ class GuardianMainWindow(QMainWindow):
         self.readiness.setColumnWidth(1, 115)
         layout.addWidget(self.readiness, 1)
 
-        hint = QLabel(
-            "Use Tools > Station readiness to locate or install missing components."
-        )
+        hint = QLabel(tr("readiness.hint"))
         hint.setObjectName("Metadata")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -329,9 +342,9 @@ class GuardianMainWindow(QMainWindow):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
 
-        heading = QLabel("Activity")
+        heading = QLabel(tr("activity.title"))
         heading.setObjectName("PanelHeader")
-        self.activity_count = QLabel("0 events")
+        self.activity_count = QLabel(tr("activity.events", count=0))
         self.activity_count.setObjectName("Metadata")
         top = QHBoxLayout()
         top.addWidget(heading)
@@ -343,7 +356,7 @@ class GuardianMainWindow(QMainWindow):
         self.activity.setReadOnly(True)
         fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         self.activity.setFont(fixed)
-        self.activity.setAccessibleName("Guardian activity log")
+        self.activity.setAccessibleName(tr("activity.accessible"))
         layout.addWidget(self.activity, 1)
         return panel
 
@@ -381,7 +394,7 @@ class GuardianMainWindow(QMainWindow):
                 "\n".join(event.display_text for event in events)
             )
         self.activity_count.setText(
-            f"{len(self.runtime.events.history())} events"
+            tr("activity.events", count=len(self.runtime.events.history()))
         )
         active = self.workspace_stack.currentWidget()
         refresh = getattr(active, "refresh", None)
@@ -397,7 +410,15 @@ class GuardianMainWindow(QMainWindow):
         refresh = getattr(workspace, "refresh", None)
         if callable(refresh):
             refresh()
-        self.statusBar().showMessage(f"{name.title()} workspace")
+        display_names = {
+            "home": tr("menu.home"),
+            "mail": tr("menu.mail"),
+            "network": tr("menu.network"),
+            "log": tr("menu.log"),
+        }
+        self.statusBar().showMessage(
+            tr("workspace.status", name=display_names[name])
+        )
 
     def _apply_snapshot(self, snapshot: ApplicationSnapshot) -> None:
         config = self.runtime.config
@@ -409,9 +430,17 @@ class GuardianMainWindow(QMainWindow):
         self.context_value.setText(
             f"{config.callsign or 'NOCALL'}  ·  {config.vara_mode}  ·  {payload}"
         )
-        radio_name = config.radio or config.radio_backend or "not configured"
+        radio_name = (
+            config.radio
+            or config.radio_backend
+            or tr("context.not_configured")
+        )
         self.context_detail.setText(
-            f"Radio: {radio_name}  ·  Control modem: {config.active_modem()}"
+            tr(
+                "context.radio_modem",
+                radio=radio_name,
+                modem=config.active_modem(),
+            )
         )
 
         mailbox = snapshot.mailbox
@@ -433,63 +462,89 @@ class GuardianMainWindow(QMainWindow):
         )
         dependency = snapshot.dependencies
         hamlib_role = "success" if dependency.hamlib_available else "warning"
-        self.radio_status.set_status(radio_role, "Radio: connected" if snapshot.radio.connected else "Radio: off")
-        self.vara_status.set_status(vara_role, "VARA: connected" if snapshot.vara.command_connected else "VARA: off")
+        self.radio_status.set_status(
+            radio_role,
+            tr("status.radio_on")
+            if snapshot.radio.connected
+            else tr("status.radio_off"),
+        )
+        self.vara_status.set_status(
+            vara_role,
+            tr("status.vara_on")
+            if snapshot.vara.command_connected
+            else tr("status.vara_off"),
+        )
         self.control_status.set_status(
             control_role,
-            "Control: active"
+            tr("status.control_on")
             if snapshot.network.control_channel_active
-            else "Control: off",
+            else tr("status.control_off"),
         )
         self.hamlib_status.set_status(
             hamlib_role,
-            "Hamlib: ready" if dependency.hamlib_available else "Hamlib: missing",
+            tr("status.hamlib_ready")
+            if dependency.hamlib_available
+            else tr("status.hamlib_missing"),
         )
         self.radio_button.setText(
-            "Disconnect radio" if snapshot.radio.connected else "Connect radio"
+            tr("shell.disconnect_radio")
+            if snapshot.radio.connected
+            else tr("shell.connect_radio")
         )
         self.vara_button.setText(
-            "Disconnect VARA"
+            tr("shell.disconnect_vara")
             if snapshot.vara.command_connected
-            else "Connect VARA"
+            else tr("shell.connect_vara")
         )
         self.control_button.setText(
-            "Stop control"
+            tr("shell.stop_control")
             if snapshot.network.control_channel_active
-            else "Start control"
+            else tr("shell.start_control")
         )
         if snapshot.network.control_channel_active:
-            self.operation_state.set_status("success", "Control channel active")
+            self.operation_state.set_status(
+                "success", tr("status.control_active")
+            )
         elif snapshot.radio.connected or snapshot.vara.command_connected:
-            self.operation_state.set_status("info", "Hardware connected")
+            self.operation_state.set_status(
+                "info", tr("status.hardware_connected")
+            )
         else:
-            self.operation_state.set_status("inactive", "Station idle")
+            self.operation_state.set_status(
+                "inactive", tr("shell.station_idle")
+            )
 
         rows = [
             (
-                "Station identity",
-                "Ready" if config.callsign and config.callsign != "NOCALL" else "Needs setup",
-                config.callsign or "No callsign configured",
+                tr("ready.identity"),
+                tr("common.ready")
+                if config.callsign and config.callsign != "NOCALL"
+                else tr("ready.needs_setup"),
+                config.callsign or tr("ready.no_callsign"),
             ),
             (
-                "Radio control",
-                "Configured" if config.radio_backend != "none" else "Not configured",
+                tr("ready.radio"),
+                tr("common.configured")
+                if config.radio_backend != "none"
+                else tr("common.not_configured"),
                 radio_name,
             ),
             (
                 "Hamlib",
-                "Available" if dependency.hamlib_available else "Missing",
-                dependency.hamlib_path or "Open Station readiness for guided setup",
+                tr("common.available")
+                if dependency.hamlib_available
+                else tr("common.missing"),
+                dependency.hamlib_path or tr("ready.hamlib_guidance"),
             ),
             (
                 f"VARA {config.vara_mode}",
-                "Endpoint set",
+                tr("ready.endpoint"),
                 f"{config.vara_host}:{config.vara_cmd_port}",
             ),
             (
-                "Payload workflow",
+                tr("ready.payload"),
                 payload,
-                "Uses the shared ARDOS session and payload controller",
+                tr("ready.payload_detail"),
             ),
         ]
         self.readiness.clear()
@@ -503,10 +558,12 @@ class GuardianMainWindow(QMainWindow):
             self.runtime.config,
             self.theme_controller.preference,
             self,
+            settings=self.settings,
         )
 
         def apply_changes() -> None:
             self.theme_controller.set_preference(dialog.selected_theme)
+            self._rebuild_translated_ui()
             self.runtime.refresh()
             self.runtime.request_dependency_refresh()
             self._refresh()
@@ -531,32 +588,69 @@ class GuardianMainWindow(QMainWindow):
         self.runtime.drain_workers()
         DiagnosticsDialog(self.runtime, self).exec()
 
+    def _show_help(self) -> None:
+        HelpDialog(self).exec()
+
+    def _rebuild_translated_ui(self) -> None:
+        current_name = "home"
+        if hasattr(self, "workspace_stack"):
+            current_widget = self.workspace_stack.currentWidget()
+            current_name = next(
+                (
+                    name
+                    for name, widget in self.workspace_names.items()
+                    if widget is current_widget
+                ),
+                "home",
+            )
+        self.menuBar().clear()
+        previous = self.takeCentralWidget()
+        if previous is not None:
+            previous.deleteLater()
+        self._build_menu()
+        self._build_shell()
+        self._show_workspace(current_name)
+        history = self.runtime.events.history()
+        if history:
+            self.activity.setPlainText(
+                "\n".join(event.display_text for event in history)
+            )
+
     def _check_for_updates_silently(self) -> None:
         self.runtime.request_update_check(self._update_check_completed)
 
     def _check_for_updates(self) -> None:
         if self.runtime.request_update_check(self._update_check_completed):
-            self.statusBar().showMessage("Checking for Guardian updates…")
+            self.statusBar().showMessage(
+                dual(
+                    "Checking for Guardian updates…",
+                    "Kontroluji aktualizace Guardianu…",
+                )
+            )
 
     def _update_check_completed(self, result) -> None:
         if result.error is not None:
             self.statusBar().showMessage(
-                f"Update check failed: {result.error}",
+                dual(
+                    f"Update check failed: {result.error}",
+                    f"Kontrola aktualizací selhala: {result.error}",
+                ),
                 10_000,
             )
             return
         if result.value is None:
-            self.statusBar().showMessage("Guardian is up to date.", 5_000)
+            self.statusBar().showMessage(
+                dual("Guardian is up to date.", "Guardian je aktuální."),
+                5_000,
+            )
             return
         UpdateDialog(self.runtime, result.value, self).exec()
 
     def _show_about(self) -> None:
         QMessageBox.about(
             self,
-            "About Guardian",
-            f"<b>{__app_name__} {__version__}</b><br>"
-            "ARDOS control and routing layer.<br><br>"
-            "This Monitor shell uses the shared Modeling Anten design language.",
+            tr("about.title"),
+            tr("about.body", app=__app_name__, version=__version__),
         )
 
     def _toggle_radio(self) -> None:
@@ -577,22 +671,35 @@ class GuardianMainWindow(QMainWindow):
             return
         answer = QMessageBox.question(
             self,
-            "Start control channel",
-            "Start the live audio control channel? ARDOS control frames may key "
-            "the configured radio only after you explicitly send or respond.",
+            dual("Start control channel", "Spustit řídicí kanál"),
+            dual(
+                "Start the live audio control channel? ARDOS control frames may "
+                "key the configured radio only after you explicitly send or respond.",
+                "Spustit živý zvukový řídicí kanál? Rámce ARDOS mohou zaklíčovat "
+                "nastavené rádio až při výslovném odeslání nebo odpovědi.",
+            ),
         )
         if answer == QMessageBox.StandardButton.Yes:
             self.runtime.operations.start_control_channel()
 
     def _winlink_prompt(self, role: str, message, done) -> None:
-        action = "Sent" if role == "send" else "Received"
+        action = (
+            dual("sent", "odeslána")
+            if role == "send"
+            else dual("received", "přijata")
+        )
         peer = message.next_hop if role == "send" else message.source
         answer = QMessageBox.question(
             self,
-            "Winlink hand-off",
-            f"Message #{message.msg_id}\nPeer: {peer}\n"
-            f"Final destination: {message.final_dest}\n\n"
-            f"Confirm {action.lower()} only after the Winlink transfer completes.",
+            dual("Winlink hand-off", "Předání přes Winlink"),
+            dual(
+                f"Message #{message.msg_id}\nPeer: {peer}\n"
+                f"Final destination: {message.final_dest}\n\n"
+                f"Confirm {action} only after the Winlink transfer completes.",
+                f"Zpráva #{message.msg_id}\nProtistanice: {peer}\n"
+                f"Konečný cíl: {message.final_dest}\n\n"
+                f"Potvrďte, že zpráva byla {action}, až po dokončení přenosu Winlink.",
+            ),
         )
         done(answer == QMessageBox.StandardButton.Yes)
 

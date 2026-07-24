@@ -9,6 +9,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from .. import __app_name__, __version__
+from ..i18n import set_language
 from .runtime import ShellRuntime
 from .shell import GuardianMainWindow
 from .performance import start_probe_from_environment
@@ -21,6 +22,7 @@ def main() -> None:
     application.setOrganizationDomain("ardos.radio")
     application.setFont(QFont("Segoe UI", 9))
     settings = QSettings()
+    set_language(str(settings.value("ui/language", "en")))
     runtime = ShellRuntime()
 
     window = GuardianMainWindow(runtime, settings)

@@ -12,7 +12,12 @@ Completed: 2026-07-24
 - The existing `vara_p2p` and `winlink_manual` payload implementations and the
   protocol/session state machines were not modified.
 - Settings are grouped into Station, Radio control, VARA & payload, Network
-  behavior and Appearance.
+  behavior and Appearance. The complete operator interface and activity
+  messages can be switched between English and Czech.
+- Mail composition provides interoperable plaintext forms for ICS-213,
+  ICS-214 and IARU emergency traffic, plus a clearly identified local SITREP
+  template. The built-in bilingual help contains ten searchable operator
+  topics.
 - First-run readiness detects Hamlib, VARA FM and VARA HF. Hamlib installation
   remains verified and consent-based; separately licensed VARA software opens
   its official source.
@@ -27,14 +32,14 @@ Completed: 2026-07-24
 
 ## Verification
 
-- Automated tests: **38 passed**
+- Automated tests: **43 passed**
 - Python bytecode compilation: passed
 - Frozen `Guardian.exe` smoke: remained running and responsive
 - Native Windows visual smoke: Light and Dark at 1366×768 passed
 - Installer: Inno Setup 6.7.3 compiled successfully
-- Installer size: 39,878,033 bytes
+- Installer size: 39,911,384 bytes
 - Installer SHA-256:
-  `2c65efded2705d0c898b6e3830f4cb37d1a45e5c390ed2c6c20727d96ea86da3`
+  `e3fcb7024dc5ad1f820ae01ccc57c86754558960e065773057cf148545e0301e`
 - Signature status: unsigned (expected for this development build)
 
 The hardware-safe smoke test verifies that startup and background ticks do not

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..i18n import dual, tr
 from ..install import DependencyKind
 from ..services import TaskResult
 from .runtime import ShellRuntime
@@ -32,15 +33,19 @@ class ReadinessDialog(QDialog):
         super().__init__(parent)
         self.runtime = runtime
         self.settings = settings
-        self.setWindowTitle("Guardian readiness")
-        self.setMinimumSize(760, 430)
+        self.setWindowTitle(tr("readiness.title"))
+        self.setMinimumSize(780, 450)
 
         outer = QVBoxLayout(self)
-        heading = QLabel("Prepare this station")
+        heading = QLabel(dual("Prepare this station", "Připravte tuto stanici"))
         heading.setObjectName("PanelHeader")
         description = QLabel(
-            "Guardian checks external tools without transmitting or opening a "
-            "radio. Nothing is downloaded or launched without your action."
+            dual(
+                "Guardian checks external tools without transmitting or opening "
+                "a radio. Nothing is downloaded or launched without your action.",
+                "Guardian kontroluje externí nástroje bez vysílání a bez otevření "
+                "rádia. Bez vašeho pokynu se nic nestáhne ani nespustí.",
+            )
         )
         description.setObjectName("Metadata")
         description.setWordWrap(True)
@@ -58,13 +63,16 @@ class ReadinessDialog(QDialog):
         self.summary.setWordWrap(True)
         outer.addWidget(self.summary)
         actions = QHBoxLayout()
-        self.rescan = QPushButton("Scan again")
+        self.rescan = QPushButton(dual("Scan again", "Zkontrolovat znovu"))
         self.rescan.clicked.connect(self._rescan)
         actions.addWidget(self.rescan)
         actions.addStretch()
         outer.addLayout(actions)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText(
+            tr("common.close")
+        )
         buttons.rejected.connect(self._finish)
         outer.addWidget(buttons)
 
@@ -77,7 +85,13 @@ class ReadinessDialog(QDialog):
     def _rescan(self) -> None:
         self.rescan.setEnabled(False)
         self.summary.setProperty("statusRole", "info")
-        self.summary.setText("◐ Scanning local dependencies…")
+        self.summary.setText(
+            "◐ "
+            + dual(
+                "Scanning local dependencies…",
+                "Kontroluji místní závislosti…",
+            )
+        )
         self.runtime.request_dependency_refresh()
 
     def _tick(self) -> None:
@@ -94,33 +108,64 @@ class ReadinessDialog(QDialog):
             if widget is not None:
                 widget.deleteLater()
 
+    def _detail(self, status) -> str:
+        if status.available:
+            return status.detail
+        if status.kind == DependencyKind.HAMLIB:
+            return dual(
+                "Not found. Guardian can install a verified portable build.",
+                "Nenalezeno. Guardian může nainstalovat ověřenou přenosnou verzi.",
+            )
+        return dual(
+            "Not found. Download it from the VARA author's website.",
+            "Nenalezeno. Stáhněte VARA z oficiálního webu autora.",
+        )
+
     def _render(self) -> None:
         statuses = self.runtime.dependency_statuses
         if not statuses:
             return
         self._clear_grid()
-        headers = ("Component", "State", "Detected path / guidance", "Action")
+        headers = (
+            tr("readiness.component"),
+            tr("readiness.state"),
+            dual("Detected path / guidance", "Nalezená cesta / doporučení"),
+            dual("Action", "Akce"),
+        )
         for column, text in enumerate(headers):
             label = QLabel(text)
             label.setObjectName("SectionLabel")
             self.grid.addWidget(label, 0, column)
         for row, status in enumerate(statuses, start=1):
             self.grid.addWidget(QLabel(status.label), row, 0)
-            state = QLabel("● Ready" if status.available else "◆ Missing")
+            state = QLabel(
+                ("● " + tr("common.ready"))
+                if status.available
+                else ("◆ " + tr("common.missing"))
+            )
             state.setProperty(
                 "statusRole", "success" if status.available else "warning"
             )
             self.grid.addWidget(state, row, 1)
-            detail = QLabel(status.detail)
+            detail = QLabel(self._detail(status))
             detail.setObjectName("Metadata")
             detail.setWordWrap(True)
             self.grid.addWidget(detail, row, 2)
             action = QPushButton()
             if status.kind == DependencyKind.HAMLIB and not status.available:
-                action.setText("Install verified Hamlib")
+                action.setText(
+                    dual(
+                        "Install verified Hamlib",
+                        "Nainstalovat ověřený Hamlib",
+                    )
+                )
                 action.clicked.connect(self._install_hamlib)
             elif status.kind in (DependencyKind.VARA_FM, DependencyKind.VARA_HF):
-                action.setText("Open official source" if not status.available else "Locate another…")
+                action.setText(
+                    dual("Open official source", "Otevřít oficiální zdroj")
+                    if not status.available
+                    else dual("Locate another…", "Vybrat jiný…")
+                )
                 if status.available:
                     action.clicked.connect(
                         lambda _checked=False, kind=status.kind: self._locate(kind)
@@ -131,7 +176,7 @@ class ReadinessDialog(QDialog):
                         QDesktopServices.openUrl(QUrl(url))
                     )
             else:
-                action.setText("Locate…")
+                action.setText(dual("Locate…", "Vybrat…"))
                 action.clicked.connect(
                     lambda _checked=False, kind=status.kind: self._locate(kind)
                 )
@@ -157,18 +202,31 @@ class ReadinessDialog(QDialog):
             "statusRole", "success" if station_ready else "warning"
         )
         self.summary.setText(
-            "● Station is ready for the selected workflow."
+            "● "
+            + dual(
+                "Station is ready for the selected workflow.",
+                "Stanice je připravena pro zvolený způsob práce.",
+            )
             if station_ready
-            else "◆ Complete the station identity and selected VARA dependency "
-            "before normal operation."
+            else "◆ "
+            + dual(
+                "Complete the station identity and selected VARA dependency "
+                "before normal operation.",
+                "Před běžným provozem doplňte identitu stanice a zvolenou "
+                "závislost VARA.",
+            )
         )
 
     def _install_hamlib(self) -> None:
         answer = QMessageBox.question(
             self,
-            "Install Hamlib",
-            "Download the official portable Hamlib build, verify its SHA-256 "
-            "checksum when published, and install it into Guardian's user data?",
+            dual("Install Hamlib", "Instalace Hamlib"),
+            dual(
+                "Download the official portable Hamlib build, verify its SHA-256 "
+                "checksum when published, and install it into Guardian's user data?",
+                "Stáhnout oficiální přenosnou verzi Hamlib, ověřit její SHA-256 "
+                "a nainstalovat ji do uživatelských dat Guardianu?",
+            ),
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -177,7 +235,9 @@ class ReadinessDialog(QDialog):
         def completed(result: TaskResult) -> None:
             if result.error is not None:
                 QMessageBox.critical(
-                    self, "Hamlib installation", str(result.error)
+                    self,
+                    dual("Hamlib installation", "Instalace Hamlib"),
+                    str(result.error),
                 )
             self._render()
 
@@ -192,9 +252,12 @@ class ReadinessDialog(QDialog):
         label, pattern = names[kind]
         path, _ = QFileDialog.getOpenFileName(
             self,
-            f"Locate {label}",
+            dual(f"Locate {label}", f"Vyberte {label}"),
             "",
-            f"{label} ({pattern});;Executables (*.exe)",
+            dual(
+                f"{label} ({pattern});;Executables (*.exe)",
+                f"{label} ({pattern});;Spustitelné soubory (*.exe)",
+            ),
         )
         if not path:
             return

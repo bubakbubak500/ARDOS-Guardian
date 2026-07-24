@@ -1,4 +1,4 @@
-"""Fast native mailbox workspace backed by Guardian's existing MessageStore."""
+"""Native mailbox workspace backed by Guardian's existing MessageStore."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -27,7 +28,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..i18n import language, tr
 from ..message import Attachment, Folder, MailMessage, Status
+from ..message.forms import FORMS
 from ..protocol import Priority
 from .runtime import ShellRuntime
 
@@ -45,75 +48,185 @@ class ComposeDialog(QDialog):
         super().__init__(parent)
         self.runtime = runtime
         self.attachments: list[Attachment] = []
-        self.setWindowTitle("Compose message")
-        self.setMinimumSize(660, 560)
+        self.field_widgets: dict[str, QLineEdit | QPlainTextEdit] = {}
+        self.setWindowTitle(tr("compose.title"))
+        self.setMinimumSize(720, 640)
+
         outer = QVBoxLayout(self)
-        form = QFormLayout()
+        header = QFormLayout()
         self.destination = QLineEdit()
         self.destination.setPlaceholderText("OK1AAA")
-        self.subject = QLineEdit()
+        self.template = QComboBox()
+        self.template.addItem(tr("compose.template_plain"), "Plain")
+        for code, message_form in FORMS.items():
+            self.template.addItem(
+                message_form.display_name(language().value),
+                code,
+            )
+        self.template.currentIndexChanged.connect(self._render_template)
         self.priority = QComboBox()
         for priority in Priority:
-            self.priority.addItem(priority.name.title(), int(priority))
-        form.addRow("To", self.destination)
-        form.addRow("Subject", self.subject)
-        form.addRow("Priority", self.priority)
-        outer.addLayout(form)
-        self.body = QPlainTextEdit()
-        self.body.setPlaceholderText("Message text")
-        outer.addWidget(self.body, 1)
+            self.priority.addItem(
+                tr(f"priority.{priority.name.lower()}"),
+                int(priority),
+            )
+        header.addRow(tr("compose.to"), self.destination)
+        header.addRow(tr("compose.template"), self.template)
+        header.addRow(tr("compose.priority"), self.priority)
+        outer.addLayout(header)
+
+        self.template_description = QLabel()
+        self.template_description.setObjectName("Metadata")
+        self.template_description.setWordWrap(True)
+        outer.addWidget(self.template_description)
+
+        self.form_scroll = QScrollArea()
+        self.form_scroll.setWidgetResizable(True)
+        self.form_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.form_host = QWidget()
+        self.form_layout = QFormLayout(self.form_host)
+        self.form_layout.setContentsMargins(2, 4, 2, 4)
+        self.form_layout.setVerticalSpacing(8)
+        self.form_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        self.form_scroll.setWidget(self.form_host)
+        outer.addWidget(self.form_scroll, 1)
+
         attachment_bar = QHBoxLayout()
-        self.attachment_summary = QLabel("No attachments")
+        self.attachment_summary = QLabel(tr("compose.no_attachments"))
         self.attachment_summary.setObjectName("Metadata")
-        attach = QPushButton("Attach files…")
+        attach = QPushButton(tr("compose.attach"))
         attach.clicked.connect(self._attach)
         attachment_bar.addWidget(self.attachment_summary, 1)
         attachment_bar.addWidget(attach)
         outer.addLayout(attachment_bar)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.button(QDialogButtonBox.StandardButton.Save).setText(
-            "Queue in Outbox"
+            tr("compose.queue")
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(
+            tr("common.cancel")
         )
         buttons.accepted.connect(self._queue)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+
+        self._render_template()
+        self.subject = self.field_widgets["subject"]
+        self.body = self.field_widgets["body"]
         if reply_to is not None:
             self.destination.setText(reply_to.source)
-            self.subject.setText(f"Re: {reply_to.subject}")
+            subject = self.field_widgets["subject"]
+            body = self.field_widgets["body"]
+            assert isinstance(subject, QLineEdit)
+            assert isinstance(body, QPlainTextEdit)
+            subject.setText(f"Re: {reply_to.subject}")
             quoted = "\n".join(f"> {line}" for line in reply_to.body.splitlines())
-            self.body.setPlainText(
-                f"\n\n--- {reply_to.source} wrote ---\n{quoted}"
+            body.setPlainText(
+                tr(
+                    "compose.reply_quote",
+                    source=reply_to.source,
+                    quoted=quoted,
+                )
             )
 
+    def _clear_form(self) -> None:
+        while self.form_layout.count():
+            item = self.form_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.field_widgets.clear()
+
+    def _render_template(self) -> None:
+        self._clear_form()
+        code = self.template.currentData()
+        if code == "Plain":
+            self.template_description.setText(tr("compose.structured_hint"))
+            subject = QLineEdit()
+            body = QPlainTextEdit()
+            body.setMinimumHeight(260)
+            self.form_layout.addRow(tr("mail.subject"), subject)
+            self.form_layout.addRow(tr("compose.message"), body)
+            self.field_widgets["subject"] = subject
+            self.field_widgets["body"] = body
+            return
+
+        message_form = FORMS[str(code)]
+        self.template_description.setText(
+            message_form.display_description(language().value)
+            + "\n"
+            + tr("compose.structured_hint")
+        )
+        for field in message_form.fields:
+            if field.multiline:
+                widget: QLineEdit | QPlainTextEdit = QPlainTextEdit()
+                widget.setMinimumHeight(90)
+            else:
+                widget = QLineEdit()
+            self.form_layout.addRow(
+                field.display_label(language().value),
+                widget,
+            )
+            self.field_widgets[field.key] = widget
+
+    @staticmethod
+    def _widget_value(widget: QLineEdit | QPlainTextEdit) -> str:
+        if isinstance(widget, QPlainTextEdit):
+            return widget.toPlainText().rstrip()
+        return widget.text().strip()
+
     def _attach(self) -> None:
-        for value in QFileDialog.getOpenFileNames(
-            self, "Attach files"
-        )[0]:
+        paths, _ = QFileDialog.getOpenFileNames(self, tr("compose.attach"))
+        for value in paths:
             path = Path(value)
             try:
                 self.attachments.append(Attachment(path.name, path.read_bytes()))
             except OSError as exc:
-                QMessageBox.warning(self, "Attachment", str(exc))
+                QMessageBox.warning(self, tr("compose.attach_error"), str(exc))
         total = sum(item.size for item in self.attachments)
-        warning = " · large for RF" if total > 50_000 else ""
+        warning = tr("compose.large_rf") if total > 50_000 else ""
         self.attachment_summary.setText(
-            f"{len(self.attachments)} file(s), {total} bytes{warning}"
+            tr(
+                "compose.attachment_summary",
+                count=len(self.attachments),
+                size=total,
+                warning=warning,
+            )
         )
 
     def _queue(self) -> None:
         destination = self.destination.text().strip().upper()
         if not destination:
-            QMessageBox.warning(self, "Compose message", "Enter a destination.")
+            QMessageBox.warning(
+                self,
+                tr("compose.title"),
+                tr("compose.destination_required"),
+            )
             return
+        code = self.template.currentData()
+        if code == "Plain":
+            subject = self._widget_value(self.field_widgets["subject"])
+            body = self._widget_value(self.field_widgets["body"])
+        else:
+            message_form = FORMS[str(code)]
+            values = {
+                key: self._widget_value(widget)
+                for key, widget in self.field_widgets.items()
+            }
+            subject = message_form.subject(values) or message_form.display_name("en")
+            body = message_form.render(values)
         message = MailMessage(
             msg_id=self.runtime.mailstore.next_id(self.runtime.config.callsign),
             source=self.runtime.config.callsign,
             final_dest=destination,
-            subject=self.subject.text().strip(),
-            body=self.body.toPlainText(),
+            subject=subject,
+            body=body,
             attachments=list(self.attachments),
             priority=int(self.priority.currentData()),
             created=time.time(),
@@ -124,7 +237,7 @@ class ComposeDialog(QDialog):
         self.runtime.mailstore.add(message)
         self.runtime.refresh()
         self.runtime.events.publish(
-            f"Message #{message.msg_id} queued for {destination}.",
+            tr("event.mail_queued", id=message.msg_id, destination=destination),
             source="mail",
         )
         self.queued.emit(message.msg_id)
@@ -132,12 +245,12 @@ class ComposeDialog(QDialog):
 
 
 class MailWorkspace(QWidget):
-    FOLDERS = (
-        ("Inbox", Folder.INBOX),
-        ("Outbox", Folder.OUTBOX),
-        ("Sent", Folder.SENT),
-        ("Transit", Folder.TRANSIT),
-        ("Drafts", Folder.DRAFT),
+    FOLDER_KEYS = (
+        ("mail.inbox", Folder.INBOX),
+        ("mail.outbox", Folder.OUTBOX),
+        ("mail.sent", Folder.SENT),
+        ("mail.transit", Folder.TRANSIT),
+        ("mail.drafts", Folder.DRAFT),
     )
 
     def __init__(self, runtime: ShellRuntime, parent=None) -> None:
@@ -148,30 +261,29 @@ class MailWorkspace(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 8, 10, 8)
         top = QHBoxLayout()
-        title = QLabel("Mail")
-        title.setObjectName("PanelHeader")
-        compose = QPushButton("Compose")
-        compose.setObjectName("primaryAction")
-        compose.clicked.connect(self.compose)
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.refresh)
-        top.addWidget(title)
+        self.title_label = QLabel()
+        self.title_label.setObjectName("PanelHeader")
+        self.compose_button = QPushButton()
+        self.compose_button.setObjectName("primaryAction")
+        self.compose_button.clicked.connect(self.compose)
+        self.refresh_button = QPushButton()
+        self.refresh_button.clicked.connect(self.refresh)
+        top.addWidget(self.title_label)
         top.addStretch()
-        top.addWidget(refresh)
-        top.addWidget(compose)
+        top.addWidget(self.refresh_button)
+        top.addWidget(self.compose_button)
         outer.addLayout(top)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.folders = QListWidget()
-        self.folders.setMaximumWidth(175)
-        for label, _folder in self.FOLDERS:
-            self.folders.addItem(label)
+        self.folders.setMaximumWidth(190)
+        for _key, _folder in self.FOLDER_KEYS:
+            self.folders.addItem("")
         self.folders.currentRowChanged.connect(self._select_folder)
         splitter.addWidget(self.folders)
+
         content = QSplitter(Qt.Orientation.Vertical)
         self.messages = QTableWidget(0, 5)
-        self.messages.setHorizontalHeaderLabels(
-            ["From / To", "Subject", "Status", "Attachments", "Size"]
-        )
         self.messages.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
@@ -182,20 +294,20 @@ class MailWorkspace(QWidget):
         )
         self.messages.itemSelectionChanged.connect(self._open_selected)
         content.addWidget(self.messages)
+
         reader = QWidget()
         reader_layout = QVBoxLayout(reader)
         reader_layout.setContentsMargins(0, 4, 0, 0)
         self.reader = QPlainTextEdit()
         self.reader.setReadOnly(True)
-        self.reader.setPlaceholderText("Select a message")
         reader_layout.addWidget(self.reader, 1)
         actions = QHBoxLayout()
-        self.reply_button = QPushButton("Reply")
+        self.reply_button = QPushButton()
         self.reply_button.clicked.connect(self.reply)
-        self.send_button = QPushButton("Send queued message")
+        self.send_button = QPushButton()
         self.send_button.setObjectName("primaryAction")
         self.send_button.clicked.connect(self.send_selected)
-        self.delete_button = QPushButton("Delete")
+        self.delete_button = QPushButton()
         self.delete_button.clicked.connect(self.delete_selected)
         actions.addWidget(self.reply_button)
         actions.addWidget(self.send_button)
@@ -207,20 +319,40 @@ class MailWorkspace(QWidget):
         splitter.addWidget(content)
         splitter.setStretchFactor(1, 1)
         outer.addWidget(splitter, 1)
+        self.retranslate_ui()
         self.folders.setCurrentRow(0)
 
+    def retranslate_ui(self) -> None:
+        self.title_label.setText(tr("mail.title"))
+        self.compose_button.setText(tr("mail.compose"))
+        self.refresh_button.setText(tr("mail.refresh"))
+        self.messages.setHorizontalHeaderLabels(
+            [
+                tr("mail.peer"),
+                tr("mail.subject"),
+                tr("mail.status"),
+                tr("mail.attachments"),
+                tr("mail.size"),
+            ]
+        )
+        self.reader.setPlaceholderText(tr("mail.select"))
+        self.reply_button.setText(tr("mail.reply"))
+        self.send_button.setText(tr("mail.send_queued"))
+        self.delete_button.setText(tr("mail.delete"))
+        self.refresh()
+
     def _select_folder(self, row: int) -> None:
-        if 0 <= row < len(self.FOLDERS):
-            self.folder = self.FOLDERS[row][1]
+        if 0 <= row < len(self.FOLDER_KEYS):
+            self.folder = self.FOLDER_KEYS[row][1]
             self.refresh()
 
     def refresh(self) -> None:
         counts = self.runtime.mailstore.counts()
-        for index, (label, folder) in enumerate(self.FOLDERS):
+        for index, (key, folder) in enumerate(self.FOLDER_KEYS):
             unread = self.runtime.mailstore.unread(folder)
-            suffix = f", {unread} new" if unread else ""
+            suffix = tr("mail.new_count", count=unread) if unread else ""
             self.folders.item(index).setText(
-                f"{label} ({counts.get(folder, 0)}{suffix})"
+                f"{tr(key)} ({counts.get(folder, 0)}{suffix})"
             )
         rows = self.runtime.mailstore.list(self.folder)
         self.messages.setRowCount(len(rows))
@@ -232,8 +364,8 @@ class MailWorkspace(QWidget):
             )
             values = (
                 peer,
-                metadata.get("subject") or "(no subject)",
-                metadata.get("status", ""),
+                metadata.get("subject") or tr("mail.no_subject"),
+                tr(f"status.{metadata.get('status', '')}"),
                 str(metadata.get("att", 0)),
                 f"{metadata.get('size', 0)} B",
             )
@@ -254,20 +386,29 @@ class MailWorkspace(QWidget):
         self.runtime.mailstore.mark_read(self.selected_id)
         message = self.runtime.mailstore.get(self.selected_id)
         if message is None:
-            self.reader.setPlainText("(message not found)")
+            self.reader.setPlainText(tr("mail.not_found"))
             return
         route = " -> ".join(message.hops) or "-"
         attachments = "\n".join(
             f"  {item.name} ({item.size} B)" for item in message.attachments
-        ) or "  none"
+        ) or f"  {tr('mail.none')}"
         self.reader.setPlainText(
-            f"From: {message.source}\nTo: {message.final_dest}\n"
-            f"Subject: {message.subject}\nStatus: {message.status}\n"
-            f"Route: {route}\nAttachments:\n{attachments}\n"
-            f"{'-' * 52}\n{message.body}"
+            tr(
+                "mail.reader",
+                source=message.source,
+                dest=message.final_dest,
+                subject=message.subject,
+                status=tr(f"status.{message.status}"),
+                route=route,
+                attachments=attachments,
+                line="-" * 52,
+                body=message.body,
+            )
         )
         self.reply_button.setEnabled(message.folder == Folder.INBOX)
-        self.send_button.setEnabled(message.folder in (Folder.OUTBOX, Folder.TRANSIT))
+        self.send_button.setEnabled(
+            message.folder in (Folder.OUTBOX, Folder.TRANSIT)
+        )
         self.refresh()
 
     def compose(self, *, reply_to: MailMessage | None = None) -> None:
@@ -287,14 +428,14 @@ class MailWorkspace(QWidget):
             return
         answer = QMessageBox.question(
             self,
-            "Delete message",
-            f"Delete message #{self.selected_id} from this station?",
+            tr("mail.delete"),
+            tr("mail.delete_confirm", id=self.selected_id),
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.runtime.mailstore.delete(self.selected_id)
         self.runtime.events.publish(
-            f"Message #{self.selected_id} deleted.",
+            tr("event.mail_deleted", id=self.selected_id),
             source="mail",
         )
         self.selected_id = None
@@ -308,9 +449,8 @@ class MailWorkspace(QWidget):
         if not self.runtime.operations.send_queued(self.selected_id):
             QMessageBox.information(
                 self,
-                "Send message",
-                "The message remains queued. Start the live control channel "
-                "before sending.",
+                tr("mail.send_queued"),
+                tr("mail.send_requires_control"),
             )
             return
         self.runtime.refresh()

@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 
 from .config import StationConfig
+from .i18n import dual
 from .message import Folder, MessageStore, Status
 from .modem import make_modem
 from .modem.audio import AudioControlTransport, resolve_device
@@ -108,7 +109,10 @@ class Operations:
     def _prompt_winlink(self, role: str, message, done) -> None:
         if self.winlink_prompt is None:
             self._log(
-                "Winlink hand-off needs operator confirmation.",
+                dual(
+                    "Winlink hand-off needs operator confirmation.",
+                    "Předání službě Winlink vyžaduje potvrzení operátora.",
+                ),
                 LogLevel.WARNING,
                 source="winlink",
             )
@@ -138,19 +142,25 @@ class Operations:
         def completed(result: TaskResult) -> None:
             if result.error:
                 self._log(
-                    f"Radio connect failed: {result.error}",
+                    dual(
+                        f"Radio connect failed: {result.error}",
+                        f"Připojení rádia selhalo: {result.error}",
+                    ),
                     LogLevel.ERROR,
                     source="radio",
                 )
             else:
                 for message in result.value:
                     self._log(message, source="radio")
-                self._log(f"Radio connected via {radio.name}.", source="radio")
+                self._log(dual(
+                    f"Radio connected via {radio.name}.",
+                    f"Rádio připojeno přes {radio.name}.",
+                ), source="radio")
             self.request_radio_poll(force=True)
 
         submitted = self.workers.submit("radio-control", operation, completed)
         if submitted:
-            self._log("Connecting radio…", source="radio")
+            self._log(dual("Connecting radio…", "Připojuji rádio…"), source="radio")
         return submitted
 
     def disconnect_radio(self) -> bool:
@@ -161,12 +171,15 @@ class Operations:
         def completed(result: TaskResult) -> None:
             if result.error:
                 self._log(
-                    f"Radio disconnect failed: {result.error}",
+                    dual(
+                        f"Radio disconnect failed: {result.error}",
+                        f"Odpojení rádia selhalo: {result.error}",
+                    ),
                     LogLevel.ERROR,
                     source="radio",
                 )
             else:
-                self._log("Radio disconnected.", source="radio")
+                self._log(dual("Radio disconnected.", "Rádio odpojeno."), source="radio")
             self.request_radio_poll(force=True)
 
         return self.workers.submit("radio-control", operation, completed)
@@ -180,14 +193,21 @@ class Operations:
         def completed(result: TaskResult) -> None:
             if result.error:
                 self._log(
-                    f"VARA connect failed: {result.error}",
+                    dual(
+                        f"VARA connect failed: {result.error}",
+                        f"Připojení VARA selhalo: {result.error}",
+                    ),
                     LogLevel.ERROR,
                     source="vara",
                 )
             else:
                 self._log(
-                    f"VARA connected at {self.config.vara_host}:"
-                    f"{self.config.vara_cmd_port}.",
+                    dual(
+                        f"VARA connected at {self.config.vara_host}:"
+                        f"{self.config.vara_cmd_port}.",
+                        f"VARA připojena na {self.config.vara_host}:"
+                        f"{self.config.vara_cmd_port}.",
+                    ),
                     source="vara",
                 )
             self._update_vara_snapshot()
@@ -198,12 +218,15 @@ class Operations:
         def completed(result: TaskResult) -> None:
             if result.error:
                 self._log(
-                    f"VARA disconnect failed: {result.error}",
+                    dual(
+                        f"VARA disconnect failed: {result.error}",
+                        f"Odpojení VARA selhalo: {result.error}",
+                    ),
                     LogLevel.ERROR,
                     source="vara",
                 )
             else:
-                self._log("VARA disconnected.", source="vara")
+                self._log(dual("VARA disconnected.", "VARA odpojena."), source="vara")
             self._update_vara_snapshot()
 
         return self.workers.submit(
@@ -238,7 +261,10 @@ class Operations:
             transport.start()
         except Exception as exc:
             self._log(
-                f"Audio control channel failed: {exc}",
+                dual(
+                    f"Audio control channel failed: {exc}",
+                    f"Zvukový řídicí kanál selhal: {exc}",
+                ),
                 LogLevel.ERROR,
                 source="control",
             )
@@ -248,7 +274,10 @@ class Operations:
         self.config.save()
         self.net = self._build_net(transport)
         self._log(
-            f"Audio control channel active ({modem.name}).",
+            dual(
+                f"Audio control channel active ({modem.name}).",
+                f"Zvukový řídicí kanál je aktivní ({modem.name}).",
+            ),
             source="control",
         )
         self._update_network_snapshot()
@@ -261,13 +290,19 @@ class Operations:
         self.config.control_channel = "off"
         self.config.save()
         self.net = self._build_net(NullTransport())
-        self._log("Audio control channel stopped.", source="control")
+        self._log(dual(
+            "Audio control channel stopped.",
+            "Zvukový řídicí kanál byl zastaven.",
+        ), source="control")
         self._update_network_snapshot()
 
     def send_queued(self, message_id: int) -> bool:
         if self.audio_transport is None:
             self._log(
-                "Start the audio control channel before sending.",
+                dual(
+                    "Start the audio control channel before sending.",
+                    "Před odesláním spusťte zvukový řídicí kanál.",
+                ),
                 LogLevel.WARNING,
                 source="mail",
             )
@@ -285,8 +320,12 @@ class Operations:
             payload_bytes=mail.to_bundle(),
         )
         self._log(
-            f"Message #{mail.msg_id} to {mail.final_dest} announced "
-            f"({mail.content_size()} B payload).",
+            dual(
+                f"Message #{mail.msg_id} to {mail.final_dest} announced "
+                f"({mail.content_size()} B payload).",
+                f"Zpráva #{mail.msg_id} pro {mail.final_dest} oznámena "
+                f"(datový obsah {mail.content_size()} B).",
+            ),
             source="mail",
         )
         return True
@@ -399,7 +438,10 @@ class Operations:
                 )
             except Exception as exc:
                 self._log(
-                    f"Could not store incoming message #{message.msg_id}: {exc}",
+                    dual(
+                        f"Could not store incoming message #{message.msg_id}: {exc}",
+                        f"Příchozí zprávu #{message.msg_id} nelze uložit: {exc}",
+                    ),
                     LogLevel.ERROR,
                     source="mail",
                 )
@@ -416,16 +458,25 @@ class Operations:
     def _suspend_control(self) -> None:
         if self.audio_transport is not None:
             self.audio_transport.stop()
-            self._log("Control audio released for payload.", source="control")
+            self._log(dual(
+                "Control audio released for payload.",
+                "Řídicí zvuk uvolněn pro datový přenos.",
+            ), source="control")
 
     def _resume_control(self) -> None:
         if self.audio_transport is not None:
             try:
                 self.audio_transport.start()
-                self._log("Control audio resumed.", source="control")
+                self._log(dual(
+                    "Control audio resumed.",
+                    "Řídicí zvuk byl obnoven.",
+                ), source="control")
             except Exception as exc:
                 self._log(
-                    f"Control audio resume failed: {exc}",
+                    dual(
+                        f"Control audio resume failed: {exc}",
+                        f"Obnovení řídicího zvuku selhalo: {exc}",
+                    ),
                     LogLevel.ERROR,
                     source="control",
                 )
@@ -454,7 +505,11 @@ class Operations:
             if mode:
                 self.radio.set_mode(mode)
         except Exception as exc:
-            self._log(f"QSY skipped: {exc}", LogLevel.WARNING, source="radio")
+            self._log(
+                dual(f"QSY skipped: {exc}", f"QSY přeskočeno: {exc}"),
+                LogLevel.WARNING,
+                source="radio",
+            )
 
     def _qsy_restore(self) -> None:
         if self.config.auto_qsy and self._qsy_previous:

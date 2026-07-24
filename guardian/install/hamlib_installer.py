@@ -20,6 +20,8 @@ import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+from ..i18n import dual
+
 from ..config import config_dir
 from ..radio.presets import find_executable
 
@@ -116,7 +118,10 @@ def _download(url: str, dest: Path, progress=None) -> None:
                     pct = got * 100 // total
                     if pct >= last_pct + 10:
                         last_pct = pct
-                        log(f"  downloading… {pct}%  ({got // 1024} KB)")
+                        log(dual(
+                            f"  downloading… {pct}%  ({got // 1024} KB)",
+                            f"  stahuji… {pct}%  ({got // 1024} KB)",
+                        ))
 
 
 def _sha256(path: Path) -> str:
@@ -143,12 +148,18 @@ def install(progress=None, force: bool = False) -> str:
 
     existing = existing_rigctld()
     if existing and not force:
-        log(f"Hamlib already available: {existing}")
+        log(dual(
+            f"Hamlib already available: {existing}",
+            f"Hamlib je již dostupný: {existing}",
+        ))
         return existing
 
     zip_url, zip_name, version, sums_url = resolve_zip()
     _check_host(zip_url)
-    log(f"Installing Hamlib {version} from {urlparse(zip_url).hostname}")
+    log(dual(
+        f"Installing Hamlib {version} from {urlparse(zip_url).hostname}",
+        f"Instaluji Hamlib {version} z {urlparse(zip_url).hostname}",
+    ))
 
     expected = _expected_sha256(sums_url, zip_name)
     tmp = Path(tempfile.gettempdir()) / zip_name
@@ -158,27 +169,35 @@ def install(progress=None, force: bool = False) -> str:
         actual = _sha256(tmp)
         if actual != expected:
             tmp.unlink(missing_ok=True)
-            raise ValueError(
-                "SHA256 mismatch — download corrupt or tampered, aborting install"
-            )
-        log("SHA256 verified.")
+            raise ValueError(dual(
+                "SHA256 mismatch — download corrupt or tampered, aborting install",
+                "SHA256 nesouhlasí — soubor je poškozený nebo změněný; "
+                "instalace byla ukončena",
+            ))
+        log(dual("SHA256 verified.", "SHA256 byl ověřen."))
     else:
-        log("No published checksum; verified transport via HTTPS from github.com.")
+        log(dual(
+            "No published checksum; verified transport via HTTPS from github.com.",
+            "Kontrolní součet nebyl zveřejněn; přenos proběhl přes HTTPS z github.com.",
+        ))
 
     dest = install_dir()
     if force and dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
 
-    log("Extracting…")
+    log(dual("Extracting…", "Rozbaluji…"))
     with zipfile.ZipFile(tmp) as zf:
         zf.extractall(dest)
     tmp.unlink(missing_ok=True)
 
     rigctld = _find_under(dest, "rigctld.exe")
     if not rigctld:
-        raise FileNotFoundError("rigctld.exe not found after extraction")
-    log(f"Hamlib ready: {rigctld}")
+        raise FileNotFoundError(dual(
+            "rigctld.exe not found after extraction",
+            "Po rozbalení nebyl nalezen rigctld.exe",
+        ))
+    log(dual(f"Hamlib ready: {rigctld}", f"Hamlib je připraven: {rigctld}"))
     return rigctld
 
 
