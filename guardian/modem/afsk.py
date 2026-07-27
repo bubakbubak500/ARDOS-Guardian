@@ -16,6 +16,8 @@ its own control protocol, so we don't need HDLC/NRZI/bit-stuffing.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
 MARK = 1200.0
@@ -23,7 +25,7 @@ SPACE = 2200.0
 BAUD = 1200.0
 SYNC = bytes((0x2D, 0xD4))
 PREAMBLE = b"\x55" * 24
-POSTAMBLE_BITS = 8  # trailing mark bits so the last symbol is clean
+POSTAMBLE_BITS = 32  # keep the radio modulator settled through the USB/PTT tail
 ACQUISITION_PREAMBLE_BITS = 32
 MAX_ACQUISITION_ERRORS = 4
 MAX_SYNC_ERRORS = 1
@@ -111,7 +113,46 @@ class AFSKModem:
             mark_power + space_power + np.finfo(np.float64).eps
         )
 
-    def demodulate(self, samples: np.ndarray) -> list[bytes]:
+    def _select_candidates(
+        self,
+        candidates: list[tuple[float, float, bytes]],
+        validator: Callable[[bytes], bool] | None = None,
+    ) -> list[bytes]:
+        """Collapse clock hypotheses while retaining a CRC-valid payload."""
+        cluster_radius = self.sps * 80
+        clusters: list[list[tuple[float, float, bytes]]] = []
+        for candidate in sorted(candidates, key=lambda item: item[1]):
+            cluster = next(
+                (
+                    existing
+                    for existing in clusters
+                    if abs(candidate[1] - existing[0][1]) < cluster_radius
+                ),
+                None,
+            )
+            if cluster is None:
+                clusters.append([candidate])
+            else:
+                cluster.append(candidate)
+
+        selected: list[tuple[float, float, bytes]] = []
+        for cluster in clusters:
+            ranked = sorted(cluster, key=lambda item: item[0], reverse=True)
+            chosen = ranked[0]
+            if validator is not None:
+                chosen = next(
+                    (candidate for candidate in ranked if validator(candidate[2])),
+                    chosen,
+                )
+            selected.append(chosen)
+        selected.sort(key=lambda item: item[1])
+        return [payload for _score, _position, payload in selected]
+
+    def demodulate(
+        self,
+        samples: np.ndarray,
+        validator: Callable[[bytes], bool] | None = None,
+    ) -> list[bytes]:
         """Return frame candidates found with preamble-aided clock recovery.
 
         Real sound interfaces do not share an exact clock. A single symbol
@@ -180,19 +221,11 @@ class AFSKModem:
                     candidates.append((score, float(centers[start]), payload))
 
         # Adjacent clock/phase hypotheses describe the same physical burst.
-        # Keep the highest-confidence interpretation from each time cluster.
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        selected: list[tuple[float, float, bytes]] = []
-        cluster_radius = self.sps * 80
-        for candidate in candidates:
-            if any(
-                abs(candidate[1] - existing[1]) < cluster_radius
-                for existing in selected
-            ):
-                continue
-            selected.append(candidate)
-        selected.sort(key=lambda item: item[1])
-        return [payload for _score, _position, payload in selected]
+        # A radio path can give a slightly mistimed hypothesis more energy than
+        # the correct one. When the caller knows the payload format, prefer a
+        # hypothesis that passes its integrity check (ControlFrame CRC) instead
+        # of discarding it before validation.
+        return self._select_candidates(candidates, validator)
 
     def _extract_frames(self, bits: np.ndarray, max_sync_errors: int = 1) -> list[bytes]:
         sync_bits = _bits_lsb_first(SYNC)

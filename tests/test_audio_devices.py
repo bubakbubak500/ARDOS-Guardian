@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+import guardian.modem.audio as audio_module
 from guardian.modem.audio import (
     AudioControlTransport,
     is_real_audio_device_name,
@@ -168,3 +169,39 @@ def test_control_transport_reports_pending_tx_until_playback_finishes() -> None:
     assert not transport.wait_tx_idle(timeout=0.01)
     release_playback.set()
     assert transport.wait_tx_idle(timeout=1.0)
+
+
+def test_control_transport_keeps_ptt_keyed_for_usb_audio_tail(monkeypatch) -> None:
+    sleeps: list[float] = []
+    ptt: list[bool] = []
+
+    class SoundDevice:
+        @staticmethod
+        def play(_samples, **_kwargs):
+            return None
+
+        @staticmethod
+        def wait():
+            return None
+
+    monkeypatch.setattr(audio_module.time, "sleep", sleeps.append)
+    modem = SimpleNamespace(
+        name="afsk1200",
+        modulate=lambda _payload: np.zeros(32, dtype=np.float32),
+    )
+    transport = AudioControlTransport(
+        modem=modem,
+        ptt=ptt.append,
+        input_device=4,
+        output_device=7,
+    )
+    transport._sd = SoundDevice()
+
+    transport.send(ControlFrame(FrameType.BEACON, source="OK7PS"))
+
+    assert transport.wait_tx_idle(timeout=1.0)
+    assert ptt == [True, False]
+    assert sleeps == [
+        audio_module.PTT_LEAD_SECONDS,
+        audio_module.PTT_TAIL_SECONDS,
+    ]

@@ -84,3 +84,23 @@ def test_afsk_normalizes_a_severely_unbalanced_radio_audio_path() -> None:
 
     assert payload in decoded
 
+
+def test_afsk_prefers_crc_valid_timing_hypothesis_over_higher_energy() -> None:
+    modem = AFSKModem()
+    payload = _control_payload()
+    invalid = payload[:-2] + b"\xff\xff"
+
+    # Exercise the burst-selection policy without depending on a particular
+    # synthetic distortion: the stronger candidate is corrupt, while another
+    # clock/phase hypothesis for the same physical burst has a valid CRC.
+    candidates = [
+        (0.95, 48_000.0, invalid),
+        (0.80, 48_020.0, payload),
+    ]
+
+    selected = modem._select_candidates(  # type: ignore[attr-defined]
+        candidates,
+        validator=lambda candidate: candidate == payload,
+    )
+
+    assert selected == [payload]

@@ -30,6 +30,9 @@ _PSEUDO_DEVICE_PREFIXES = (
     "primary sound driver",
 )
 
+PTT_LEAD_SECONDS = 0.15
+PTT_TAIL_SECONDS = 0.25
+
 
 def is_real_audio_device_name(name: str) -> bool:
     """Exclude PortAudio aliases that are not physical Windows endpoints."""
@@ -365,14 +368,21 @@ class AudioControlTransport(ControlTransport):
         samples = self.modem.modulate(frame.encode())
         with self._tx_lock:
             try:
+                # Never splice samples from before and after our own half-duplex
+                # transmission into one artificial receive window.
+                self._rx_buf.clear()
                 self.ptt(True)
                 # brief lead-in so the rig is keyed before tones start
-                time.sleep(0.15)
+                time.sleep(PTT_LEAD_SECONDS)
                 self._sd.play(samples, samplerate=self.fs, device=self.output_device)
                 self._sd.wait()
             finally:
-                time.sleep(0.05)
+                # PortAudio has finished filling the USB endpoint here, but a
+                # USB radio can still have audio buffered internally. Keep PTT
+                # asserted long enough for the final CRC and postamble to air.
+                time.sleep(PTT_TAIL_SECONDS)
                 self.ptt(False)
+                self._rx_buf.clear()
         self.on_log(f"TX {frame.summary()}")
 
     # ------------------------------------------------------------------ #
@@ -411,8 +421,19 @@ class AudioControlTransport(ControlTransport):
             if len(self._rx_buf) < self.fs * 0.4:
                 continue
             window = np.fromiter(self._rx_buf, dtype=np.float32)
-            for payload in self.modem.demodulate(window):
+            for payload in self.modem.demodulate(
+                window,
+                validator=self._is_valid_control_payload,
+            ):
                 self._handle_payload(payload)
+
+    @staticmethod
+    def _is_valid_control_payload(payload: bytes) -> bool:
+        try:
+            ControlFrame.decode(payload)
+        except FrameError:
+            return False
+        return True
 
     def _handle_payload(self, payload: bytes) -> None:
         now = time.monotonic()

@@ -15,6 +15,8 @@ mean a mis-decode is rejected rather than mistaken for a valid frame.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
 from .afsk import SYNC, _bits_lsb_first, _bits_to_bytes_lsb_first
@@ -107,7 +109,11 @@ class MFSKModem:
             return None
         return np.abs(self._ref @ seg)  # (M,) magnitude at each tone
 
-    def demodulate(self, samples: np.ndarray) -> list[bytes]:
+    def demodulate(
+        self,
+        samples: np.ndarray,
+        validator: Callable[[bytes], bool] | None = None,
+    ) -> list[bytes]:
         x = np.asarray(samples, dtype=np.float64)
         if len(x) < self.N * (N_PRE + 4):
             return []
@@ -162,7 +168,12 @@ class MFSKModem:
         if len(coded_bits) < 16:
             return []
         info = viterbi_decode(np.array(coded_bits, dtype=np.int8))
-        return self._extract_frames(info)
+        frames = self._extract_frames(info)
+        if validator is not None:
+            valid = [payload for payload in frames if validator(payload)]
+            if valid:
+                return valid
+        return frames
 
     def _extract_frames(self, bits: np.ndarray) -> list[bytes]:
         sync_bits = _bits_lsb_first(SYNC)
