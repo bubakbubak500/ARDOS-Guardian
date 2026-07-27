@@ -45,6 +45,9 @@ manifest, and asks again before launching it.
 - **VARA spectrum monitor**: a separate P2P window with live RX FFT and
   waterfall, CAT-derived receive/transmit frequency, PTT indication, link
   state, FM/HF passband scaling, pause/clear controls, and remembered geometry
+- **Explicit radio audio setup**: a dedicated Audio settings page lists and
+  refreshes RX inputs and TX outputs, preserves temporarily disconnected
+  devices, and tolerates harmless Windows/PortAudio device-name changes
 - **Consent-driven VARA setup**: Station readiness can download the exact
   reviewed VARA FM/HF archive from the official Winlink distribution server,
   enforce the version, size and SHA-256 pinned in this Guardian release, then

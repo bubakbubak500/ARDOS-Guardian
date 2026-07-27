@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from ..config import StationConfig
 from ..i18n import Language, dual, language, set_language, tr
+from ..modem.audio import list_audio_devices, match_device_name
 from .theme import ThemePreference
 from .inputs import UppercaseLineEdit
 
@@ -102,6 +103,7 @@ class SettingsDialog(QDialog):
         outer.addWidget(self.tabs, 1)
         self._build_identity()
         self._build_radio()
+        self._build_audio()
         self._build_vara()
         self._build_network()
         self._build_appearance(theme)
@@ -198,6 +200,89 @@ class SettingsDialog(QDialog):
         form.addRow(dual("rigctld port", "Port rigctld"), self.rigctld_port)
         form.addRow(dual("rigctld executable", "Program rigctld"), self.rigctld_path)
         form.addRow(dual("VOX PTT line", "Linka PTT pro VOX"), self.ptt_line)
+
+    def _build_audio(self) -> None:
+        form = self._page(
+            dual("Audio", "Zvuk"),
+            dual(
+                "Select the radio interface used for received and transmitted "
+                "audio. Guardian never substitutes the Windows default "
+                "microphone when no RX input is selected.",
+                "Vyberte rozhraní rádia pro přijímaný a vysílaný zvuk. Pokud "
+                "není vybrán RX vstup, Guardian jej nenahrazuje výchozím "
+                "mikrofonem Windows.",
+            ),
+        )
+        self.audio_input = QComboBox()
+        self.audio_output = QComboBox()
+        for combo in (self.audio_input, self.audio_output):
+            combo.setEditable(True)
+            combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(38)
+        refresh = QPushButton(dual("Refresh devices", "Obnovit zařízení"))
+        refresh.clicked.connect(self._refresh_audio_devices)
+        self.audio_status = QLabel()
+        self.audio_status.setObjectName("Metadata")
+        self.audio_status.setWordWrap(True)
+        form.addRow(dual("Radio RX input", "Vstup RX rádia"), self.audio_input)
+        form.addRow(dual("Radio TX output", "Výstup TX rádia"), self.audio_output)
+        form.addRow(refresh, self.audio_status)
+        self._refresh_audio_devices()
+
+    @staticmethod
+    def _populate_device_combo(
+        combo: QComboBox,
+        names: list[str],
+        selected: str,
+    ) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("")
+        combo.addItems(names)
+        if selected and combo.findText(selected) < 0:
+            combo.addItem(selected)
+        combo.setCurrentText(selected)
+        combo.blockSignals(False)
+
+    def _refresh_audio_devices(self) -> None:
+        selected_input = (
+            self.audio_input.currentText().strip()
+            if self.audio_input.count()
+            else self.config.audio_input
+        )
+        selected_output = (
+            self.audio_output.currentText().strip()
+            if self.audio_output.count()
+            else self.config.audio_output
+        )
+        inputs, outputs = list_audio_devices()
+        selected_input = (
+            match_device_name(inputs, selected_input) or selected_input
+        )
+        selected_output = (
+            match_device_name(outputs, selected_output) or selected_output
+        )
+        self._populate_device_combo(self.audio_input, inputs, selected_input)
+        self._populate_device_combo(self.audio_output, outputs, selected_output)
+        if inputs or outputs:
+            self.audio_status.setText(
+                dual(
+                    f"Found {len(inputs)} input(s) and {len(outputs)} output(s).",
+                    f"Nalezeno vstupů: {len(inputs)}, výstupů: {len(outputs)}.",
+                )
+            )
+        else:
+            self.audio_status.setText(
+                dual(
+                    "No audio devices were reported. Check the interface and "
+                    "Windows privacy settings, then refresh.",
+                    "Nebyla nalezena zvuková zařízení. Zkontrolujte rozhraní "
+                    "a soukromí ve Windows, poté seznam obnovte.",
+                )
+            )
 
     def _build_vara(self) -> None:
         form = self._page(
@@ -383,6 +468,8 @@ class SettingsDialog(QDialog):
         cfg.rigctld_port = self.rigctld_port.value()
         cfg.rigctld_path = self.rigctld_path.text() or "rigctld"
         cfg.ptt_line = self.ptt_line.currentText()
+        cfg.audio_input = self.audio_input.currentText().strip()
+        cfg.audio_output = self.audio_output.currentText().strip()
         cfg.vara_host = self.vara_host.text().strip()
         cfg.vara_fm_cmd_port = self.vara_fm_cmd.value()
         cfg.vara_fm_data_port = self.vara_fm_data.value()

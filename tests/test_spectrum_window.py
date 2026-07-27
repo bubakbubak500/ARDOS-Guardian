@@ -44,6 +44,7 @@ def test_window_reflects_radio_and_vara_state_without_audio(tmp_path) -> None:
     _application()
     settings = QSettings(str(tmp_path / "spectrum.ini"), QSettings.Format.IniFormat)
     runtime = ShellRuntime()
+    runtime.config.vara_mode = "FM"
     window = SpectrumWindow(runtime, settings, auto_start_audio=False)
     try:
         window.refresh()

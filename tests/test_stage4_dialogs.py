@@ -33,12 +33,16 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         dialog.payload_backend.setCurrentIndex(
             dialog.payload_backend.findData("winlink_manual")
         )
+        dialog.audio_input.setCurrentText("USB Audio CODEC RX")
+        dialog.audio_output.setCurrentText("USB Audio CODEC TX")
         assert dialog.apply()
         assert config.callsign == "OK7PS"
         assert config.operator_name == "Operator"
         assert config.vara_mode == "HF"
         assert config.vara_cmd_port == config.vara_hf_cmd_port
         assert config.payload_backend == "winlink_manual"
+        assert config.audio_input == "USB Audio CODEC RX"
+        assert config.audio_output == "USB Audio CODEC TX"
     finally:
         dialog.close()
 

@@ -11,9 +11,10 @@ with no audio backend; start() raises a clear error if it can't be used.
 
 from __future__ import annotations
 
+from collections import deque
+import re
 import threading
 import time
-from collections import deque
 from typing import Callable
 
 import numpy as np
@@ -102,18 +103,108 @@ def resolve_device(name: str, kind: str = "input"):
         default_api = sd.default.hostapi
     except Exception:
         return name
-    ch_key = "max_input_channels" if kind == "input" else "max_output_channels"
-    target = name.strip()
-    # Prefer an exact-name match on the default host API…
-    for idx, d in enumerate(devices):
-        if (d.get("hostapi") == default_api and d.get(ch_key, 0) > 0
-                and (d.get("name", "") or "").strip() == target):
-            return idx
-    # …else the first exact-name match on any host API.
-    for idx, d in enumerate(devices):
-        if d.get(ch_key, 0) > 0 and (d.get("name", "") or "").strip() == target:
-            return idx
+    match = match_device_index(devices, name, kind, default_api)
+    if match is not None:
+        return match
     return name
+
+
+_GENERIC_DEVICE_WORDS = {
+    "analog",
+    "audio",
+    "device",
+    "input",
+    "line",
+    "mic",
+    "microphone",
+    "mikrofon",
+    "output",
+    "reproduktor",
+    "reproduktory",
+    "speakers",
+    "stereo",
+}
+
+
+def _normalized_device_name(value: str) -> str:
+    """Normalize harmless Windows/PortAudio name formatting differences."""
+    return " ".join(re.findall(r"\w+", value.casefold(), flags=re.UNICODE))
+
+
+def _device_identity_words(value: str) -> set[str]:
+    return {
+        word
+        for word in _normalized_device_name(value).split()
+        if word not in _GENERIC_DEVICE_WORDS and not word.isdigit()
+    }
+
+
+def match_device_index(
+    devices: list[dict],
+    name: str,
+    kind: str = "input",
+    default_api=None,
+) -> int | None:
+    """Match a saved device despite MME truncation/local formatting.
+
+    Exact normalized matches win. A conservative identity-token fallback then
+    handles changes such as a trailing space before ``)`` or Windows adding a
+    numeric endpoint prefix while retaining a distinctive hardware name.
+    """
+    ch_key = "max_input_channels" if kind == "input" else "max_output_channels"
+    target = _normalized_device_name(name)
+    if not target:
+        return None
+    candidates = [
+        (index, device)
+        for index, device in enumerate(devices)
+        if device.get(ch_key, 0) > 0
+    ]
+    candidates.sort(key=lambda item: item[1].get("hostapi") != default_api)
+
+    for index, device in candidates:
+        candidate = _normalized_device_name(device.get("name", "") or "")
+        if candidate == target:
+            return index
+
+    target_words = _device_identity_words(name)
+    ranked: list[tuple[float, int]] = []
+    for index, device in candidates:
+        candidate_name = device.get("name", "") or ""
+        candidate = _normalized_device_name(candidate_name)
+        if min(len(candidate), len(target)) >= 8 and (
+            candidate in target or target in candidate
+        ):
+            ranked.append((1.0, index))
+            continue
+        candidate_words = _device_identity_words(candidate_name)
+        shared = target_words & candidate_words
+        union = target_words | candidate_words
+        if len(shared) >= 2 and union:
+            score = len(shared) / len(union)
+            if score >= 0.6:
+                ranked.append((score, index))
+    if not ranked:
+        return None
+    ranked.sort(reverse=True)
+    if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+        return None
+    return ranked[0][1]
+
+
+def match_device_name(names: list[str], saved_name: str) -> str | None:
+    """Return the current canonical spelling for an unambiguous saved name."""
+    devices = [
+        {
+            "name": candidate,
+            "hostapi": 0,
+            "max_input_channels": 1,
+            "max_output_channels": 0,
+        }
+        for candidate in names
+    ]
+    index = match_device_index(devices, saved_name, "input", default_api=0)
+    return names[index] if index is not None else None
 
 
 class AudioControlTransport(ControlTransport):

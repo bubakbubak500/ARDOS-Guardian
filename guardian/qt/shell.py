@@ -84,7 +84,9 @@ class GuardianMainWindow(QMainWindow):
         self.settings = settings
         self.theme_controller = ThemeController(settings, self)
         self.runtime.operations.winlink_prompt = self._winlink_prompt
-        self.spectrum_window = SpectrumWindow(runtime, settings, self)
+        # On Windows an owned top-level window is forced above its owner.
+        # Keep the spectrum independent so either window can receive focus.
+        self.spectrum_window = SpectrumWindow(runtime, settings)
         self.theme_controller.theme_changed.connect(
             self.spectrum_window.set_tokens
         )

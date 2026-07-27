@@ -2,7 +2,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QApplication
 
 from guardian.qt.runtime import ShellRuntime
@@ -32,6 +32,11 @@ def test_shell_has_native_menu_minimum_size_and_snapshot_content(tmp_path) -> No
     runtime = ShellRuntime()
     window = GuardianMainWindow(runtime, settings)
     try:
+        assert window.spectrum_window.parent() is None
+        assert not (
+            window.spectrum_window.windowFlags()
+            & Qt.WindowType.WindowStaysOnTopHint
+        )
         assert window.minimumWidth() == 1180
         assert window.minimumHeight() == 720
         assert [action.text() for action in window.menuBar().actions()] == [
