@@ -1,6 +1,7 @@
 import sys
 import threading
 from types import SimpleNamespace
+import wave
 
 import numpy as np
 
@@ -205,3 +206,21 @@ def test_control_transport_keeps_ptt_keyed_for_usb_audio_tail(monkeypatch) -> No
         audio_module.PTT_LEAD_SECONDS,
         audio_module.PTT_TAIL_SECONDS,
     ]
+
+
+def test_control_transport_saves_failed_receive_audio(tmp_path) -> None:
+    path = tmp_path / "last-bad-control.wav"
+    transport = AudioControlTransport(
+        diagnostic_audio_path=path,
+        sample_rate=48_000,
+    )
+    samples = np.linspace(-0.25, 0.25, 48_000, dtype=np.float32)
+
+    transport._save_bad_audio(samples)
+
+    assert path.exists()
+    with wave.open(str(path), "rb") as recording:
+        assert recording.getnchannels() == 1
+        assert recording.getsampwidth() == 2
+        assert recording.getframerate() == 48_000
+        assert recording.getnframes() == 48_000

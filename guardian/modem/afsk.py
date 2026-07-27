@@ -6,9 +6,9 @@ non-coherent correlator demod on RX.
 On-air framing (LSB-first within each byte):
 
     preamble : 0x55 * N      alternating tones, lets RX settle + find bit edges
-    sync     : 0x2D 0xD4     two-byte unique sync word
-    length   : 1 byte        number of payload bytes that follow (0..255)
-    payload  : the frame bytes (e.g. ControlFrame.encode(), already CRC'd)
+    sync     : unique sync marker
+    length   : repeated three times
+    payload  : repeated three times and recovered by bitwise majority vote
 
 This is a clean custom framing (not AX.25/APRS-compatible) — Guardian defines
 its own control protocol, so we don't need HDLC/NRZI/bit-stuffing.
@@ -23,7 +23,10 @@ import numpy as np
 MARK = 1200.0
 SPACE = 2200.0
 BAUD = 1200.0
-SYNC = bytes((0x2D, 0xD4))
+LEGACY_SYNC = bytes((0x2D, 0xD4))
+FEC_SYNC = bytes((0x69, 0x96, 0xC3, 0x3C))
+SYNC = LEGACY_SYNC  # compatibility for callers importing the old name
+FEC_REPETITIONS = 3
 PREAMBLE = b"\x55" * 24
 POSTAMBLE_BITS = 32  # keep the radio modulator settled through the USB/PTT tail
 ACQUISITION_PREAMBLE_BITS = 32
@@ -61,10 +64,15 @@ class AFSKModem:
     # ------------------------------------------------------------------ #
     #  Transmit                                                           #
     # ------------------------------------------------------------------ #
-    def modulate(self, payload: bytes, amplitude: float = 0.7) -> np.ndarray:
+    def modulate(self, payload: bytes, amplitude: float = 0.4) -> np.ndarray:
         if len(payload) > 255:
             raise ValueError("control payload must be <= 255 bytes")
-        frame = PREAMBLE + SYNC + bytes((len(payload),)) + payload
+        frame = (
+            PREAMBLE
+            + FEC_SYNC
+            + bytes((len(payload),)) * FEC_REPETITIONS
+            + payload * FEC_REPETITIONS
+        )
         bits = _bits_lsb_first(frame)
         bits = np.concatenate([bits, np.ones(POSTAMBLE_BITS, dtype=np.int8)])
 
@@ -164,15 +172,16 @@ class AFSKModem:
         """
         soft = self._bit_stream(samples)
         if len(soft) < self.sps * (
-            ACQUISITION_PREAMBLE_BITS + len(SYNC) * 8 + 8
+            ACQUISITION_PREAMBLE_BITS + len(LEGACY_SYNC) * 8 + 8
         ):
             return []
         preamble = _bits_lsb_first(PREAMBLE)[-ACQUISITION_PREAMBLE_BITS:]
-        sync = _bits_lsb_first(SYNC)
-        acquisition = np.concatenate((preamble, sync))
-        acquisition_sign = acquisition * 2 - 1
         sample_axis = np.arange(len(soft))
         candidates: list[tuple[float, float, bytes]] = []
+        formats = (
+            (_bits_lsb_first(FEC_SYNC), True),
+            (_bits_lsb_first(LEGACY_SYNC), False),
+        )
 
         for clock_scale in CLOCK_SEARCH:
             step = self.sps * float(clock_scale)
@@ -185,40 +194,41 @@ class AFSKModem:
                 ) * step
                 confidence = np.interp(centers, sample_axis, soft)
                 bits = (confidence > 0.0).astype(np.int8)
-                if bits.size < acquisition.size + 8:
-                    continue
-                correlation = np.correlate(
-                    bits * 2 - 1,
-                    acquisition_sign,
-                    mode="valid",
-                )
-                # Every bit error reduces a +/-1 correlation by two.
-                threshold = acquisition.size - 2 * MAX_ACQUISITION_ERRORS
-                for start in np.flatnonzero(correlation >= threshold):
-                    observed = bits[start : start + acquisition.size]
-                    sync_errors = int(
-                        np.sum(
-                            observed[ACQUISITION_PREAMBLE_BITS:]
-                            != sync
-                        )
+                for sync, has_fec in formats:
+                    acquisition = np.concatenate((preamble, sync))
+                    if bits.size < acquisition.size + 8:
+                        continue
+                    correlation = np.correlate(
+                        bits * 2 - 1,
+                        acquisition * 2 - 1,
+                        mode="valid",
                     )
-                    if sync_errors > MAX_SYNC_ERRORS:
-                        continue
-                    acquisition_errors = int(np.sum(observed != acquisition))
-                    if acquisition_errors > MAX_ACQUISITION_ERRORS:
-                        continue
-                    after = bits[start + acquisition.size :]
-                    if after.size < 8:
-                        continue
-                    length = _bits_to_bytes_lsb_first(after[:8])[0]
-                    needed = 8 + int(length) * 8
-                    if length < 8 or after.size < needed:
-                        continue
-                    payload = _bits_to_bytes_lsb_first(after[8:needed])
-                    end = start + acquisition.size + needed
-                    score = float(np.mean(np.abs(confidence[start:end])))
-                    score -= 0.1 * acquisition_errors
-                    candidates.append((score, float(centers[start]), payload))
+                    threshold = acquisition.size - 2 * MAX_ACQUISITION_ERRORS
+                    for start in np.flatnonzero(correlation >= threshold):
+                        observed = bits[start : start + acquisition.size]
+                        sync_errors = int(np.sum(
+                            observed[ACQUISITION_PREAMBLE_BITS:] != sync
+                        ))
+                        if sync_errors > MAX_SYNC_ERRORS:
+                            continue
+                        acquisition_errors = int(np.sum(observed != acquisition))
+                        if acquisition_errors > MAX_ACQUISITION_ERRORS:
+                            continue
+                        after = bits[start + acquisition.size :]
+                        decoded = (
+                            self._decode_fec_payload(after)
+                            if has_fec
+                            else self._decode_legacy_payload(after)
+                        )
+                        if decoded is None:
+                            continue
+                        payload, needed = decoded
+                        end = start + acquisition.size + needed
+                        score = float(np.mean(np.abs(confidence[start:end])))
+                        score -= 0.1 * acquisition_errors
+                        candidates.append(
+                            (score, float(centers[start]), payload)
+                        )
 
         # Adjacent clock/phase hypotheses describe the same physical burst.
         # A radio path can give a slightly mistimed hypothesis more energy than
@@ -226,6 +236,45 @@ class AFSKModem:
         # hypothesis that passes its integrity check (ControlFrame CRC) instead
         # of discarding it before validation.
         return self._select_candidates(candidates, validator)
+
+    @staticmethod
+    def _majority_bits(copies: np.ndarray) -> np.ndarray:
+        threshold = copies.shape[0] // 2 + 1
+        return (np.sum(copies, axis=0) >= threshold).astype(np.int8)
+
+    def _decode_fec_payload(
+        self,
+        after: np.ndarray,
+    ) -> tuple[bytes, int] | None:
+        length_bits = 8 * FEC_REPETITIONS
+        if after.size < length_bits:
+            return None
+        length_copies = after[:length_bits].reshape(FEC_REPETITIONS, 8)
+        length = _bits_to_bytes_lsb_first(
+            self._majority_bits(length_copies)
+        )[0]
+        payload_bits = int(length) * 8
+        needed = length_bits + payload_bits * FEC_REPETITIONS
+        if length < 8 or after.size < needed:
+            return None
+        copies = after[length_bits:needed].reshape(
+            FEC_REPETITIONS,
+            payload_bits,
+        )
+        payload = _bits_to_bytes_lsb_first(self._majority_bits(copies))
+        return payload, needed
+
+    @staticmethod
+    def _decode_legacy_payload(
+        after: np.ndarray,
+    ) -> tuple[bytes, int] | None:
+        if after.size < 8:
+            return None
+        length = _bits_to_bytes_lsb_first(after[:8])[0]
+        needed = 8 + int(length) * 8
+        if length < 8 or after.size < needed:
+            return None
+        return _bits_to_bytes_lsb_first(after[8:needed]), needed
 
     def _extract_frames(self, bits: np.ndarray, max_sync_errors: int = 1) -> list[bytes]:
         sync_bits = _bits_lsb_first(SYNC)

@@ -1,6 +1,6 @@
 import numpy as np
 
-from guardian.modem.afsk import AFSKModem
+from guardian.modem.afsk import AFSKModem, FEC_SYNC, PREAMBLE
 from guardian.protocol import ControlFrame, FrameType
 
 
@@ -104,3 +104,21 @@ def test_afsk_prefers_crc_valid_timing_hypothesis_over_higher_energy() -> None:
     )
 
     assert selected == [payload]
+
+
+def test_afsk_fec_recovers_when_one_complete_payload_copy_is_lost() -> None:
+    modem = AFSKModem()
+    payload = _control_payload()
+    audio = modem.modulate(payload)
+    first_copy = (
+        len(PREAMBLE) * 8
+        + len(FEC_SYNC) * 8
+        + 3 * 8
+    )
+    start = int(first_copy * modem.sps)
+    end = start + int(len(payload) * 8 * modem.sps)
+    audio[start:end] = 0.0
+
+    decoded = modem.demodulate(_radio_window(audio, noise=0.005))
+
+    assert payload in decoded

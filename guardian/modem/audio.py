@@ -12,10 +12,12 @@ with no audio backend; start() raises a clear error if it can't be used.
 from __future__ import annotations
 
 from collections import deque
+from pathlib import Path
 import re
 import threading
 import time
 from typing import Callable
+import wave
 
 import numpy as np
 
@@ -231,6 +233,7 @@ class AudioControlTransport(ControlTransport):
         sample_rate: int = 48000,
         input_device=None,
         output_device=None,
+        diagnostic_audio_path: Path | str | None = None,
         on_log: Callable[[str], None] | None = None,
     ):
         self.modem = modem or AFSKModem(sample_rate=sample_rate)
@@ -238,6 +241,9 @@ class AudioControlTransport(ControlTransport):
         self.ptt = ptt or (lambda on: None)
         self.input_device = input_device
         self.output_device = output_device
+        self.diagnostic_audio_path = (
+            Path(diagnostic_audio_path) if diagnostic_audio_path else None
+        )
         self.on_log = on_log or (lambda m: None)
         self.on_frame = None
 
@@ -259,6 +265,8 @@ class AudioControlTransport(ControlTransport):
         self._level = 0.0          # smoothed current level
         self._floor = 0.0          # slow-tracking idle noise floor
         self._peak = 0.0
+        self._max_peak = 0.0
+        self._last_diagnostic_audio = 0.0
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
@@ -397,6 +405,7 @@ class AudioControlTransport(ControlTransport):
         rms = float(np.sqrt(np.mean(block.astype(np.float64) ** 2))) if len(block) else 0.0
         self._level = 0.7 * self._level + 0.3 * rms
         self._peak = max(self._peak * 0.95, float(np.max(np.abs(block))) if len(block) else 0.0)
+        self._max_peak = max(self._max_peak, self._peak)
         # Floor tracks downward fast, recovers slowly -> settles on the quiet level.
         if self._floor == 0.0:
             self._floor = rms
@@ -410,7 +419,8 @@ class AudioControlTransport(ControlTransport):
     def levels(self) -> dict:
         """Current RX metering: linear rms/peak/floor plus dBFS conversions."""
         return {
-            "rms": self._level, "peak": self._peak, "floor": self._floor,
+            "rms": self._level, "peak": self._peak, "max_peak": self._max_peak,
+            "floor": self._floor,
             "rms_db": self.to_db(self._level), "floor_db": self.to_db(self._floor),
             "running": self._stream is not None,
         }
@@ -425,7 +435,8 @@ class AudioControlTransport(ControlTransport):
                 window,
                 validator=self._is_valid_control_payload,
             ):
-                self._handle_payload(payload)
+                if not self._handle_payload(payload):
+                    self._save_bad_audio(window)
 
     @staticmethod
     def _is_valid_control_payload(payload: bytes) -> bool:
@@ -435,23 +446,44 @@ class AudioControlTransport(ControlTransport):
             return False
         return True
 
-    def _handle_payload(self, payload: bytes) -> None:
+    def _handle_payload(self, payload: bytes) -> bool:
         now = time.monotonic()
         # Drop duplicates seen recently (overlapping demod windows / repeats).
         self._recent = {k: t for k, t in self._recent.items() if now - t < 8.0}
         if payload in self._recent:
             self._recent[payload] = now
-            return
+            return self._is_valid_control_payload(payload)
         self._recent[payload] = now
         try:
             frame = ControlFrame.decode(payload)
         except FrameError as exc:
             self.on_log(f"RX bad frame: {exc}")
-            return
+            return False
         self.on_log(f"RX {frame.summary()}")
         # Queue for delivery on the owner's thread via pump() (avoids races with
         # the orchestrator's tick loop).
         self._rx_frames.append(frame)
+        return True
+
+    def _save_bad_audio(self, samples: np.ndarray) -> None:
+        path = self.diagnostic_audio_path
+        now = time.monotonic()
+        if path is None or now - self._last_diagnostic_audio < 8.0:
+            return
+        self._last_diagnostic_audio = now
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pcm = (
+                np.clip(np.asarray(samples), -1.0, 1.0) * 32767.0
+            ).astype("<i2")
+            with wave.open(str(path), "wb") as recording:
+                recording.setnchannels(1)
+                recording.setsampwidth(2)
+                recording.setframerate(self.fs)
+                recording.writeframes(pcm.tobytes())
+            self.on_log(f"Failed control audio saved: {path}")
+        except OSError as exc:
+            self.on_log(f"Failed control audio could not be saved: {exc}")
 
     def pump(self) -> int:
         """Deliver queued RX frames to on_frame. Call from the main/net thread."""

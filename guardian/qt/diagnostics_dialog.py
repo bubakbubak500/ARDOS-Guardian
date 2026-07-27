@@ -63,6 +63,8 @@ class DiagnosticsDialog(QDialog):
 
     def report(self) -> dict:
         snapshot = self.runtime.snapshots.read()
+        diagnostic_audio = config_dir() / "last-bad-control.wav"
+        transport = self.runtime.operations.audio_transport
         return {
             "generated_utc": datetime.now(timezone.utc).isoformat(),
             "guardian_version": __version__,
@@ -71,6 +73,12 @@ class DiagnosticsDialog(QDialog):
             "frozen": bool(getattr(sys, "frozen", False)),
             "data_directory": str(config_dir()),
             "config_path": str(DEFAULT_CONFIG_PATH),
+            "last_bad_control_audio": (
+                str(diagnostic_audio) if diagnostic_audio.exists() else None
+            ),
+            "control_audio_levels": (
+                transport.levels() if transport is not None else None
+            ),
             "configuration": asdict(self.runtime.config),
             "snapshot": asdict(snapshot),
             "dependencies": [

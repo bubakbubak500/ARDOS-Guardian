@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from .config import StationConfig
+from .config import StationConfig, config_dir
 from .install.dependencies import find_vara_fm, find_vara_hf
 from .i18n import dual
 from .message import Folder, MessageStore, Status
@@ -337,6 +337,7 @@ class Operations:
             sample_rate=modem.fs if hasattr(modem, "fs") else 48_000,
             input_device=input_device,
             output_device=output_device,
+            diagnostic_audio_path=config_dir() / "last-bad-control.wav",
             on_log=lambda value: self._log(value, source="control"),
         )
         try:
