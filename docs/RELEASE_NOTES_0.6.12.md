@@ -1,6 +1,8 @@
 # Guardian 0.6.12
 
 This release fixes the VARA TCP-session regression introduced in 0.6.11.
+It is superseded by 0.6.13, which removes an incorrect requirement for an
+immediate `BUFFER` notification after a successful data-socket write.
 
 - Renew command port 8300 and data port 8301 together because VARA treats them
   as one application session and closes 8300 when 8301 is closed.

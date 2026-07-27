@@ -48,16 +48,12 @@ class FakeVara:
     def wait_data_ready(self) -> None:
         self.commands.append(("data-ready",))
 
-    def wait_data_accepted(self, timeout: float) -> bool:
-        self.commands.append(("accepted",))
-        self.state.tx_buffer_bytes = len(self.written)
-        return True
-
     def wait_transfer_complete(self, timeout: float) -> bool:
         return self.transfer_complete
 
     def write_data(self, data: bytes) -> None:
         self.written += data
+        self.state.tx_buffer_bytes = len(self.written)
 
     def finish_data_write(self) -> None:
         self.commands.append(("finish-write",))
@@ -85,14 +81,13 @@ def test_vara_envelope_contains_id_payload_and_crc() -> None:
     assert not envelope[crc_offset + 2 :].strip(b"\0")
 
 
-def test_vara_buffer_notification_confirms_data_port_acceptance() -> None:
+def test_vara_buffer_notification_updates_transmit_queue_telemetry() -> None:
     vara = VaraClient()
     vara.prepare_data_transfer()
 
-    assert not vara.wait_data_accepted(0)
+    assert vara.state.tx_buffer_bytes == 0
     vara._handle_notification("BUFFER 411")
 
-    assert vara.wait_data_accepted(0)
     assert vara.state.tx_buffer_bytes == 411
 
 
@@ -230,7 +225,6 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
         ("connect", "OK1AAA"),
         ("data-ready",),
         ("prepare",),
-        ("accepted",),
         ("finish-write",),
         ("disconnect",),
         ("listen", True),
@@ -329,13 +323,8 @@ def test_vara_send_waits_for_connected_link_to_settle_before_data_write() -> Non
     assert events == ["ready", "write"]
 
 
-def test_vara_aborts_empty_session_when_data_port_never_queues_payload() -> None:
-    class RejectingVara(FakeVara):
-        def wait_data_accepted(self, timeout: float) -> bool:
-            self.commands.append(("accepted",))
-            return False
-
-    vara = RejectingVara()
+def test_vara_send_does_not_require_immediate_buffer_notification() -> None:
+    vara = FakeVara()
     result = []
 
     VaraP2PBackend(vara)._send(
@@ -343,10 +332,10 @@ def test_vara_aborts_empty_session_when_data_port_never_queues_payload() -> None
         result.append,
     )
 
-    assert result == [False]
-    assert ("abort",) in vara.commands
-    assert ("disconnect",) not in vara.commands
-    assert ("finish-write",) not in vara.commands
+    assert result == [True]
+    assert ("abort",) not in vara.commands
+    assert ("finish-write",) in vara.commands
+    assert ("disconnect",) in vara.commands
 
 
 def test_vara_receive_releases_codec_before_received_callback() -> None:

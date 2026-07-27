@@ -52,7 +52,6 @@ class VaraClient:
         self._lock = threading.Lock()
         self._rx_thread: threading.Thread | None = None
         self._stop = threading.Event()
-        self._buffer_update = threading.Event()
         self._last_data_write = 0.0
         self._link_connected_at = 0.0
 
@@ -222,10 +221,9 @@ class VaraClient:
 
     # --- data path (payload bytes) --------------------------------------
     def prepare_data_transfer(self) -> None:
-        """Discard stale BUFFER state before queuing a new payload."""
-        self.state.tx_buffer_bytes = None
+        """Reset locally tracked TX bytes before queuing a new payload."""
+        self.state.tx_buffer_bytes = 0
         self.state.data_bytes_written = 0
-        self._buffer_update.clear()
 
     def wait_data_ready(self, minimum_connected: float = 1.0) -> None:
         """Let VARA finish its CONNECTED/BREAK transition before port 8301 I/O.
@@ -240,10 +238,6 @@ class VaraClient:
         if remaining > 0:
             self._stop.wait(remaining)
 
-    def wait_data_accepted(self, timeout: float = 5.0) -> bool:
-        """Wait until VARA confirms that it consumed data from TCP port 8301."""
-        return self._buffer_update.wait(timeout)
-
     def write_data(self, data: bytes) -> None:
         """Send payload bytes over the VARA data port."""
         if self._data is None:
@@ -253,6 +247,12 @@ class VaraClient:
             raise OSError(socket_error, "VARA data socket is not healthy")
         self._data.sendall(data)
         self.state.data_bytes_written += len(data)
+        # VARA does not acknowledge each application write. BUFFER is an
+        # asynchronous queue update and may not be emitted while the modem is
+        # transmitting, so successful sendall() is the handoff boundary.
+        self.state.tx_buffer_bytes = (
+            (self.state.tx_buffer_bytes or 0) + len(data)
+        )
         self._last_data_write = time.monotonic()
 
     def finish_data_write(self, minimum_delay: float = 2.0) -> None:
@@ -359,7 +359,6 @@ class VaraClient:
             for token in upper.replace("=", " ").replace(":", " ").split()[1:]:
                 try:
                     self.state.tx_buffer_bytes = max(0, int(token))
-                    self._buffer_update.set()
                     break
                 except ValueError:
                     continue
