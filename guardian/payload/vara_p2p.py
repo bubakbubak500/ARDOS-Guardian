@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import struct
 import threading
+import time
 
 from ..protocol import crc16
+from ..vara import TransferResult
 from .base import DoneCb, PayloadBackend
 
 _MAGIC = b"GPLD"
@@ -33,7 +35,18 @@ _CRC = struct.Struct(">H")
 # actionable without making short Guardian messages excessively expensive.
 MIN_WIRE_SIZE = 1024
 CONNECT_TIMEOUT = 45.0
-TRANSFER_TIMEOUT = 45.0
+TRANSFER_TIMEOUT = 120.0
+DISCONNECT_TIMEOUT = 30.0
+_SLOW_LINK_BPS = 300.0
+_TRANSFER_MARGIN = 3.0
+
+
+def transfer_timeout_for(wire_bytes: int) -> float:
+    """Allow three times the airtime of a conservative 300 bps VARA link."""
+    return max(
+        TRANSFER_TIMEOUT,
+        wire_bytes * 8 / _SLOW_LINK_BPS * _TRANSFER_MARGIN,
+    )
 
 
 def encode_envelope(msg_id: int, body: bytes) -> bytes:
@@ -107,19 +120,55 @@ class VaraP2PBackend(PayloadBackend):
                     self.on_log(
                         f"VARA P2P: payload #{msg.msg_id} handed to VARA "
                         f"({len(data)} payload bytes / {len(envelope)} wire bytes, "
-                        f"local buffer {queued})"
+                        f"reported buffer {queued})"
                     )
-                    self.vara.finish_data_write()
-                    self.vara.disconnect_link()
-                    if self.vara.wait_link("DISCONNECTED", TRANSFER_TIMEOUT):
+                    transfer_timeout = transfer_timeout_for(len(envelope))
+                    result = self.vara.wait_transfer_complete(transfer_timeout)
+                    if result is TransferResult.DRAINED:
                         self.on_log(
-                            f"VARA P2P: payload #{msg.msg_id} transmitted "
-                            "and VARA link closed"
+                            f"VARA P2P: payload #{msg.msg_id} RF queue drained; "
+                            "disconnecting"
                         )
-                        success = True
+                        self.vara.disconnect_link()
+                        if self.vara.wait_link(
+                            "DISCONNECTED", DISCONNECT_TIMEOUT
+                        ):
+                            self.on_log(
+                                f"VARA P2P: payload #{msg.msg_id} transmitted "
+                                "and VARA link closed"
+                            )
+                            success = True
+                        else:
+                            self.on_log(
+                                f"VARA P2P: transfer #{msg.msg_id} drained but "
+                                "the link did not close"
+                            )
+                            self._abort_link()
+                    elif result is TransferResult.NO_BUFFER_REPORTS:
+                        self.on_log(
+                            f"VARA P2P: no usable BUFFER telemetry for payload "
+                            f"#{msg.msg_id}; using degraded command/data barrier"
+                        )
+                        self.vara.finish_data_write()
+                        self.vara.disconnect_link()
+                        if self.vara.wait_link(
+                            "DISCONNECTED", DISCONNECT_TIMEOUT
+                        ):
+                            self.on_log(
+                                f"VARA P2P: payload #{msg.msg_id} completed "
+                                "without buffer-drain confirmation"
+                            )
+                            success = True
+                        else:
+                            self.on_log(
+                                f"VARA P2P: transfer #{msg.msg_id} did not "
+                                "finish on the degraded path"
+                            )
+                            self._abort_link()
                     else:
                         self.on_log(
-                            f"VARA P2P: transfer #{msg.msg_id} did not finish"
+                            f"VARA P2P: transfer #{msg.msg_id} failed before "
+                            f"buffer drain ({result.value})"
                         )
                         self._abort_link()
             except Exception as exc:  # noqa: BLE001
@@ -184,13 +233,25 @@ class VaraP2PBackend(PayloadBackend):
                     self.on_log("VARA P2P: no incoming link")
                 else:
                     self.on_log("VARA P2P: link established, waiting for data header")
-                    head = self.vara.read_exactly(_HDR.size, TRANSFER_TIMEOUT)
+                    started = time.monotonic()
+                    deadline = started + TRANSFER_TIMEOUT
+
+                    def remaining() -> float:
+                        return max(0.01, deadline - time.monotonic())
+
+                    head = self.vara.read_exactly(_HDR.size, remaining())
                     magic, mid, length = _HDR.unpack(head)
                     if magic != _MAGIC:
                         raise ValueError("bad payload magic")
-                    body = self.vara.read_exactly(length, TRANSFER_TIMEOUT)
+                    wire_size = max(
+                        MIN_WIRE_SIZE, _HDR.size + length + _CRC.size
+                    )
+                    deadline = max(
+                        deadline, started + transfer_timeout_for(wire_size)
+                    )
+                    body = self.vara.read_exactly(length, remaining())
                     crc_given = _CRC.unpack(
-                        self.vara.read_exactly(_CRC.size, TRANSFER_TIMEOUT)
+                        self.vara.read_exactly(_CRC.size, remaining())
                     )[0]
                     if crc_given != crc16(head + body):
                         raise ValueError(f"CRC failed on #{mid}")
@@ -199,7 +260,7 @@ class VaraP2PBackend(PayloadBackend):
                     )
                     if padding_length:
                         padding = self.vara.read_exactly(
-                            padding_length, TRANSFER_TIMEOUT
+                            padding_length, remaining()
                         )
                         if padding.strip(b"\0"):
                             raise ValueError(f"invalid payload padding on #{mid}")
@@ -212,11 +273,18 @@ class VaraP2PBackend(PayloadBackend):
             except Exception as exc:  # noqa: BLE001
                 self.on_log(f"VARA P2P receive failed: {exc}")
             finally:
-                # Close VARA before the callback sends RECEIVED over AFSK.
+                # The sender owns drain-before-disconnect ordering.  Do not
+                # race its final BUFFER 0 by disconnecting from the responder.
                 if success:
                     try:
-                        self.vara.disconnect_link()
-                        self.vara.wait_link("DISCONNECTED", 10.0)
+                        if not self.vara.wait_link(
+                            "DISCONNECTED", DISCONNECT_TIMEOUT
+                        ):
+                            self.on_log(
+                                "VARA P2P: sender did not close the completed "
+                                "link; aborting stale session"
+                            )
+                            self._abort_link()
                     except Exception:
                         self._abort_link()
                 else:

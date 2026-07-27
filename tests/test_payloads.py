@@ -3,13 +3,15 @@ from types import SimpleNamespace
 
 from guardian.payload.vara_p2p import (
     MIN_WIRE_SIZE,
+    TRANSFER_TIMEOUT,
     VaraP2PBackend,
     encode_envelope,
+    transfer_timeout_for,
 )
 from guardian.payload.winlink_manual import WinlinkManualBackend
 from guardian.protocol import crc16
 from guardian.session import Message
-from guardian.vara.client import VaraClient
+from guardian.vara.client import TransferResult, VaraClient
 
 
 class FakeVara:
@@ -18,7 +20,8 @@ class FakeVara:
         self.incoming = bytearray(incoming)
         self.commands = []
         self.written = b""
-        self.transfer_complete = True
+        self.transfer_result = TransferResult.DRAINED
+        self.transfer_timeout = None
         self.state = SimpleNamespace(
             tx_buffer_bytes=None, data_socket_generation=1
         )
@@ -44,8 +47,10 @@ class FakeVara:
     def wait_data_ready(self) -> None:
         self.commands.append(("data-ready",))
 
-    def wait_transfer_complete(self, timeout: float) -> bool:
-        return self.transfer_complete
+    def wait_transfer_complete(self, timeout: float) -> TransferResult:
+        self.commands.append(("wait-transfer",))
+        self.transfer_timeout = timeout
+        return self.transfer_result
 
     def write_data(self, data: bytes) -> None:
         self.written += data
@@ -81,10 +86,62 @@ def test_vara_buffer_notification_updates_transmit_queue_telemetry() -> None:
     vara = VaraClient()
     vara.prepare_data_transfer()
 
-    assert vara.state.tx_buffer_bytes == 0
+    assert vara.state.tx_buffer_bytes is None
     vara._handle_notification("BUFFER 411")
 
     assert vara.state.tx_buffer_bytes == 411
+
+
+def test_vara_transfer_wait_requires_nonzero_buffer_before_drain() -> None:
+    vara = VaraClient()
+    vara.state.link_state = "CONNECTED"
+    vara.prepare_data_transfer()
+    vara._handle_notification("BUFFER 0")
+
+    assert (
+        vara.wait_transfer_complete(timeout=0, ingest_timeout=0)
+        is TransferResult.NO_BUFFER_REPORTS
+    )
+
+    vara._handle_notification("BUFFER 411")
+    vara._handle_notification("BUFFER 0")
+
+    assert (
+        vara.wait_transfer_complete(timeout=0)
+        is TransferResult.DRAINED
+    )
+
+
+def test_vara_transfer_wait_rejects_peer_close_before_buffer_drain() -> None:
+    vara = VaraClient()
+    vara.state.link_state = "CONNECTED"
+    vara.prepare_data_transfer()
+    vara._handle_notification("BUFFER 411")
+    vara.state.link_state = "DISCONNECTED"
+
+    assert (
+        vara.wait_transfer_complete(timeout=0)
+        is TransferResult.PEER_CLOSED_EARLY
+    )
+
+
+def test_vara_read_exactly_restores_blocking_data_socket() -> None:
+    class FakeDataSocket:
+        def __init__(self) -> None:
+            self.timeouts = []
+
+        def settimeout(self, value) -> None:
+            self.timeouts.append(value)
+
+        def recv(self, size: int) -> bytes:
+            return b"payload"[:size]
+
+    data = FakeDataSocket()
+    vara = VaraClient()
+    vara._data = data
+
+    assert vara.read_exactly(7, timeout=3.0) == b"payload"
+    assert data.timeouts == [3.0, None]
 
 
 def test_vara_reconnects_the_complete_tcp_pair_when_existing_state_is_dead(
@@ -151,7 +208,7 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
         ("connect", "OK1AAA"),
         ("data-ready",),
         ("prepare",),
-        ("finish-write",),
+        ("wait-transfer",),
         ("disconnect",),
         ("listen", True),
     ]
@@ -164,9 +221,7 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     VaraP2PBackend(incoming)._receive(received, receive_result.append)
 
     assert receive_result == [True]
-    assert incoming.commands == [
-        ("disconnect",),
-    ]
+    assert incoming.commands == []
     assert received.payload_bytes == b"bundle"
 
 
@@ -221,9 +276,10 @@ def test_vara_disconnect_follows_data_handoff_barrier() -> None:
     )
 
     assert result == [True]
-    assert vara.commands.index(("finish-write",)) < vara.commands.index(
+    assert vara.commands.index(("wait-transfer",)) < vara.commands.index(
         ("disconnect",)
     )
+    assert ("finish-write",) not in vara.commands
 
 
 def test_vara_send_waits_for_connected_link_to_settle_before_data_write() -> None:
@@ -247,8 +303,9 @@ def test_vara_send_waits_for_connected_link_to_settle_before_data_write() -> Non
     assert events == ["ready", "write"]
 
 
-def test_vara_send_does_not_require_immediate_buffer_notification() -> None:
+def test_vara_send_without_buffer_notifications_uses_degraded_barrier() -> None:
     vara = FakeVara()
+    vara.transfer_result = TransferResult.NO_BUFFER_REPORTS
     result = []
 
     VaraP2PBackend(vara)._send(
@@ -260,6 +317,26 @@ def test_vara_send_does_not_require_immediate_buffer_notification() -> None:
     assert ("abort",) not in vara.commands
     assert ("finish-write",) in vara.commands
     assert ("disconnect",) in vara.commands
+
+
+def test_vara_send_reports_peer_close_before_drain_as_failure() -> None:
+    vara = FakeVara()
+    vara.transfer_result = TransferResult.PEER_CLOSED_EARLY
+    result = []
+
+    VaraP2PBackend(vara)._send(
+        Message(22, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        result.append,
+    )
+
+    assert result == [False]
+    assert ("abort",) in vara.commands
+    assert ("disconnect",) not in vara.commands
+
+
+def test_vara_transfer_timeout_scales_for_large_envelopes() -> None:
+    assert transfer_timeout_for(MIN_WIRE_SIZE) == TRANSFER_TIMEOUT
+    assert transfer_timeout_for(10_000) > TRANSFER_TIMEOUT
 
 
 def test_vara_payload_session_keeps_startup_tcp_pair_and_inbound_listener() -> None:
@@ -284,6 +361,7 @@ def test_vara_payload_session_keeps_startup_tcp_pair_and_inbound_listener() -> N
     assert outgoing.state.data_socket_generation == outgoing_generation
     assert incoming.state.data_socket_generation == incoming_generation
     assert ("listen", True) not in incoming.commands
+    assert ("disconnect",) not in incoming.commands
 
 
 def test_vara_receive_releases_codec_before_received_callback() -> None:

@@ -1,5 +1,5 @@
 """VARA FM orchestration package."""
 
-from .client import VaraClient, VaraState
+from .client import TransferResult, VaraClient, VaraState
 
-__all__ = ["VaraClient", "VaraState"]
+__all__ = ["TransferResult", "VaraClient", "VaraState"]

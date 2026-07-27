@@ -1,5 +1,10 @@
-from guardian.session import LoopbackBus, Orchestrator, SessionState
+from guardian.protocol import FrameType
+from guardian.session import LoopbackBus, Message, Orchestrator, SessionState
 from guardian.routing import Route, RouteTable
+from guardian.session.orchestrator import (
+    TRANSFER_TIMEOUT,
+    session_transfer_timeout_for,
+)
 
 
 def _drain(bus: LoopbackBus, *stations: Orchestrator, now: float = 1.0) -> None:
@@ -57,3 +62,41 @@ def test_configured_empty_hop_is_direct_even_with_discovery_enabled() -> None:
 
     assert message.next_hop == "OK1AAA"
     assert message.state is SessionState.ANNOUNCING
+
+
+def test_inbound_payload_failure_sends_cancel_to_initiator() -> None:
+    frames = []
+    bus = LoopbackBus()
+    receiver = Orchestrator("OK1AAA", bus.endpoint("receiver"))
+    observer = bus.endpoint("observer")
+    observer.on_frame = frames.append
+    message = Message(
+        103,
+        "OK7PS",
+        "OK1AAA",
+        "OK1AAA",
+        direction="in",
+        state=SessionState.RECEIVING,
+    )
+    receiver.sessions[message.msg_id] = message
+
+    receiver.notify_payload_delivered(message.msg_id, ok=False)
+    bus.pump()
+
+    assert message.state is SessionState.FAILED
+    assert message.error == "payload CRC failed"
+    assert [frame.type for frame in frames] == [FrameType.CANCEL]
+
+
+def test_session_timeout_stays_above_scaled_payload_timeout() -> None:
+    small = Message(104, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x")
+    large = Message(
+        105,
+        "OK7PS",
+        "OK1AAA",
+        "OK1AAA",
+        payload_bytes=b"x" * 10_000,
+    )
+
+    assert session_transfer_timeout_for(small) == TRANSFER_TIMEOUT
+    assert session_transfer_timeout_for(large) > TRANSFER_TIMEOUT

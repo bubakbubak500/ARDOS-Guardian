@@ -18,8 +18,18 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from enum import Enum
 from typing import Callable
+
+
+class TransferResult(Enum):
+    """Outcome of waiting for VARA to consume and transmit a data write."""
+
+    DRAINED = "drained"
+    PEER_CLOSED_EARLY = "peer_closed_early"
+    TIMEOUT = "timeout"
+    NO_BUFFER_REPORTS = "no_buffer_reports"
 
 
 @dataclass
@@ -52,6 +62,8 @@ class VaraClient:
         self._lock = threading.Lock()
         self._rx_thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._buffer_reported = threading.Event()
+        self._buffer_nonzero = threading.Event()
         self._last_data_write = 0.0
         self._link_connected_at = 0.0
 
@@ -195,8 +207,10 @@ class VaraClient:
 
     # --- data path (payload bytes) --------------------------------------
     def prepare_data_transfer(self) -> None:
-        """Reset locally tracked TX bytes before queuing a new payload."""
-        self.state.tx_buffer_bytes = 0
+        """Start a new BUFFER-notification observation window."""
+        self._buffer_reported.clear()
+        self._buffer_nonzero.clear()
+        self.state.tx_buffer_bytes = None
         self.state.data_bytes_written = 0
 
     def wait_data_ready(self, minimum_connected: float = 1.0) -> None:
@@ -221,12 +235,9 @@ class VaraClient:
             raise OSError(socket_error, "VARA data socket is not healthy")
         self._data.sendall(data)
         self.state.data_bytes_written += len(data)
-        # VARA does not acknowledge each application write. BUFFER is an
-        # asynchronous queue update and may not be emitted while the modem is
-        # transmitting, so successful sendall() is the handoff boundary.
-        self.state.tx_buffer_bytes = (
-            (self.state.tx_buffer_bytes or 0) + len(data)
-        )
+        # Do not mix locally written bytes with VARA's asynchronous BUFFER
+        # telemetry.  The notification state machine below is the only writer
+        # of tx_buffer_bytes after prepare_data_transfer().
         self._last_data_write = time.monotonic()
 
     def finish_data_write(self, minimum_delay: float = 2.0) -> None:
@@ -240,37 +251,58 @@ class VaraClient:
         if remaining > 0:
             self._stop.wait(remaining)
 
-    def wait_transfer_complete(self, timeout: float = 180.0) -> bool:
-        """Wait until VARA drains its RF queue or the peer closes the link."""
-        deadline = time.monotonic() + timeout
-        was_connected = self.state.link_state == "CONNECTED"
-        while time.monotonic() < deadline:
+    def wait_transfer_complete(
+        self,
+        timeout: float = 180.0,
+        ingest_timeout: float = 10.0,
+    ) -> TransferResult:
+        """Wait for a post-write nonzero BUFFER report and its later drain.
+
+        Command port 8300 and data port 8301 are independent TCP streams.  A
+        successful sendall() therefore does not prove that VARA has placed the
+        bytes in its RF queue.  First require BUFFER > 0, then accept BUFFER 0.
+        """
+        ingest_deadline = time.monotonic() + min(timeout, ingest_timeout)
+        while not self._buffer_nonzero.is_set():
+            if self._stop.is_set() or self.state.link_state == "DISCONNECTED":
+                return TransferResult.PEER_CLOSED_EARLY
+            if time.monotonic() >= ingest_deadline:
+                return TransferResult.NO_BUFFER_REPORTS
+            self._stop.wait(0.05)
+
+        drain_deadline = time.monotonic() + timeout
+        while True:
             if self.state.tx_buffer_bytes == 0:
-                return True
-            if was_connected and self.state.link_state == "DISCONNECTED":
-                return True
-            if self.state.link_state == "CONNECTED":
-                was_connected = True
-            time.sleep(0.05)
-        return self.state.tx_buffer_bytes == 0
+                return TransferResult.DRAINED
+            if self._stop.is_set() or self.state.link_state == "DISCONNECTED":
+                return TransferResult.PEER_CLOSED_EARLY
+            if time.monotonic() >= drain_deadline:
+                return TransferResult.TIMEOUT
+            self._stop.wait(0.05)
 
     def read_exactly(self, n: int, timeout: float = 60.0) -> bytes:
         """Read exactly n payload bytes (raises on timeout/short read)."""
         if self._data is None:
             raise ConnectionError("VARA data port not connected")
-        import time as _t
-        self._data.settimeout(timeout)
-        deadline = _t.monotonic() + timeout
+        data = self._data
+        data.settimeout(timeout)
+        deadline = time.monotonic() + timeout
         buf = bytearray()
-        while len(buf) < n:
-            if _t.monotonic() > deadline:
-                raise TimeoutError("timed out reading payload")
-            chunk = self._data.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("VARA data connection closed")
-            buf += chunk
-            self.state.data_bytes_read += len(chunk)
-        return bytes(buf)
+        try:
+            while len(buf) < n:
+                if time.monotonic() > deadline:
+                    raise TimeoutError("timed out reading payload")
+                chunk = data.recv(n - len(buf))
+                if not chunk:
+                    raise ConnectionError("VARA data connection closed")
+                buf += chunk
+                self.state.data_bytes_read += len(chunk)
+            return bytes(buf)
+        finally:
+            try:
+                data.settimeout(None)
+            except OSError:
+                pass
 
     def wait_link(self, target: str, timeout: float = 30.0) -> bool:
         """Block until link_state reaches `target` (e.g. 'CONNECTED')."""
@@ -332,7 +364,11 @@ class VaraClient:
         elif upper.startswith("BUFFER"):
             for token in upper.replace("=", " ").replace(":", " ").split()[1:]:
                 try:
-                    self.state.tx_buffer_bytes = max(0, int(token))
+                    value = max(0, int(token))
+                    self.state.tx_buffer_bytes = value
+                    self._buffer_reported.set()
+                    if value > 0:
+                        self._buffer_nonzero.set()
                     break
                 except ValueError:
                     continue

@@ -1,6 +1,6 @@
 # Guardian (ARDOS) — Project Status & Plan
 
-_Last updated: 2026-06-01_
+_Last updated: 2026-07-27_
 
 A resumable snapshot: what Guardian is, what's built, what's verified, the key
 decisions and why, and what comes next. Read this first when picking the project
@@ -206,8 +206,10 @@ and polish.
 1. **On-air control channel** — Net tab → audio devices + control channel
    "audio": loopback-cable test (TX into RX), then on-air with a real rig. Add
    RX level/squelch meters; confirm PTT keys via the radio driver.
-2. **Live `vara_p2p`** — finish VARA connect/notification edge cases, buffer
-   drain, disconnect handling; test between two stations.
+2. **Live `vara_p2p`** — the TCP-pair lifecycle, post-write `BUFFER > 0`
+   ingestion proof, `BUFFER 0` drain-before-disconnect ordering, early peer
+   close handling, and conservative transfer timeouts are covered in software;
+   verify the complete sequence between two stations on air.
 3. **Channel scanning on a real radio** — verify tune/mode via rigctld; wire an
    activity threshold from the S-meter.
 

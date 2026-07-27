@@ -41,9 +41,33 @@ DISCOVERY_TIMEOUT = 8.0
 # Timeouts (seconds). Generous, since HF bursts are slow.
 ACK_TIMEOUT = 8.0
 START_TIMEOUT = 12.0
-TRANSFER_TIMEOUT = 120.0
+TRANSFER_TIMEOUT = 180.0
 BUSY_BACKOFF = 20.0
 MAX_ANNOUNCE = 3
+_PAYLOAD_TRANSFER_TIMEOUT = 120.0
+_PAYLOAD_WIRE_OVERHEAD = 14
+_PAYLOAD_MIN_WIRE_SIZE = 1024
+_SLOW_LINK_BPS = 300.0
+_TRANSFER_MARGIN = 3.0
+_SESSION_MARGIN = 60.0
+
+
+def session_transfer_timeout_for(msg: "Message") -> float:
+    """Keep the control-session deadline beyond the payload-layer deadline."""
+    data_size = (
+        len(msg.payload_bytes)
+        if msg.payload_bytes is not None
+        else len(msg.body.encode("utf-8"))
+    )
+    wire_size = max(
+        _PAYLOAD_MIN_WIRE_SIZE,
+        _PAYLOAD_WIRE_OVERHEAD + data_size,
+    )
+    payload_timeout = max(
+        _PAYLOAD_TRANSFER_TIMEOUT,
+        wire_size * 8 / _SLOW_LINK_BPS * _TRANSFER_MARGIN,
+    )
+    return max(TRANSFER_TIMEOUT, payload_timeout + _SESSION_MARGIN)
 
 
 class SessionState(Enum):
@@ -259,9 +283,10 @@ class Orchestrator:
         if not msg or msg.direction != "in":
             return
         if not ok:
+            self._send(FrameType.CANCEL, msg)
             self._enter(msg, SessionState.FAILED)
             msg.error = "payload CRC failed"
-            self._emit(msg, "payload failed")
+            self._emit(msg, "payload failed — sent CANCEL")
             return
         self._send(FrameType.RECEIVED, msg)
         if self.callsign == msg.final_dest:
@@ -328,7 +353,10 @@ class Orchestrator:
                 self._emit(msg, "retrying after busy")
             elif msg.state is SessionState.STARTING_VARA and elapsed > START_TIMEOUT:
                 self._fail(msg, "VARA did not start in time")
-            elif msg.state is SessionState.TRANSFERRING and elapsed > TRANSFER_TIMEOUT:
+            elif (
+                msg.state is SessionState.TRANSFERRING
+                and elapsed > session_transfer_timeout_for(msg)
+            ):
                 self._fail(msg, "no RECEIVED before transfer timeout")
             elif msg.state is SessionState.ACKED and elapsed > START_TIMEOUT:
                 self._fail(msg, "initiator never sent START_VARA")
