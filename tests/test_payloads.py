@@ -20,9 +20,6 @@ class FakeVara:
     def connect_to(self, callsign: str) -> None:
         self.commands.append(("connect", callsign))
 
-    def reconnect_data(self) -> None:
-        self.commands.append(("reconnect-data",))
-
     def listen(self, enabled: bool) -> None:
         self.commands.append(("listen", enabled))
 
@@ -48,6 +45,9 @@ class FakeVara:
 
     def write_data(self, data: bytes) -> None:
         self.written += data
+
+    def finish_data_write(self) -> None:
+        self.commands.append(("finish-write",))
 
     def read_exactly(self, size: int, timeout: float) -> bytes:
         result = bytes(self.incoming[:size])
@@ -80,7 +80,9 @@ def test_vara_buffer_notification_confirms_data_port_acceptance() -> None:
     assert vara.state.tx_buffer_bytes == 411
 
 
-def test_vara_reconnects_stale_data_socket_before_payload(monkeypatch) -> None:
+def test_vara_reconnects_the_complete_tcp_pair_when_existing_state_is_dead(
+    monkeypatch,
+) -> None:
     class FakeSocket:
         def __init__(self) -> None:
             self.closed = False
@@ -95,21 +97,33 @@ def test_vara_reconnects_stale_data_socket_before_payload(monkeypatch) -> None:
         def settimeout(self, value) -> None:
             self.timeout = value
 
-    old = FakeSocket()
-    fresh = FakeSocket()
-    vara = VaraClient(data_port=8301)
-    vara._data = old
+    old_cmd = FakeSocket()
+    old_data = FakeSocket()
+    fresh_cmd = FakeSocket()
+    fresh_data = FakeSocket()
+    sockets = iter((fresh_cmd, fresh_data))
+    vara = VaraClient(cmd_port=8300, data_port=8301)
+    vara._cmd = old_cmd
+    vara._data = old_data
+    vara.state.cmd_connected = False
     vara.state.data_connected = True
     monkeypatch.setattr(
         "guardian.vara.client.socket.create_connection",
-        lambda address, timeout: fresh,
+        lambda address, timeout: next(sockets),
+    )
+    monkeypatch.setattr(
+        "guardian.vara.client.threading.Thread.start", lambda self: None
     )
 
-    vara.reconnect_data()
+    vara.connect()
 
-    assert old.closed
-    assert vara._data is fresh
-    assert fresh.timeout is None
+    assert old_cmd.closed
+    assert old_data.closed
+    assert vara._cmd is fresh_cmd
+    assert vara._data is fresh_data
+    assert fresh_cmd.timeout is None
+    assert fresh_data.timeout is None
+    assert vara.state.cmd_connected
     assert vara.state.data_connected
 
 
@@ -123,10 +137,9 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert send_result == [True]
     assert outgoing.commands == [
-        ("reconnect-data",),
         ("connect", "OK1AAA"),
         ("prepare",),
-        ("accepted",),
+        ("finish-write",),
         ("disconnect",),
     ]
     assert outgoing.written == encode_envelope(12, b"bundle")
@@ -139,7 +152,6 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert receive_result == [True]
     assert incoming.commands == [
-        ("reconnect-data",),
         ("listen", True),
         ("disconnect",),
         ("listen", False),
@@ -188,9 +200,8 @@ def test_vara_send_keeps_codec_until_rf_transfer_finishes() -> None:
     assert events == ["acquire", "rf-finished", "release", ("done", True)]
 
 
-def test_vara_does_not_disconnect_before_data_port_accepts_payload() -> None:
+def test_vara_disconnect_follows_data_handoff_barrier() -> None:
     vara = FakeVara()
-    vara.wait_data_accepted = lambda timeout: False
     result = []
 
     VaraP2PBackend(vara)._send(
@@ -198,9 +209,10 @@ def test_vara_does_not_disconnect_before_data_port_accepts_payload() -> None:
         result.append,
     )
 
-    assert result == [False]
-    assert ("disconnect",) not in vara.commands
-    assert ("abort",) in vara.commands
+    assert result == [True]
+    assert vara.commands.index(("finish-write",)) < vara.commands.index(
+        ("disconnect",)
+    )
 
 
 def test_vara_receive_releases_codec_before_received_callback() -> None:

@@ -48,6 +48,7 @@ class VaraClient:
         self._rx_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._buffer_update = threading.Event()
+        self._last_data_write = 0.0
 
         self.state = VaraState()
         # Callback for asynchronous command-port notifications (UI/log hook).
@@ -59,84 +60,75 @@ class VaraClient:
 
     # --- connection management ------------------------------------------
     def connect(self, timeout: float = 3.0) -> None:
+        cmd: socket.socket | None = None
         with self._lock:
-            if self._cmd is not None:
+            if (
+                self._cmd is not None
+                and self._data is not None
+                and self.state.cmd_connected
+                and self.state.data_connected
+            ):
                 return
+            self._close_sockets_locked()
             self._stop.clear()
-            self._cmd = socket.create_connection((self.host, self.cmd_port), timeout=timeout)
-            self._cmd.settimeout(None)
-            self.state.cmd_connected = True
             try:
-                self._data = socket.create_connection((self.host, self.data_port), timeout=timeout)
-                self._data.settimeout(None)
-                self.state.data_connected = True
+                cmd = socket.create_connection(
+                    (self.host, self.cmd_port), timeout=timeout
+                )
+                cmd.settimeout(None)
+                data = socket.create_connection(
+                    (self.host, self.data_port), timeout=timeout
+                )
+                data.settimeout(None)
             except OSError as exc:
-                # Data port is optional until we actually transfer.
-                self.state.error = f"data port: {exc}"
+                if cmd is not None:
+                    try:
+                        cmd.close()
+                    except OSError:
+                        pass
+                self.state.error = f"VARA TCP pair: {exc}"
+                raise
+            self._cmd = cmd
+            self._data = data
+            self.state.cmd_connected = True
+            self.state.data_connected = True
+            self.state.error = None
 
-        self._rx_thread = threading.Thread(target=self._reader, name="vara-rx", daemon=True)
+        self._rx_thread = threading.Thread(
+            target=self._reader, args=(cmd,), name="vara-rx", daemon=True
+        )
         self._rx_thread.start()
 
     def disconnect(self) -> None:
         self._stop.set()
         with self._lock:
-            for sock_attr in ("_cmd", "_data"):
-                sock = getattr(self, sock_attr)
-                if sock is not None:
-                    try:
-                        sock.close()
-                    except OSError:
-                        pass
-                    setattr(self, sock_attr, None)
+            self._close_sockets_locked()
             self.state.cmd_connected = False
             self.state.data_connected = False
             self.state.link_state = "DISCONNECTED"
 
+    def _close_sockets_locked(self) -> None:
+        for sock_attr in ("_cmd", "_data"):
+            sock = getattr(self, sock_attr)
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                setattr(self, sock_attr, None)
+
     @property
     def connected(self) -> bool:
-        return self._cmd is not None
-
-    def reconnect_data(self, timeout: float = 3.0) -> None:
-        """Open a fresh VARA data-port socket for the next RF session.
-
-        Windows can accept a write briefly after the peer has closed a stale
-        TCP connection.  In that case ``sendall`` succeeds locally but VARA
-        never emits BUFFER and transmits zero bytes.  Payload sessions therefore
-        use a newly established port-8301 connection.
-        """
-        with self._lock:
-            old = self._data
-            self._data = None
-            self.state.data_connected = False
-            if old is not None:
-                try:
-                    old.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                try:
-                    old.close()
-                except OSError:
-                    pass
-
-        deadline = time.monotonic() + timeout
-        last_error: OSError | None = None
-        while time.monotonic() < deadline:
-            try:
-                fresh = socket.create_connection(
-                    (self.host, self.data_port),
-                    timeout=min(0.5, max(0.05, deadline - time.monotonic())),
-                )
-                fresh.settimeout(None)
-                with self._lock:
-                    self._data = fresh
-                    self.state.data_connected = True
-                    self.state.error = None
-                return
-            except OSError as exc:
-                last_error = exc
-                time.sleep(0.1)
-        self.state.error = f"data port reconnect: {last_error}"
-        raise ConnectionError(self.state.error)
+        return (
+            self._cmd is not None
+            and self._data is not None
+            and self.state.cmd_connected
+            and self.state.data_connected
+        )
 
     # --- commands --------------------------------------------------------
     def send_command(self, command: str) -> None:
@@ -179,6 +171,18 @@ class VaraClient:
         if self._data is None:
             raise ConnectionError("VARA data port not connected")
         self._data.sendall(data)
+        self._last_data_write = time.monotonic()
+
+    def finish_data_write(self, minimum_delay: float = 2.0) -> None:
+        """Let the independent data socket reach VARA before DISCONNECT.
+
+        VARA's command and data streams are independent.  Its native protocol
+        recommends allowing the final data write to arrive before sending the
+        graceful DISCONNECT command, otherwise the command can overtake data.
+        """
+        remaining = minimum_delay - (time.monotonic() - self._last_data_write)
+        if remaining > 0:
+            self._stop.wait(remaining)
 
     def wait_transfer_complete(self, timeout: float = 180.0) -> bool:
         """Wait until VARA drains its RF queue or the peer closes the link."""
@@ -225,12 +229,12 @@ class VaraClient:
         return self.state.link_state == target
 
     # --- background notification reader ----------------------------------
-    def _reader(self) -> None:
+    def _reader(self, cmd: socket.socket) -> None:
         buf = b""
         try:
-            while not self._stop.is_set() and self._cmd is not None:
+            while not self._stop.is_set():
                 try:
-                    chunk = self._cmd.recv(1024)
+                    chunk = cmd.recv(1024)
                 except OSError:
                     break
                 if not chunk:
@@ -249,10 +253,14 @@ class VaraClient:
                     if text:
                         self._handle_notification(text)
         finally:
-            self.state.cmd_connected = False
-            self.state.data_connected = False
-            self.state.link_state = "DISCONNECTED"
-            self.state.ptt = False
+            with self._lock:
+                # An obsolete reader must not tear down a newer connection.
+                if self._cmd is cmd:
+                    self._close_sockets_locked()
+                    self.state.cmd_connected = False
+                    self.state.data_connected = False
+                    self.state.link_state = "DISCONNECTED"
+                    self.state.ptt = False
 
     def _handle_notification(self, text: str) -> None:
         self.state.last_notification = text
