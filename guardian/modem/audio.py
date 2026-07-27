@@ -24,6 +24,19 @@ from ..session.transport import ControlTransport
 from .afsk import AFSKModem
 
 
+_PSEUDO_DEVICE_PREFIXES = (
+    "microsoft sound mapper",
+    "primary sound capture driver",
+    "primary sound driver",
+)
+
+
+def is_real_audio_device_name(name: str) -> bool:
+    """Exclude PortAudio aliases that are not physical Windows endpoints."""
+    normalized = " ".join(name.casefold().split())
+    return bool(normalized) and not normalized.startswith(_PSEUDO_DEVICE_PREFIXES)
+
+
 def list_audio_devices() -> tuple[list[str], list[str]]:
     """Return (input_device_names, output_device_names). Empty if no backend.
 
@@ -52,7 +65,7 @@ def list_audio_devices() -> tuple[list[str], list[str]]:
             if api_filter is not None and d.get("hostapi") != api_filter:
                 continue
             name = (d.get("name", "") or "").strip()
-            if not name:
+            if not is_real_audio_device_name(name):
                 continue
             if d.get("max_input_channels", 0) > 0 and name not in seen_in:
                 seen_in.add(name)
@@ -227,6 +240,10 @@ class AudioControlTransport(ControlTransport):
 
         self._sd = None
         self._stream = None
+        self.actual_input_device_name = ""
+        self.actual_output_device_name = ""
+        self.actual_input_device_index: int | None = None
+        self.actual_output_device_index: int | None = None
         self._tx_lock = threading.Lock()
         self._rx_buf = deque(maxlen=int(sample_rate * 4))  # ~4 s rolling window
         self._recent: dict[bytes, float] = {}              # payload -> last seen
@@ -242,15 +259,58 @@ class AudioControlTransport(ControlTransport):
     def start(self) -> None:
         import sounddevice as sd  # lazy; raises if PortAudio missing
         self._sd = sd
-        self._running = True
-        self._stream = sd.InputStream(
-            samplerate=self.fs, channels=1, dtype="float32",
-            device=self.input_device, callback=self._rx_callback,
-            blocksize=int(self.fs * 0.1),
+        if not isinstance(self.input_device, int):
+            raise RuntimeError("The configured RX audio input is not available")
+        if not isinstance(self.output_device, int):
+            raise RuntimeError("The configured TX audio output is not available")
+        input_info = sd.query_devices(self.input_device, "input")
+        output_info = sd.query_devices(self.output_device, "output")
+        sd.check_input_settings(
+            device=self.input_device,
+            channels=1,
+            dtype="float32",
+            samplerate=self.fs,
         )
-        self._stream.start()
+        sd.check_output_settings(
+            device=self.output_device,
+            channels=1,
+            dtype="float32",
+            samplerate=self.fs,
+        )
+        self._running = True
+        try:
+            self._stream = sd.InputStream(
+                samplerate=self.fs, channels=1, dtype="float32",
+                device=self.input_device, callback=self._rx_callback,
+                blocksize=int(self.fs * 0.1),
+            )
+            self._stream.start()
+        except Exception:
+            self._running = False
+            self._stream = None
+            raise
+        opened_index = getattr(self._stream, "device", self.input_device)
+        if isinstance(opened_index, (tuple, list)):
+            opened_index = opened_index[0]
+        if int(opened_index) != self.input_device:
+            self.stop()
+            raise RuntimeError(
+                f"PortAudio opened input #{opened_index}, expected #{self.input_device}"
+            )
+        self.actual_input_device_index = self.input_device
+        self.actual_output_device_index = self.output_device
+        self.actual_input_device_name = str(input_info["name"])
+        self.actual_output_device_name = str(output_info["name"])
         self._rx_thread = threading.Thread(target=self._rx_loop, name="afsk-rx", daemon=True)
         self._rx_thread.start()
+        self.on_log(
+            f"Audio RX opened: {self.actual_input_device_name} "
+            f"[PortAudio #{self.actual_input_device_index}]"
+        )
+        self.on_log(
+            f"Audio TX verified: {self.actual_output_device_name} "
+            f"[PortAudio #{self.actual_output_device_index}]"
+        )
         self.on_log(f"Audio control channel started ({self.modem.name} @ {self.fs} Hz)")
 
     def stop(self) -> None:

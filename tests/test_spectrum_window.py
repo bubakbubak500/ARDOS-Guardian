@@ -55,8 +55,8 @@ def test_window_reflects_radio_and_vara_state_without_audio(tmp_path) -> None:
             radio=RadioSnapshot(frequency_hz=145_500_000, ptt=True)
         )
         window.refresh()
-        assert window.rx_card.value.text() == "145.50000 MHz"
-        assert window.tx_card.value.text() == "● 145.50000 MHz"
+        assert window.rx_card.value.text() == "145.5000 MHz"
+        assert window.tx_card.value.text() == "● 145.5000 MHz"
         window.pause_button.setChecked(True)
         assert window._paused
         assert window.pause_button.text()

@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Signal
+from PySide6.QtCore import QSettings, Signal, Qt
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -84,7 +85,7 @@ class SettingsDialog(QDialog):
         self.config = config
         self.settings = settings or QSettings()
         self.setWindowTitle(tr("settings.title"))
-        self.setMinimumSize(800, 620)
+        self.setMinimumSize(960, 650)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)
@@ -219,9 +220,9 @@ class SettingsDialog(QDialog):
             combo.setEditable(True)
             combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
             combo.setSizeAdjustPolicy(
-                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+                QComboBox.SizeAdjustPolicy.AdjustToContentsOnFirstShow
             )
-            combo.setMinimumContentsLength(38)
+            combo.setMinimumContentsLength(55)
         refresh = QPushButton(dual("Refresh devices", "Obnovit zařízení"))
         refresh.clicked.connect(self._refresh_audio_devices)
         self.audio_status = QLabel()
@@ -241,10 +242,26 @@ class SettingsDialog(QDialog):
         combo.blockSignals(True)
         combo.clear()
         combo.addItem("")
-        combo.addItems(names)
-        if selected and combo.findText(selected) < 0:
-            combo.addItem(selected)
+        for name in names:
+            combo.addItem(name)
+            combo.setItemData(
+                combo.count() - 1,
+                name,
+                Qt.ItemDataRole.ToolTipRole,
+            )
         combo.setCurrentText(selected)
+        combo.setToolTip(selected)
+        if combo.lineEdit() is not None:
+            combo.lineEdit().setToolTip(selected)
+        combo.view().setTextElideMode(Qt.TextElideMode.ElideNone)
+        metrics = QFontMetrics(combo.font())
+        content_width = max(
+            (metrics.horizontalAdvance(name) for name in [""] + names),
+            default=0,
+        )
+        screen = combo.screen()
+        available = screen.availableGeometry().width() if screen else 1200
+        combo.view().setMinimumWidth(min(content_width + 42, available - 80))
         combo.blockSignals(False)
 
     def _refresh_audio_devices(self) -> None:
@@ -268,10 +285,26 @@ class SettingsDialog(QDialog):
         self._populate_device_combo(self.audio_input, inputs, selected_input)
         self._populate_device_combo(self.audio_output, outputs, selected_output)
         if inputs or outputs:
+            unavailable: list[str] = []
+            if selected_input and selected_input not in inputs:
+                unavailable.append(
+                    dual(
+                        "saved RX input is unavailable",
+                        "uložený RX vstup není dostupný",
+                    )
+                )
+            if selected_output and selected_output not in outputs:
+                unavailable.append(
+                    dual(
+                        "saved TX output is unavailable",
+                        "uložený TX výstup není dostupný",
+                    )
+                )
+            suffix = f" {'; '.join(unavailable)}." if unavailable else ""
             self.audio_status.setText(
                 dual(
-                    f"Found {len(inputs)} input(s) and {len(outputs)} output(s).",
-                    f"Nalezeno vstupů: {len(inputs)}, výstupů: {len(outputs)}.",
+                    f"Found {len(inputs)} input(s) and {len(outputs)} output(s).{suffix}",
+                    f"Nalezeno vstupů: {len(inputs)}, výstupů: {len(outputs)}.{suffix}",
                 )
             )
         else:

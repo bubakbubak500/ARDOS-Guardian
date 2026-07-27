@@ -19,7 +19,7 @@ class RadioState:
     def freq_mhz(self) -> str:
         if self.frequency_hz is None:
             return "--"
-        return f"{self.frequency_hz / 1_000_000:.5f} MHz"
+        return f"{self.frequency_hz / 1_000_000:.4f} MHz"
 
 
 class RadioDriver:

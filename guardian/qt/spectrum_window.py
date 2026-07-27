@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 import threading
 
 import numpy as np
@@ -78,6 +79,8 @@ class AudioMonitor:
         self.device_name = device_name
         self.sample_rate = sample_rate
         self.error: str | None = None
+        self.actual_device_name = ""
+        self.actual_device_index: int | None = None
         self.running = False
         self._stream = None
         self._blocks: deque[np.ndarray] = deque(maxlen=24)
@@ -100,6 +103,13 @@ class AudioMonitor:
                 if self.device_name
                 else None
             )
+            if not isinstance(device, int):
+                raise RuntimeError(
+                    dual(
+                        "the configured RX audio input is not available",
+                        "nastavený zvukový vstup RX není dostupný",
+                    )
+                )
             self._stream = sd.InputStream(
                 samplerate=self.sample_rate,
                 channels=1,
@@ -109,12 +119,27 @@ class AudioMonitor:
                 callback=self._callback,
             )
             self._stream.start()
+            opened_index = getattr(self._stream, "device", device)
+            if isinstance(opened_index, (tuple, list)):
+                opened_index = opened_index[0]
+            if int(opened_index) != device:
+                raise RuntimeError(
+                    f"PortAudio opened input #{opened_index}, expected #{device}"
+                )
+            self.actual_device_index = device
+            self.actual_device_name = str(sd.query_devices(device, "input")["name"])
             self.running = True
             self.error = None
         except Exception as exc:  # audio availability is environment-specific
+            stream, self._stream = self._stream, None
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
             self.error = str(exc)
             self.running = False
-            self._stream = None
 
     def stop(self) -> None:
         stream, self._stream = self._stream, None
@@ -146,6 +171,46 @@ class AudioMonitor:
             self._blocks.append(block)
 
 
+class SpectrumAnalyzer:
+    """Keep FFT and palette calculations away from Qt's event thread."""
+
+    def __init__(self) -> None:
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="guardian-spectrum",
+        )
+        self._future: Future[tuple[np.ndarray, np.ndarray]] | None = None
+
+    def submit(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        max_frequency: float,
+        bins: int,
+    ) -> None:
+        if self._future is not None:
+            return
+        values = np.asarray(samples, dtype=np.float32).copy()
+
+        def calculate() -> tuple[np.ndarray, np.ndarray]:
+            db = spectrum_db(values, sample_rate, max_frequency, bins)
+            return db, waterfall_colors(db)
+
+        self._future = self._executor.submit(calculate)
+
+    def take_ready(self) -> tuple[np.ndarray, np.ndarray] | None:
+        if self._future is None or not self._future.done():
+            return None
+        future, self._future = self._future, None
+        try:
+            return future.result()
+        except Exception:
+            return None
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
 class ValueCard(QFrame):
     def __init__(self, title: str, accent: str, parent: QWidget | None = None):
         super().__init__(parent)
@@ -167,8 +232,8 @@ class WaterfallScope(QWidget):
         self.setMinimumSize(680, 400)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.max_frequency = 6_000.0
-        self._db = np.full(800, -100.0, dtype=np.float32)
-        self._history = np.zeros((360, 800, 3), dtype=np.uint8)
+        self._db = np.full(512, -100.0, dtype=np.float32)
+        self._history = np.zeros((240, 512, 3), dtype=np.uint8)
         self._history[:] = (3, 8, 24)
         self.tokens: ThemeTokens = DARK_TOKENS
 
@@ -188,13 +253,17 @@ class WaterfallScope(QWidget):
         self.update()
 
     def push(self, samples: np.ndarray, sample_rate: int) -> None:
-        width = max(200, self.width() - 2)
+        width = min(512, max(200, self.width() - 2))
         db = spectrum_db(samples, sample_rate, self.max_frequency, width)
+        self.push_db(db, waterfall_colors(db))
+
+    def push_db(self, db: np.ndarray, colors: np.ndarray) -> None:
+        width = db.size
         if self._history.shape[1] != width:
-            self._history = np.zeros((360, width, 3), dtype=np.uint8)
+            self._history = np.zeros((240, width, 3), dtype=np.uint8)
             self._history[:] = (3, 8, 24)
         self._history[1:] = self._history[:-1]
-        self._history[0] = waterfall_colors(db)
+        self._history[0] = colors
         self._db = db
         self.update()
 
@@ -229,12 +298,15 @@ class WaterfallScope(QWidget):
             painter.drawLine(QPointF(x, scope.top()), QPointF(x, waterfall.bottom()))
 
         if self._db.size > 1:
-            points = QPolygonF()
-            for index, value in enumerate(self._db):
-                x = scope.left() + scope.width() * index / (self._db.size - 1)
-                normalized = np.clip((float(value) + 100.0) / 80.0, 0.0, 1.0)
-                y = scope.bottom() - normalized * scope.height()
-                points.append(QPointF(x, y))
+            normalized = np.clip((self._db + 100.0) / 80.0, 0.0, 1.0)
+            x_values = np.linspace(scope.left(), scope.right(), self._db.size)
+            y_values = scope.bottom() - normalized * scope.height()
+            points = QPolygonF(
+                [
+                    QPointF(float(x), float(y))
+                    for x, y in zip(x_values, y_values, strict=True)
+                ]
+            )
             painter.setPen(QPen(QColor("#70e2a2"), 1.4))
             painter.drawPolyline(points)
 
@@ -287,6 +359,7 @@ class SpectrumWindow(QMainWindow):
         self.settings = settings
         self.auto_start_audio = auto_start_audio
         self.monitor = AudioMonitor(runtime.config.audio_input)
+        self.analyzer = SpectrumAnalyzer()
         self._really_closing = False
         self._paused = False
 
@@ -300,9 +373,8 @@ class SpectrumWindow(QMainWindow):
         self._restore_geometry()
 
         self.timer = QTimer(self)
-        self.timer.setInterval(80)
+        self.timer.setInterval(160)
         self.timer.timeout.connect(self.refresh)
-        self.timer.start()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -360,11 +432,20 @@ class SpectrumWindow(QMainWindow):
         self.mode_card.value.setText(f"{config.vara_mode.upper()} · P2P")
         self.link_card.value.setText(snapshot.vara.link_state)
 
+        ready = self.analyzer.take_ready()
+        if ready is not None and not self._paused:
+            self.scope.push_db(*ready)
         samples = self.monitor.take_samples()
         if samples is not None and not self._paused:
-            self.scope.push(samples, self.monitor.sample_rate)
+            bins = min(512, max(200, self.scope.width() - 2))
+            self.analyzer.submit(
+                samples,
+                self.monitor.sample_rate,
+                self.scope.max_frequency,
+                bins,
+            )
         if self.monitor.running:
-            device = config.audio_input or dual("system default", "výchozí zařízení")
+            device = self.monitor.actual_device_name
             status = (
                 dual(
                     f"Live RX audio · {device} · input-only monitor",
@@ -394,6 +475,7 @@ class SpectrumWindow(QMainWindow):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self.timer.start()
         if self.auto_start_audio:
             current_device = self.runtime.config.audio_input
             if current_device != self.monitor.device_name:
@@ -403,6 +485,7 @@ class SpectrumWindow(QMainWindow):
         self.refresh()
 
     def hideEvent(self, event) -> None:
+        self.timer.stop()
         self.monitor.stop()
         super().hideEvent(event)
 
@@ -418,6 +501,7 @@ class SpectrumWindow(QMainWindow):
 
     def shutdown(self) -> None:
         self._really_closing = True
+        self.analyzer.shutdown()
         self.close()
 
     def _restore_geometry(self) -> None:

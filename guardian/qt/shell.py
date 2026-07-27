@@ -599,6 +599,10 @@ class GuardianMainWindow(QMainWindow):
             )
 
     def _show_settings(self) -> None:
+        applied_audio = [
+            self.runtime.config.audio_input,
+            self.runtime.config.audio_output,
+        ]
         dialog = SettingsDialog(
             self.runtime.config,
             self.theme_controller.preference,
@@ -607,6 +611,35 @@ class GuardianMainWindow(QMainWindow):
         )
 
         def apply_changes() -> None:
+            selected_audio = [
+                self.runtime.config.audio_input,
+                self.runtime.config.audio_output,
+            ]
+            audio_changed = selected_audio != applied_audio
+            if audio_changed and self.runtime.operations.audio_transport is not None:
+                verified = self.runtime.operations.restart_control_channel()
+                if verified:
+                    transport = self.runtime.operations.audio_transport
+                    dialog.audio_status.setText(
+                        dual(
+                            "Applied and verified. "
+                            f"RX: {transport.actual_input_device_name}; "
+                            f"TX: {transport.actual_output_device_name}.",
+                            "Použito a ověřeno. "
+                            f"RX: {transport.actual_input_device_name}; "
+                            f"TX: {transport.actual_output_device_name}.",
+                        )
+                    )
+                else:
+                    dialog.audio_status.setText(
+                        dual(
+                            "The selected audio endpoints could not be opened; "
+                            "the control channel was stopped.",
+                            "Vybrané zvukové endpointy se nepodařilo otevřít; "
+                            "řídicí kanál byl zastaven.",
+                        )
+                    )
+            applied_audio[:] = selected_audio
             self.theme_controller.set_preference(dialog.selected_theme)
             self._rebuild_translated_ui()
             self.runtime.refresh()

@@ -81,8 +81,8 @@ def test_network_workspace_allows_direct_route_and_formats_operator_inputs() -> 
         assert route is not None
         assert route.preferred == ""
         assert workspace.destination.text() == "OK1AAA"
-        assert workspace.frequency.text() == "144.520 MHz"
-        assert workspace.routes_table.item(0, 3).text() == "144.520 MHz"
+        assert workspace.frequency.text() == "144.5200 MHz"
+        assert workspace.routes_table.item(0, 3).text() == "144.5200 MHz"
     finally:
         workspace.close()
         runtime.close()

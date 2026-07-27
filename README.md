@@ -44,10 +44,15 @@ manifest, and asks again before launching it.
   control-burst modem (AFSK 1200 for FM, MFSK-16 for HF)
 - **VARA spectrum monitor**: a separate P2P window with live RX FFT and
   waterfall, CAT-derived receive/transmit frequency, PTT indication, link
-  state, FM/HF passband scaling, pause/clear controls, and remembered geometry
+  state, FM/HF passband scaling, pause/clear controls, and remembered geometry;
+  FFT work runs outside the UI thread so typing and navigation stay responsive
 - **Explicit radio audio setup**: a dedicated Audio settings page lists and
-  refreshes RX inputs and TX outputs, preserves temporarily disconnected
-  devices, and tolerates harmless Windows/PortAudio device-name changes
+  refreshes RX inputs and TX outputs with complete endpoint names, filters
+  Windows mapper aliases, preserves a temporarily disconnected saved choice,
+  and verifies the exact PortAudio endpoint opened by the active channel
+- **Direct-route QSY**: with automatic QSY enabled, a direct route is tuned to
+  its configured working frequency before the first control announcement and
+  the previous frequency is restored after the session
 - **Consent-driven VARA setup**: Station readiness can download the exact
   reviewed VARA FM/HF archive from the official Winlink distribution server,
   enforce the version, size and SHA-256 pinned in this Guardian release, then

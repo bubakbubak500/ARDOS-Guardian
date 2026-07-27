@@ -68,6 +68,25 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     assert received.payload_bytes == b"bundle"
 
 
+def test_vara_qsy_happens_before_handoff_and_restore_after_release() -> None:
+    events = []
+    backend = VaraP2PBackend(
+        FakeVara(),
+        on_qsy=lambda callsign: events.append(("qsy", callsign)),
+        on_acquire=lambda: events.append("acquire"),
+        on_release=lambda: events.append("release"),
+        on_unqsy=lambda: events.append("restore"),
+    )
+
+    backend._send(
+        Message(14, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        lambda ok: events.append(("done", ok)),
+    )
+
+    assert events[:2] == [("qsy", "OK1AAA"), "acquire"]
+    assert events[-2:] == ["release", "restore"]
+
+
 def test_winlink_handoff_preserves_prompt_and_resource_order() -> None:
     events = []
 

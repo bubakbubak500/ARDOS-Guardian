@@ -1,10 +1,12 @@
 import time
+from types import SimpleNamespace
 
 from guardian.config import StationConfig
 from guardian.message import Folder, MailMessage, MessageStore, Status
 from guardian.operations import Operations
-from guardian.routing import HeardStations, RouteTable
+from guardian.routing import HeardStations, Route, RouteTable
 from guardian.services import EventBus, SnapshotStore, WorkerPool
+from guardian.session import SessionState
 
 
 def test_idle_operations_never_transmit_and_keep_mail_queued(tmp_path) -> None:
@@ -117,5 +119,82 @@ def test_connect_vara_starts_the_selected_local_variant(
         assert len(attempts) == 2
         assert launches[0][0][0] == [str(executable.resolve())]
     finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_direct_route_qsy_happens_before_message_announcement(
+    tmp_path, monkeypatch
+) -> None:
+    config = StationConfig(callsign="OK7PS", auto_qsy=True)
+    workers = WorkerPool(max_workers=1)
+    mailstore = MessageStore(tmp_path / "mail-qsy")
+    message = MailMessage(
+        msg_id=mailstore.next_id(config.callsign),
+        source=config.callsign,
+        final_dest="OK1AAA",
+        subject="Direct",
+        body="QSY first",
+        created=time.time(),
+        folder=Folder.OUTBOX,
+        status=Status.QUEUED,
+    )
+    mailstore.add(message)
+    operations = Operations(
+        config,
+        EventBus(),
+        SnapshotStore(),
+        workers,
+        mailstore,
+        RouteTable([Route("OK1AAA", "", freq_hz=145_550_000, mode="FM")]),
+        HeardStations(),
+    )
+    events = []
+
+    class Radio:
+        def get_state(self):
+            return type("State", (), {"frequency_hz": 145_500_000})()
+
+        def set_frequency(self, value):
+            events.append(("frequency", value))
+
+        def set_mode(self, value):
+            events.append(("mode", value))
+
+        def close(self):
+            pass
+
+    class Transport:
+        def stop(self):
+            pass
+
+    operations.radio = Radio()
+    operations.audio_transport = Transport()
+    monkeypatch.setattr(
+        operations.net,
+        "send_message",
+        lambda **kwargs: events.append(("announce", kwargs["final_dest"])),
+    )
+    try:
+        assert operations.send_queued(message.msg_id)
+        assert events[:3] == [
+            ("frequency", 145_550_000),
+            ("mode", "FM"),
+            ("announce", "OK1AAA"),
+        ]
+        assert operations._qsy_previous == 145_500_000
+        operations._session_event(
+            SimpleNamespace(
+                source="OK7PS",
+                msg_id=message.msg_id,
+                direction="out",
+                state=SessionState.CONFIRMED,
+            ),
+            "peer confirmed RECEIVED",
+        )
+        assert events[-1] == ("frequency", 145_500_000)
+        assert operations._qsy_previous is None
+    finally:
+        operations.audio_transport = None
         operations.close()
         workers.close(wait=True)

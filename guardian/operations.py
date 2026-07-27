@@ -105,7 +105,9 @@ class Operations:
             prompt=self._prompt_winlink,
             on_log=lambda value: self._log(value, source="payload"),
             on_qsy=self._qsy_to,
-            on_unqsy=self._qsy_restore,
+            # Keep the radio on the peer's channel until the control-layer
+            # RECEIVED/DELIVERED confirmation arrives.
+            on_unqsy=None,
             on_acquire=acquire,
             on_release=release,
         )
@@ -309,6 +311,26 @@ class Operations:
             if self.config.audio_output
             else None
         )
+        if not isinstance(input_device, int):
+            self._log(
+                dual(
+                    "Audio control channel failed: select an available RX input.",
+                    "Zvukový řídicí kanál selhal: vyberte dostupný RX vstup.",
+                ),
+                LogLevel.ERROR,
+                source="control",
+            )
+            return False
+        if not isinstance(output_device, int):
+            self._log(
+                dual(
+                    "Audio control channel failed: select an available TX output.",
+                    "Zvukový řídicí kanál selhal: vyberte dostupný TX výstup.",
+                ),
+                LogLevel.ERROR,
+                source="control",
+            )
+            return False
         transport = AudioControlTransport(
             modem=modem,
             ptt=self._radio_ptt,
@@ -343,6 +365,27 @@ class Operations:
         self._update_network_snapshot()
         return True
 
+    def restart_control_channel(self) -> bool:
+        """Reopen active control audio after an endpoint setting changes."""
+        if self.audio_transport is None:
+            return True
+        self.audio_transport.stop()
+        self.audio_transport = None
+        self.net = self._build_net(NullTransport())
+        self._log(
+            dual(
+                "Audio devices changed; reopening the control channel.",
+                "Zvuková zařízení se změnila; znovu otevírám řídicí kanál.",
+            ),
+            source="control",
+        )
+        if self.start_control_channel():
+            return True
+        self.config.control_channel = "off"
+        self.config.save()
+        self._update_network_snapshot()
+        return False
+
     def stop_control_channel(self) -> None:
         if self.audio_transport is not None:
             self.audio_transport.stop()
@@ -370,6 +413,21 @@ class Operations:
         mail = self.mailstore.get(message_id)
         if mail is None:
             return False
+        route = self.routes.lookup(mail.final_dest)
+        direct_route = route is not None and (
+            not route.preferred or route.preferred == mail.final_dest.strip().upper()
+        )
+        if direct_route and route.freq_hz and self.config.auto_qsy:
+            if not self._qsy_to(mail.final_dest):
+                self._log(
+                    dual(
+                        f"Message #{mail.msg_id} was not sent because direct QSY failed.",
+                        f"Zpráva #{mail.msg_id} nebyla odeslána, protože přímé QSY selhalo.",
+                    ),
+                    LogLevel.ERROR,
+                    source="mail",
+                )
+                return False
         self.mailstore.set_status(message_id, status=Status.SENDING)
         self.net.send_message(
             final_dest=mail.final_dest,
@@ -483,6 +541,17 @@ class Operations:
                     message.msg_id,
                     status=Status.FAILED,
                 )
+            if (
+                message.state
+                in (
+                    SessionState.CONFIRMED,
+                    SessionState.DELIVERED,
+                    SessionState.FAILED,
+                    SessionState.CANCELLED,
+                )
+                and self._qsy_previous is not None
+            ):
+                self._qsy_restore()
         if (
             message.direction == "in"
             and message.payload_bytes
@@ -552,27 +621,40 @@ class Operations:
             self.connect_radio()
         self._resume_control()
 
-    def _qsy_to(self, callsign: str) -> None:
+    def _qsy_to(self, callsign: str) -> bool:
         if not self.config.auto_qsy:
-            return
+            return False
         target = self.routes.freq_for(callsign)
         if target is None:
-            return
+            return False
         frequency, mode = target
         try:
-            self._qsy_previous = self.radio.get_state().frequency_hz
+            if self._qsy_previous is None:
+                self._qsy_previous = self.radio.get_state().frequency_hz
             self.radio.set_frequency(frequency)
             if mode:
                 self.radio.set_mode(mode)
+            self._log(
+                dual(
+                    f"Direct QSY for {callsign}: {frequency / 1_000_000:.4f} MHz"
+                    + (f" {mode}" if mode else ""),
+                    f"Přímé QSY pro {callsign}: {frequency / 1_000_000:.4f} MHz"
+                    + (f" {mode}" if mode else ""),
+                ),
+                source="radio",
+            )
+            return True
         except Exception as exc:
+            self._qsy_restore()
             self._log(
                 dual(f"QSY skipped: {exc}", f"QSY přeskočeno: {exc}"),
                 LogLevel.WARNING,
                 source="radio",
             )
+            return False
 
     def _qsy_restore(self) -> None:
-        if self.config.auto_qsy and self._qsy_previous:
+        if self.config.auto_qsy and self._qsy_previous is not None:
             try:
                 self.radio.set_frequency(self._qsy_previous)
             except Exception:

@@ -62,10 +62,10 @@ class VaraP2PBackend(PayloadBackend):
             self.on_log("VARA P2P: command port not connected")
             done(False)
             return
-        if self.on_acquire:
-            self._safe(self.on_acquire)
         if self.on_qsy:
             self._safe(lambda: self.on_qsy(msg.next_hop))
+        if self.on_acquire:
+            self._safe(self.on_acquire)
         try:
             self.vara.connect_to(msg.next_hop)
             if not self.vara.wait_link("CONNECTED", CONNECT_TIMEOUT):
@@ -80,10 +80,10 @@ class VaraP2PBackend(PayloadBackend):
             self.on_log(f"VARA P2P send failed: {exc}")
             done(False)
         finally:
-            if self.on_unqsy:
-                self._safe(self.on_unqsy)
             if self.on_release:
                 self._safe(self.on_release)
+            if self.on_unqsy:
+                self._safe(self.on_unqsy)
 
     @staticmethod
     def _safe(fn) -> None:

@@ -33,10 +33,10 @@ class FrequencySpinBox(QSpinBox):
         self.setRange(0, 2_147_483_647)
         self.setSingleStep(1_000)
         self.setAccelerated(True)
-        self.setToolTip("144.520 MHz")
+        self.setToolTip("144.5200 MHz")
 
     def textFromValue(self, value: int) -> str:
-        return f"{value / 1_000_000:.3f} MHz"
+        return f"{value / 1_000_000:.4f} MHz"
 
     def valueFromText(self, text: str) -> int:
         cleaned = text.strip().lower().replace("mhz", "").replace(",", ".")
