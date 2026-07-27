@@ -68,6 +68,7 @@ class VaraClient:
             self.state.cmd_connected = True
             try:
                 self._data = socket.create_connection((self.host, self.data_port), timeout=timeout)
+                self._data.settimeout(None)
                 self.state.data_connected = True
             except OSError as exc:
                 # Data port is optional until we actually transfer.
@@ -94,6 +95,48 @@ class VaraClient:
     @property
     def connected(self) -> bool:
         return self._cmd is not None
+
+    def reconnect_data(self, timeout: float = 3.0) -> None:
+        """Open a fresh VARA data-port socket for the next RF session.
+
+        Windows can accept a write briefly after the peer has closed a stale
+        TCP connection.  In that case ``sendall`` succeeds locally but VARA
+        never emits BUFFER and transmits zero bytes.  Payload sessions therefore
+        use a newly established port-8301 connection.
+        """
+        with self._lock:
+            old = self._data
+            self._data = None
+            self.state.data_connected = False
+            if old is not None:
+                try:
+                    old.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    old.close()
+                except OSError:
+                    pass
+
+        deadline = time.monotonic() + timeout
+        last_error: OSError | None = None
+        while time.monotonic() < deadline:
+            try:
+                fresh = socket.create_connection(
+                    (self.host, self.data_port),
+                    timeout=min(0.5, max(0.05, deadline - time.monotonic())),
+                )
+                fresh.settimeout(None)
+                with self._lock:
+                    self._data = fresh
+                    self.state.data_connected = True
+                    self.state.error = None
+                return
+            except OSError as exc:
+                last_error = exc
+                time.sleep(0.1)
+        self.state.error = f"data port reconnect: {last_error}"
+        raise ConnectionError(self.state.error)
 
     # --- commands --------------------------------------------------------
     def send_command(self, command: str) -> None:
@@ -184,27 +227,32 @@ class VaraClient:
     # --- background notification reader ----------------------------------
     def _reader(self) -> None:
         buf = b""
-        while not self._stop.is_set() and self._cmd is not None:
-            try:
-                chunk = self._cmd.recv(1024)
-            except OSError:
-                break
-            if not chunk:
-                break
-            buf += chunk
-            while b"\r" in buf or b"\n" in buf:
-                # VARA terminates notifications with CR; tolerate LF too.
-                sep = min(
-                    (buf.index(b) for b in (b"\r", b"\n") if b in buf),
-                    default=-1,
-                )
-                if sep < 0:
+        try:
+            while not self._stop.is_set() and self._cmd is not None:
+                try:
+                    chunk = self._cmd.recv(1024)
+                except OSError:
                     break
-                line, buf = buf[:sep], buf[sep + 1 :]
-                text = line.decode("ascii", errors="replace").strip()
-                if text:
-                    self._handle_notification(text)
-        self.state.cmd_connected = False
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\r" in buf or b"\n" in buf:
+                    # VARA terminates notifications with CR; tolerate LF too.
+                    sep = min(
+                        (buf.index(b) for b in (b"\r", b"\n") if b in buf),
+                        default=-1,
+                    )
+                    if sep < 0:
+                        break
+                    line, buf = buf[:sep], buf[sep + 1 :]
+                    text = line.decode("ascii", errors="replace").strip()
+                    if text:
+                        self._handle_notification(text)
+        finally:
+            self.state.cmd_connected = False
+            self.state.data_connected = False
+            self.state.link_state = "DISCONNECTED"
+            self.state.ptt = False
 
     def _handle_notification(self, text: str) -> None:
         self.state.last_notification = text

@@ -20,6 +20,9 @@ class FakeVara:
     def connect_to(self, callsign: str) -> None:
         self.commands.append(("connect", callsign))
 
+    def reconnect_data(self) -> None:
+        self.commands.append(("reconnect-data",))
+
     def listen(self, enabled: bool) -> None:
         self.commands.append(("listen", enabled))
 
@@ -77,6 +80,39 @@ def test_vara_buffer_notification_confirms_data_port_acceptance() -> None:
     assert vara.state.tx_buffer_bytes == 411
 
 
+def test_vara_reconnects_stale_data_socket_before_payload(monkeypatch) -> None:
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.timeout = "unchanged"
+
+        def shutdown(self, how) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+        def settimeout(self, value) -> None:
+            self.timeout = value
+
+    old = FakeSocket()
+    fresh = FakeSocket()
+    vara = VaraClient(data_port=8301)
+    vara._data = old
+    vara.state.data_connected = True
+    monkeypatch.setattr(
+        "guardian.vara.client.socket.create_connection",
+        lambda address, timeout: fresh,
+    )
+
+    vara.reconnect_data()
+
+    assert old.closed
+    assert vara._data is fresh
+    assert fresh.timeout is None
+    assert vara.state.data_connected
+
+
 def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     outgoing = FakeVara()
     send_result = []
@@ -87,6 +123,7 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert send_result == [True]
     assert outgoing.commands == [
+        ("reconnect-data",),
         ("connect", "OK1AAA"),
         ("prepare",),
         ("accepted",),
@@ -102,6 +139,7 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert receive_result == [True]
     assert incoming.commands == [
+        ("reconnect-data",),
         ("listen", True),
         ("disconnect",),
         ("listen", False),

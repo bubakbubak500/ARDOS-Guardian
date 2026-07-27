@@ -73,6 +73,7 @@ class VaraP2PBackend(PayloadBackend):
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
+                self.vara.reconnect_data()
                 self.vara.connect_to(msg.next_hop)
                 link_started = True
                 if not self.vara.wait_link("CONNECTED", CONNECT_TIMEOUT):
@@ -160,6 +161,7 @@ class VaraP2PBackend(PayloadBackend):
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
+                self.vara.reconnect_data()
                 self.vara.listen(True)
                 if not self.vara.wait_link("CONNECTED", CONNECT_TIMEOUT):
                     self.on_log("VARA P2P: no incoming link")
