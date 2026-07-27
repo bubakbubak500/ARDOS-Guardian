@@ -33,6 +33,9 @@ class VaraState:
     tx_buffer_bytes: int | None = None
     data_bytes_written: int = 0
     data_bytes_read: int = 0
+    data_socket_generation: int = 0
+    data_local_endpoint: str | None = None
+    data_peer_endpoint: str | None = None
     ptt: bool = False
 
 
@@ -112,6 +115,7 @@ class VaraClient:
                 raise ConnectionError("VARA command port closed during data pairing")
             self._data = data
             self.state.data_connected = True
+            self._record_data_socket_locked(data)
 
         self._rx_thread = threading.Thread(
             target=self._reader, args=(cmd,), name="vara-rx", daemon=True
@@ -139,6 +143,71 @@ class VaraClient:
                 except OSError:
                     pass
                 setattr(self, sock_attr, None)
+        self.state.data_local_endpoint = None
+        self.state.data_peer_endpoint = None
+
+    @staticmethod
+    def _endpoint(sock: socket.socket, peer: bool = False) -> str | None:
+        try:
+            value = sock.getpeername() if peer else sock.getsockname()
+            return f"{value[0]}:{value[1]}"
+        except (OSError, AttributeError, IndexError, TypeError):
+            return None
+
+    def _record_data_socket_locked(self, data: socket.socket) -> None:
+        self.state.data_socket_generation += 1
+        self.state.data_local_endpoint = self._endpoint(data)
+        self.state.data_peer_endpoint = self._endpoint(data, peer=True)
+
+    def renew_data_connection(self, timeout: float = 3.0) -> None:
+        """Replace only VARA's persistent data socket before an RF session."""
+        with self._lock:
+            if self._cmd is None or not self.state.cmd_connected:
+                raise ConnectionError("VARA command port not connected")
+            old = self._data
+            self._data = None
+            self.state.data_connected = False
+            self.state.data_local_endpoint = None
+            self.state.data_peer_endpoint = None
+
+        if old is not None:
+            try:
+                old.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                old.close()
+            except OSError:
+                pass
+
+        # Let VARA observe the old EOF before offering the replacement socket.
+        self._stop.wait(0.2)
+        data: socket.socket | None = None
+        try:
+            data = socket.create_connection(
+                (self.host, self.data_port), timeout=timeout
+            )
+            data.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            data.settimeout(None)
+        except OSError as exc:
+            if data is not None:
+                try:
+                    data.close()
+                except OSError:
+                    pass
+            self.state.error = f"VARA data-port renewal: {exc}"
+            raise
+
+        with self._lock:
+            if self._cmd is None or not self.state.cmd_connected:
+                data.close()
+                raise ConnectionError(
+                    "VARA command port closed during data-port renewal"
+                )
+            self._data = data
+            self.state.data_connected = True
+            self.state.error = None
+            self._record_data_socket_locked(data)
 
     @property
     def connected(self) -> bool:

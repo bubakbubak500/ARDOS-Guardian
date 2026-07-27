@@ -524,6 +524,9 @@ class Operations:
                 tx_buffer_bytes=state.tx_buffer_bytes,
                 data_bytes_written=state.data_bytes_written,
                 data_bytes_read=state.data_bytes_read,
+                data_socket_generation=state.data_socket_generation,
+                data_local_endpoint=state.data_local_endpoint,
+                data_peer_endpoint=state.data_peer_endpoint,
                 ptt=state.ptt,
                 error=state.error,
             )

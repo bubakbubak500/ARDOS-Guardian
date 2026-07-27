@@ -1,7 +1,11 @@
 import struct
 from types import SimpleNamespace
 
-from guardian.payload.vara_p2p import VaraP2PBackend, encode_envelope
+from guardian.payload.vara_p2p import (
+    MIN_WIRE_SIZE,
+    VaraP2PBackend,
+    encode_envelope,
+)
 from guardian.payload.winlink_manual import WinlinkManualBackend
 from guardian.protocol import crc16
 from guardian.session import Message
@@ -15,10 +19,16 @@ class FakeVara:
         self.commands = []
         self.written = b""
         self.transfer_complete = True
-        self.state = SimpleNamespace(tx_buffer_bytes=None)
+        self.state = SimpleNamespace(
+            tx_buffer_bytes=None, data_socket_generation=1
+        )
 
     def connect_to(self, callsign: str) -> None:
         self.commands.append(("connect", callsign))
+
+    def renew_data_connection(self) -> None:
+        self.state.data_socket_generation += 1
+        self.commands.append(("renew-data",))
 
     def listen(self, enabled: bool) -> None:
         self.commands.append(("listen", enabled))
@@ -63,13 +73,16 @@ class FakeVara:
 def test_vara_envelope_contains_id_payload_and_crc() -> None:
     envelope = encode_envelope(0x12345678, b"hello")
     magic, msg_id, length = struct.unpack(">4sII", envelope[:12])
-    crc = struct.unpack(">H", envelope[-2:])[0]
+    crc_offset = 12 + length
+    crc = struct.unpack(">H", envelope[crc_offset : crc_offset + 2])[0]
 
     assert magic == b"GPLD"
     assert msg_id == 0x12345678
     assert length == 5
-    assert envelope[12:-2] == b"hello"
-    assert crc == crc16(envelope[:-2])
+    assert envelope[12:crc_offset] == b"hello"
+    assert crc == crc16(envelope[:crc_offset])
+    assert len(envelope) == MIN_WIRE_SIZE
+    assert not envelope[crc_offset + 2 :].strip(b"\0")
 
 
 def test_vara_buffer_notification_confirms_data_port_acceptance() -> None:
@@ -133,6 +146,61 @@ def test_vara_reconnects_the_complete_tcp_pair_when_existing_state_is_dead(
     assert vara.state.data_connected
 
 
+def test_vara_renews_only_data_socket_before_payload_session(monkeypatch) -> None:
+    class FakeSocket:
+        def __init__(self, local=None, peer=None) -> None:
+            self.closed = False
+            self.local = local
+            self.peer = peer
+
+        def shutdown(self, how) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+        def settimeout(self, value) -> None:
+            pass
+
+        def setsockopt(self, level, option, value) -> None:
+            pass
+
+        def getsockname(self):
+            return self.local
+
+        def getpeername(self):
+            return self.peer
+
+    cmd = FakeSocket()
+    old_data = FakeSocket()
+    new_data = FakeSocket(
+        ("127.0.0.1", 50123), ("127.0.0.1", 8301)
+    )
+    vara = VaraClient()
+    vara._cmd = cmd
+    vara._data = old_data
+    vara.state.cmd_connected = True
+    vara.state.data_connected = True
+    monkeypatch.setattr(
+        "guardian.vara.client.socket.create_connection",
+        lambda address, timeout: new_data,
+    )
+    monkeypatch.setattr(
+        "guardian.vara.client.threading.Event.wait",
+        lambda self, timeout=None: False,
+    )
+
+    vara.renew_data_connection()
+
+    assert old_data.closed
+    assert not cmd.closed
+    assert vara._cmd is cmd
+    assert vara._data is new_data
+    assert vara.state.data_socket_generation == 1
+    assert vara.state.data_local_endpoint == "127.0.0.1:50123"
+    assert vara.state.data_peer_endpoint == "127.0.0.1:8301"
+
+
 def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     outgoing = FakeVara()
     send_result = []
@@ -143,6 +211,7 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert send_result == [True]
     assert outgoing.commands == [
+        ("renew-data",),
         ("listen", False),
         ("connect", "OK1AAA"),
         ("data-ready",),
@@ -162,6 +231,7 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert receive_result == [True]
     assert incoming.commands == [
+        ("renew-data",),
         ("listen", True),
         ("disconnect",),
     ]

@@ -27,13 +27,19 @@ from .base import DoneCb, PayloadBackend
 _MAGIC = b"GPLD"
 _HDR = struct.Struct(">4sII")
 _CRC = struct.Struct(">H")
+# VARA FM can enter a BREAK/link-estimation loop when the application gives it
+# less than one low-rate air frame.  A 1024-byte block is about 14 seconds at
+# the unregistered 566 bps rate and is large enough to make the first frame
+# actionable without making short Guardian messages excessively expensive.
+MIN_WIRE_SIZE = 1024
 CONNECT_TIMEOUT = 45.0
 TRANSFER_TIMEOUT = 45.0
 
 
 def encode_envelope(msg_id: int, body: bytes) -> bytes:
     head = _HDR.pack(_MAGIC, msg_id & 0xFFFFFFFF, len(body))
-    return head + body + _CRC.pack(crc16(head + body))
+    framed = head + body + _CRC.pack(crc16(head + body))
+    return framed.ljust(MIN_WIRE_SIZE, b"\0")
 
 
 class VaraP2PBackend(PayloadBackend):
@@ -74,6 +80,11 @@ class VaraP2PBackend(PayloadBackend):
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
+                self.vara.renew_data_connection()
+                self.on_log(
+                    "VARA P2P: renewed data port 8301 "
+                    f"(generation {self.vara.state.data_socket_generation})"
+                )
                 # An outbound station must not remain in inbound-listen mode.
                 # This also matches VARA's native client lifecycle.
                 self.vara.listen(False)
@@ -170,6 +181,11 @@ class VaraP2PBackend(PayloadBackend):
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
+                self.vara.renew_data_connection()
+                self.on_log(
+                    "VARA P2P: renewed data port 8301 "
+                    f"(generation {self.vara.state.data_socket_generation})"
+                )
                 self.vara.listen(True)
                 if not self.vara.wait_link("CONNECTED", CONNECT_TIMEOUT):
                     self.on_log("VARA P2P: no incoming link")
@@ -185,6 +201,15 @@ class VaraP2PBackend(PayloadBackend):
                     )[0]
                     if crc_given != crc16(head + body):
                         raise ValueError(f"CRC failed on #{mid}")
+                    padding_length = max(
+                        0, MIN_WIRE_SIZE - (_HDR.size + length + _CRC.size)
+                    )
+                    if padding_length:
+                        padding = self.vara.read_exactly(
+                            padding_length, TRANSFER_TIMEOUT
+                        )
+                        if padding.strip(b"\0"):
+                            raise ValueError(f"invalid payload padding on #{mid}")
                     msg.payload_bytes = body
                     msg.body = ""
                     self.on_log(
