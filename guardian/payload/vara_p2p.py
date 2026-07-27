@@ -66,6 +66,7 @@ class VaraP2PBackend(PayloadBackend):
         success = False
         acquired = False
         link_started = False
+        listen_disabled = False
         with self._transfer_lock:
             if self.on_qsy:
                 self._safe(lambda: self.on_qsy(msg.next_hop))
@@ -73,12 +74,17 @@ class VaraP2PBackend(PayloadBackend):
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
+                # An outbound station must not remain in inbound-listen mode.
+                # This also matches VARA's native client lifecycle.
+                self.vara.listen(False)
+                listen_disabled = True
                 self.vara.connect_to(msg.next_hop)
                 link_started = True
                 if not self.vara.wait_link("CONNECTED", CONNECT_TIMEOUT):
                     self.on_log(f"VARA P2P: link to {msg.next_hop} not established")
                     self._abort_link()
                 else:
+                    self.vara.wait_data_ready()
                     data = (
                         msg.payload_bytes
                         if msg.payload_bytes is not None
@@ -119,6 +125,9 @@ class VaraP2PBackend(PayloadBackend):
                 if link_started:
                     self._abort_link()
             finally:
+                # Return to unattended receive operation for the next session.
+                if listen_disabled:
+                    self._safe(lambda: self.vara.listen(True))
                 if acquired and self.on_release:
                     self._safe(self.on_release)
                 if self.on_unqsy:

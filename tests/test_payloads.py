@@ -35,6 +35,9 @@ class FakeVara:
     def prepare_data_transfer(self) -> None:
         self.commands.append(("prepare",))
 
+    def wait_data_ready(self) -> None:
+        self.commands.append(("data-ready",))
+
     def wait_data_accepted(self, timeout: float) -> bool:
         self.commands.append(("accepted",))
         self.state.tx_buffer_bytes = len(self.written)
@@ -140,11 +143,14 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert send_result == [True]
     assert outgoing.commands == [
+        ("listen", False),
         ("connect", "OK1AAA"),
+        ("data-ready",),
         ("prepare",),
         ("accepted",),
         ("finish-write",),
         ("disconnect",),
+        ("listen", True),
     ]
     assert outgoing.written == encode_envelope(12, b"bundle")
 
@@ -216,6 +222,27 @@ def test_vara_disconnect_follows_data_handoff_barrier() -> None:
     assert vara.commands.index(("finish-write",)) < vara.commands.index(
         ("disconnect",)
     )
+
+
+def test_vara_send_waits_for_connected_link_to_settle_before_data_write() -> None:
+    events = []
+
+    class SettlingVara(FakeVara):
+        def wait_data_ready(self) -> None:
+            events.append("ready")
+
+        def write_data(self, data: bytes) -> None:
+            events.append("write")
+            super().write_data(data)
+
+    result = []
+    VaraP2PBackend(SettlingVara())._send(
+        Message(20, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        result.append,
+    )
+
+    assert result == [True]
+    assert events == ["ready", "write"]
 
 
 def test_vara_aborts_empty_session_when_data_port_never_queues_payload() -> None:

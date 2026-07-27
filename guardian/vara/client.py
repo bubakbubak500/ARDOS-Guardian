@@ -51,6 +51,7 @@ class VaraClient:
         self._stop = threading.Event()
         self._buffer_update = threading.Event()
         self._last_data_write = 0.0
+        self._link_connected_at = 0.0
 
         self.state = VaraState()
         # Callback for asynchronous command-port notifications (UI/log hook).
@@ -91,17 +92,11 @@ class VaraClient:
             self.state.data_connected = False
             self.state.error = None
 
-        # Match VARA's native-client lifecycle: start consuming the command
-        # stream before opening the associated data connection. Opening both
-        # back-to-back before the command listener existed could leave port
-        # 8301 accepted by Windows but not paired with the active host session.
-        self._rx_thread = threading.Thread(
-            target=self._reader, args=(cmd,), name="vara-rx", daemon=True
-        )
-        self._rx_thread.start()
-        time.sleep(0.05)
-
         try:
+            # Native VARA clients open the command/data TCP pair back-to-back.
+            # Delaying 8301 until a command-reader thread has run can leave the
+            # accepted data socket outside the command session VARA associates
+            # with this application.
             data = socket.create_connection(
                 (self.host, self.data_port), timeout=timeout
             )
@@ -117,6 +112,11 @@ class VaraClient:
                 raise ConnectionError("VARA command port closed during data pairing")
             self._data = data
             self.state.data_connected = True
+
+        self._rx_thread = threading.Thread(
+            target=self._reader, args=(cmd,), name="vara-rx", daemon=True
+        )
+        self._rx_thread.start()
 
     def disconnect(self) -> None:
         self._stop.set()
@@ -181,6 +181,19 @@ class VaraClient:
         self.state.tx_buffer_bytes = None
         self.state.data_bytes_written = 0
         self._buffer_update.clear()
+
+    def wait_data_ready(self, minimum_connected: float = 1.0) -> None:
+        """Let VARA finish its CONNECTED/BREAK transition before port 8301 I/O.
+
+        VARA FM may ignore an application write made immediately as CONNECTED
+        is reported.  Waiting through the first link turnaround avoids that
+        native-modem race while keeping the persistent TCP data socket intact.
+        """
+        remaining = minimum_connected - (
+            time.monotonic() - self._link_connected_at
+        )
+        if remaining > 0:
+            self._stop.wait(remaining)
 
     def wait_data_accepted(self, timeout: float = 5.0) -> bool:
         """Wait until VARA confirms that it consumed data from TCP port 8301."""
@@ -292,6 +305,7 @@ class VaraClient:
         upper = text.upper()
         if upper.startswith("CONNECTED"):
             self.state.link_state = "CONNECTED"
+            self._link_connected_at = time.monotonic()
         elif upper.startswith("DISCONNECTED"):
             self.state.link_state = "DISCONNECTED"
         elif upper.startswith("PENDING") or upper.startswith("CONNECTING"):
