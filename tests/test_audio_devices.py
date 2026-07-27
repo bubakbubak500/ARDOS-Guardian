@@ -1,5 +1,8 @@
 import sys
+import threading
 from types import SimpleNamespace
+
+import numpy as np
 
 from guardian.modem.audio import (
     AudioControlTransport,
@@ -7,6 +10,7 @@ from guardian.modem.audio import (
     match_device_index,
     match_device_name,
 )
+from guardian.protocol import ControlFrame, FrameType
 
 
 DEVICES = [
@@ -132,3 +136,35 @@ def test_control_transport_reports_the_endpoint_portaudio_actually_opened(
         assert transport.actual_output_device_name == names[7]
     finally:
         transport.stop()
+
+
+def test_control_transport_reports_pending_tx_until_playback_finishes() -> None:
+    playback_started = threading.Event()
+    release_playback = threading.Event()
+
+    class SoundDevice:
+        @staticmethod
+        def play(_samples, **_kwargs):
+            playback_started.set()
+
+        @staticmethod
+        def wait():
+            release_playback.wait(2.0)
+
+    modem = SimpleNamespace(
+        name="afsk1200",
+        modulate=lambda _payload: np.zeros(32, dtype=np.float32),
+    )
+    transport = AudioControlTransport(
+        modem=modem,
+        input_device=4,
+        output_device=7,
+    )
+    transport._sd = SoundDevice()
+
+    transport.send(ControlFrame(FrameType.BEACON, source="OK7PS"))
+
+    assert playback_started.wait(1.0)
+    assert not transport.wait_tx_idle(timeout=0.01)
+    release_playback.set()
+    assert transport.wait_tx_idle(timeout=1.0)

@@ -103,8 +103,9 @@ test transport. Remaining is on-air bring-up over a real radio + codec.
 
 * **`guardian/modem/`** — AFSK 1200 (Bell 202) modem in numpy: `modulate()`
   turns frame bytes into phase-continuous FSK audio, `demodulate()` recovers
-  them (preamble + sync + length framing, phase-search bit sync, noise-tolerant
-  sync). `AudioControlTransport` binds the modem to a sound device + radio PTT
+  them (preamble-aided clock recovery, normalized dual-tone detection, strict
+  noise rejection and CRC framing). `AudioControlTransport` binds the modem to
+  a sound device + radio PTT
   (half-duplex, dedup) and is a drop-in for the loopback bus.
 * **`guardian/payload/`** — two interchangeable payload backends:
   * **`vara_p2p`** — Guardian opens VARA P2P and sends a framed payload envelope

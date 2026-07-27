@@ -87,6 +87,25 @@ def test_vara_qsy_happens_before_handoff_and_restore_after_release() -> None:
     assert events[-2:] == ["release", "restore"]
 
 
+def test_vara_does_not_connect_when_audio_handoff_fails() -> None:
+    vara = FakeVara()
+    result = []
+    backend = VaraP2PBackend(
+        vara,
+        on_acquire=lambda: (_ for _ in ()).throw(
+            TimeoutError("control TX still active")
+        ),
+    )
+
+    backend._send(
+        Message(15, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        result.append,
+    )
+
+    assert result == [False]
+    assert vara.commands == []
+
+
 def test_winlink_handoff_preserves_prompt_and_resource_order() -> None:
     events = []
 

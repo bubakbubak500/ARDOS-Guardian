@@ -24,6 +24,11 @@ BAUD = 1200.0
 SYNC = bytes((0x2D, 0xD4))
 PREAMBLE = b"\x55" * 24
 POSTAMBLE_BITS = 8  # trailing mark bits so the last symbol is clean
+ACQUISITION_PREAMBLE_BITS = 32
+MAX_ACQUISITION_ERRORS = 4
+MAX_SYNC_ERRORS = 1
+CLOCK_SEARCH = np.linspace(0.99, 1.01, 9)
+PHASE_SEARCH = np.linspace(0.0, 1.0, 10, endpoint=False)
 
 
 def _bits_lsb_first(data: bytes) -> np.ndarray:
@@ -81,7 +86,12 @@ class AFSKModem:
     #  Receive                                                            #
     # ------------------------------------------------------------------ #
     def _bit_stream(self, samples: np.ndarray) -> np.ndarray:
-        """Non-coherent FSK detection -> one soft value per sample (>0 = mark)."""
+        """Non-coherent, level-normalized FSK confidence per audio sample.
+
+        Comparing raw mark/space power makes a receiver fragile when a radio's
+        de-emphasis, speaker path, or sound interface favors one tone. The
+        normalized ratio keeps the decision centered between both tones.
+        """
         x = np.asarray(samples, dtype=np.float64)
         n = np.arange(len(x))
         # Correlate against mark/space (I/Q) over a one-symbol sliding window.
@@ -95,34 +105,94 @@ class AFSKModem:
             cq = np.convolve(q, kernel, mode="same")
             return ci * ci + cq * cq
 
-        return power(self.mark) - power(self.space)
+        mark_power = power(self.mark)
+        space_power = power(self.space)
+        return (mark_power - space_power) / (
+            mark_power + space_power + np.finfo(np.float64).eps
+        )
 
     def demodulate(self, samples: np.ndarray) -> list[bytes]:
-        """Return every well-formed payload found in the audio buffer."""
+        """Return frame candidates found with preamble-aided clock recovery.
+
+        Real sound interfaces do not share an exact clock. A single symbol
+        phase chosen across a four-second rolling buffer accumulates timing
+        error through a frame and is also easily biased by unrelated VARA
+        audio. Search a narrow clock range and require the known alternating
+        preamble immediately before the sync word. Candidates representing the
+        same on-air burst are ranked by confidence and collapsed to one.
+        """
         soft = self._bit_stream(samples)
-        sps = self.sps
-        if len(soft) < sps * 16:
+        if len(soft) < self.sps * (
+            ACQUISITION_PREAMBLE_BITS + len(SYNC) * 8 + 8
+        ):
             return []
-        n_syms = int(len(soft) / sps) - 1
-        if n_syms < 16:
-            return []
+        preamble = _bits_lsb_first(PREAMBLE)[-ACQUISITION_PREAMBLE_BITS:]
+        sync = _bits_lsb_first(SYNC)
+        acquisition = np.concatenate((preamble, sync))
+        acquisition_sign = acquisition * 2 - 1
+        sample_axis = np.arange(len(soft))
+        candidates: list[tuple[float, float, bytes]] = []
 
-        # Bit timing: search the fractional symbol phase that yields the most
-        # confident slicing (largest mean magnitude at the sampling instants),
-        # averaging a window around each symbol centre for noise immunity.
-        half = max(1, int(sps * 0.3))
-        best_vals = None
-        best_score = -1.0
-        for p in np.linspace(0.0, 1.0, 16, endpoint=False):
-            centers = ((np.arange(n_syms) + p + 0.5) * sps).astype(int)
-            centers = np.clip(centers, half, len(soft) - half - 1)
-            vals = np.array([soft[c - half:c + half + 1].mean() for c in centers])
-            score = float(np.mean(np.abs(vals)))
-            if score > best_score:
-                best_score, best_vals = score, vals
+        for clock_scale in CLOCK_SEARCH:
+            step = self.sps * float(clock_scale)
+            symbol_count = max(0, int((len(soft) - step) / step))
+            for phase in PHASE_SEARCH:
+                centers = (
+                    np.arange(symbol_count, dtype=np.float64)
+                    + float(phase)
+                    + 0.5
+                ) * step
+                confidence = np.interp(centers, sample_axis, soft)
+                bits = (confidence > 0.0).astype(np.int8)
+                if bits.size < acquisition.size + 8:
+                    continue
+                correlation = np.correlate(
+                    bits * 2 - 1,
+                    acquisition_sign,
+                    mode="valid",
+                )
+                # Every bit error reduces a +/-1 correlation by two.
+                threshold = acquisition.size - 2 * MAX_ACQUISITION_ERRORS
+                for start in np.flatnonzero(correlation >= threshold):
+                    observed = bits[start : start + acquisition.size]
+                    sync_errors = int(
+                        np.sum(
+                            observed[ACQUISITION_PREAMBLE_BITS:]
+                            != sync
+                        )
+                    )
+                    if sync_errors > MAX_SYNC_ERRORS:
+                        continue
+                    acquisition_errors = int(np.sum(observed != acquisition))
+                    if acquisition_errors > MAX_ACQUISITION_ERRORS:
+                        continue
+                    after = bits[start + acquisition.size :]
+                    if after.size < 8:
+                        continue
+                    length = _bits_to_bytes_lsb_first(after[:8])[0]
+                    needed = 8 + int(length) * 8
+                    if length < 8 or after.size < needed:
+                        continue
+                    payload = _bits_to_bytes_lsb_first(after[8:needed])
+                    end = start + acquisition.size + needed
+                    score = float(np.mean(np.abs(confidence[start:end])))
+                    score -= 0.1 * acquisition_errors
+                    candidates.append((score, float(centers[start]), payload))
 
-        bits = (best_vals > 0).astype(np.int8)
-        return self._extract_frames(bits)
+        # Adjacent clock/phase hypotheses describe the same physical burst.
+        # Keep the highest-confidence interpretation from each time cluster.
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        selected: list[tuple[float, float, bytes]] = []
+        cluster_radius = self.sps * 80
+        for candidate in candidates:
+            if any(
+                abs(candidate[1] - existing[1]) < cluster_radius
+                for existing in selected
+            ):
+                continue
+            selected.append(candidate)
+        selected.sort(key=lambda item: item[1])
+        return [payload for _score, _position, payload in selected]
 
     def _extract_frames(self, bits: np.ndarray, max_sync_errors: int = 1) -> list[bytes]:
         sync_bits = _bits_lsb_first(SYNC)

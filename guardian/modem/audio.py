@@ -245,6 +245,8 @@ class AudioControlTransport(ControlTransport):
         self.actual_input_device_index: int | None = None
         self.actual_output_device_index: int | None = None
         self._tx_lock = threading.Lock()
+        self._tx_condition = threading.Condition()
+        self._pending_tx = 0
         self._rx_buf = deque(maxlen=int(sample_rate * 4))  # ~4 s rolling window
         self._recent: dict[bytes, float] = {}              # payload -> last seen
         self._rx_frames: deque = deque()                   # decoded, awaiting pump()
@@ -328,7 +330,33 @@ class AudioControlTransport(ControlTransport):
     # ------------------------------------------------------------------ #
     def send(self, frame: ControlFrame) -> None:
         # TX off the caller's thread so the UI/orchestrator never blocks on PTT.
-        threading.Thread(target=self._tx, args=(frame,), daemon=True).start()
+        with self._tx_condition:
+            self._pending_tx += 1
+        threading.Thread(
+            target=self._tx_pending,
+            args=(frame,),
+            name="afsk-tx",
+            daemon=True,
+        ).start()
+
+    def _tx_pending(self, frame: ControlFrame) -> None:
+        try:
+            self._tx(frame)
+        finally:
+            with self._tx_condition:
+                self._pending_tx -= 1
+                self._tx_condition.notify_all()
+
+    def wait_tx_idle(self, timeout: float = 5.0) -> bool:
+        """Wait until every already-queued control burst has left the radio."""
+        deadline = time.monotonic() + timeout
+        with self._tx_condition:
+            while self._pending_tx:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._tx_condition.wait(remaining)
+        return True
 
     def _tx(self, frame: ControlFrame) -> None:
         if self._sd is None:

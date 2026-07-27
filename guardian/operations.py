@@ -586,6 +586,13 @@ class Operations:
 
     def _suspend_control(self) -> None:
         if self.audio_transport is not None:
+            if not self.audio_transport.wait_tx_idle(timeout=5.0):
+                raise TimeoutError(
+                    dual(
+                        "The pending control burst did not finish before VARA handoff.",
+                        "Čekající řídicí rámec nebyl dokončen před předáním VARA.",
+                    )
+                )
             self.audio_transport.stop()
             self._log(dual(
                 "Control audio released for payload.",
