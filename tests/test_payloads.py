@@ -26,9 +26,9 @@ class FakeVara:
     def connect_to(self, callsign: str) -> None:
         self.commands.append(("connect", callsign))
 
-    def renew_data_connection(self) -> None:
+    def renew_connection_pair(self) -> None:
         self.state.data_socket_generation += 1
-        self.commands.append(("renew-data",))
+        self.commands.append(("renew-pair",))
 
     def listen(self, enabled: bool) -> None:
         self.commands.append(("listen", enabled))
@@ -146,12 +146,15 @@ def test_vara_reconnects_the_complete_tcp_pair_when_existing_state_is_dead(
     assert vara.state.data_connected
 
 
-def test_vara_renews_only_data_socket_before_payload_session(monkeypatch) -> None:
+def test_vara_renews_complete_socket_pair_before_payload_session(
+    monkeypatch,
+) -> None:
     class FakeSocket:
         def __init__(self, local=None, peer=None) -> None:
             self.closed = False
             self.local = local
             self.peer = peer
+            self.sent = []
 
         def shutdown(self, how) -> None:
             pass
@@ -165,40 +168,51 @@ def test_vara_renews_only_data_socket_before_payload_session(monkeypatch) -> Non
         def setsockopt(self, level, option, value) -> None:
             pass
 
+        def sendall(self, data) -> None:
+            self.sent.append(data)
+
         def getsockname(self):
             return self.local
 
         def getpeername(self):
             return self.peer
 
-    cmd = FakeSocket()
+    old_cmd = FakeSocket()
     old_data = FakeSocket()
+    new_cmd = FakeSocket()
     new_data = FakeSocket(
         ("127.0.0.1", 50123), ("127.0.0.1", 8301)
     )
+    sockets = iter((new_cmd, new_data))
     vara = VaraClient()
-    vara._cmd = cmd
+    vara._cmd = old_cmd
     vara._data = old_data
     vara.state.cmd_connected = True
     vara.state.data_connected = True
+    vara.state.mycall = "OK7PS"
     monkeypatch.setattr(
         "guardian.vara.client.socket.create_connection",
-        lambda address, timeout: new_data,
+        lambda address, timeout: next(sockets),
     )
     monkeypatch.setattr(
-        "guardian.vara.client.threading.Event.wait",
-        lambda self, timeout=None: False,
+        "guardian.vara.client.threading.Thread.start", lambda self: None
     )
+    monkeypatch.setattr("guardian.vara.client.time.sleep", lambda timeout: None)
 
-    vara.renew_data_connection()
+    vara.renew_connection_pair()
 
+    assert old_cmd.closed
     assert old_data.closed
-    assert not cmd.closed
-    assert vara._cmd is cmd
+    assert vara._cmd is new_cmd
     assert vara._data is new_data
     assert vara.state.data_socket_generation == 1
     assert vara.state.data_local_endpoint == "127.0.0.1:50123"
     assert vara.state.data_peer_endpoint == "127.0.0.1:8301"
+    assert new_cmd.sent == [
+        b"PUBLIC ON\r",
+        b"COMPRESSION OFF\r",
+        b"MYCALL OK7PS\r",
+    ]
 
 
 def test_vara_send_and_receive_preserve_payload_bytes() -> None:
@@ -211,7 +225,7 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert send_result == [True]
     assert outgoing.commands == [
-        ("renew-data",),
+        ("renew-pair",),
         ("listen", False),
         ("connect", "OK1AAA"),
         ("data-ready",),
@@ -231,7 +245,7 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert receive_result == [True]
     assert incoming.commands == [
-        ("renew-data",),
+        ("renew-pair",),
         ("listen", True),
         ("disconnect",),
     ]

@@ -80,9 +80,9 @@ class VaraP2PBackend(PayloadBackend):
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
-                self.vara.renew_data_connection()
+                self.vara.renew_connection_pair()
                 self.on_log(
-                    "VARA P2P: renewed data port 8301 "
+                    "VARA P2P: renewed TCP pair 8300/8301 "
                     f"(generation {self.vara.state.data_socket_generation})"
                 )
                 # An outbound station must not remain in inbound-listen mode.
@@ -181,9 +181,9 @@ class VaraP2PBackend(PayloadBackend):
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
-                self.vara.renew_data_connection()
+                self.vara.renew_connection_pair()
                 self.on_log(
-                    "VARA P2P: renewed data port 8301 "
+                    "VARA P2P: renewed TCP pair 8300/8301 "
                     f"(generation {self.vara.state.data_socket_generation})"
                 )
                 self.vara.listen(True)

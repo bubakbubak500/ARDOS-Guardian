@@ -1,7 +1,8 @@
 # Guardian 0.6.11
 
-This release replaces VARA FM's TCP data connection immediately before every
-payload session.
+This release attempted to replace VARA FM's TCP data connection immediately
+before every payload session. It is superseded by 0.6.12 because VARA closes
+the command connection when the data connection is closed.
 
 - Keep command port 8300 connected while recycling data port 8301 before each
   outbound and inbound RF link.
