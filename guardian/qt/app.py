@@ -29,5 +29,6 @@ def main() -> None:
     window.ui_performance_probe = start_probe_from_environment(window)
     application.aboutToQuit.connect(runtime.close)
     window.show()
+    QTimer.singleShot(0, window.show_spectrum_if_applicable)
     QTimer.singleShot(0, window.show_readiness_if_needed)
     application.exec()

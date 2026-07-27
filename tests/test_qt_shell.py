@@ -87,3 +87,30 @@ def test_station_context_shows_actionable_mail_state(tmp_path) -> None:
     finally:
         window.close()
         runtime.close()
+
+
+def test_spectrum_auto_opens_only_for_vara_p2p(tmp_path) -> None:
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-spectrum.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    window = GuardianMainWindow(runtime, settings)
+    calls = 0
+
+    def record_show() -> None:
+        nonlocal calls
+        calls += 1
+
+    window.show_spectrum = record_show
+    try:
+        runtime.config.payload_backend = "winlink_manual"
+        window.show_spectrum_if_applicable()
+        assert calls == 0
+        runtime.config.payload_backend = "vara_p2p"
+        window.show_spectrum_if_applicable()
+        assert calls == 1
+    finally:
+        window.close()
+        runtime.close()

@@ -42,6 +42,9 @@ manifest, and asks again before launching it.
 - **VARA client**: TCP command/data connection with async notification reader
 - **VARA FM + HF**: one-click mode switch, per-mode ports, auto-selected
   control-burst modem (AFSK 1200 for FM, MFSK-16 for HF)
+- **VARA spectrum monitor**: a separate P2P window with live RX FFT and
+  waterfall, CAT-derived receive/transmit frequency, PTT indication, link
+  state, FM/HF passband scaling, pause/clear controls, and remembered geometry
 - **Consent-driven VARA setup**: Station readiness can download the exact
   reviewed VARA FM/HF archive from the official Winlink distribution server,
   enforce the version, size and SHA-256 pinned in this Guardian release, then
@@ -134,6 +137,9 @@ For development from source:
 
 Guardian starts in the operational Home workspace. Radio, VARA and the live
 audio control channel are started explicitly from Home or the Tools menu.
+With the VARA P2P payload workflow selected, the input-only spectrum window
+opens alongside Guardian. It monitors only the radio RX input explicitly
+selected in Station settings and never opens an output device or keys PTT.
 Mail is composed into the Outbox and transmitted only after the live control
 channel has been started by the operator.
 

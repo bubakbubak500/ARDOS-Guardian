@@ -33,6 +33,7 @@ from .network_workspace import NetworkWorkspace
 from .readiness_dialog import ReadinessDialog
 from .runtime import ShellRuntime
 from .settings_dialog import SettingsDialog
+from .spectrum_window import SpectrumWindow
 from .theme import ThemeController, ThemePreference
 from .update_dialog import UpdateDialog
 
@@ -83,6 +84,11 @@ class GuardianMainWindow(QMainWindow):
         self.settings = settings
         self.theme_controller = ThemeController(settings, self)
         self.runtime.operations.winlink_prompt = self._winlink_prompt
+        self.spectrum_window = SpectrumWindow(runtime, settings, self)
+        self.theme_controller.theme_changed.connect(
+            self.spectrum_window.set_tokens
+        )
+        self.spectrum_window.set_tokens(self.theme_controller.tokens)
 
         self.setWindowTitle(f"{__app_name__} — ARDOS  v{__version__}")
         self.setWindowIcon(QIcon(str(get_ico_path())))
@@ -108,6 +114,14 @@ class GuardianMainWindow(QMainWindow):
         file_menu.addAction(exit_action)
 
         view_menu = self.menuBar().addMenu(tr("menu.view"))
+        spectrum_action = QAction(
+            dual("VARA spectrum && waterfall", "Spektrum && waterfall VARA"),
+            self,
+        )
+        spectrum_action.setShortcut("Ctrl+Shift+W")
+        spectrum_action.triggered.connect(self.show_spectrum)
+        view_menu.addAction(spectrum_action)
+        view_menu.addSeparator()
         self.workspace_actions: dict[str, QAction] = {}
         workspace_group = QActionGroup(self)
         workspace_group.setExclusive(True)
@@ -424,6 +438,15 @@ class GuardianMainWindow(QMainWindow):
             tr("workspace.status", name=display_names[name])
         )
 
+    def show_spectrum(self) -> None:
+        self.spectrum_window.show()
+        self.spectrum_window.raise_()
+        self.spectrum_window.activateWindow()
+
+    def show_spectrum_if_applicable(self) -> None:
+        if self.runtime.config.payload_backend == "vara_p2p":
+            self.show_spectrum()
+
     def _apply_snapshot(self, snapshot: ApplicationSnapshot) -> None:
         config = self.runtime.config
         payload = (
@@ -731,4 +754,5 @@ class GuardianMainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self.settings.setValue("ui/main_geometry", self.saveGeometry())
         self.settings.sync()
+        self.spectrum_window.shutdown()
         super().closeEvent(event)

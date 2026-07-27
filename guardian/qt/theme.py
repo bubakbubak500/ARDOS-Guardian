@@ -154,7 +154,8 @@ QMenuBar::item, QMenu::item {{ padding: {tokens.spacing_2}px {tokens.spacing_4}p
 QMenuBar::item:selected, QMenu::item:selected {{ background: {tokens.hovered}; }}
 QMenu {{ background: {tokens.surface_1}; border: 1px solid {tokens.panel_border}; }}
 QFrame#OperationalHeader, QFrame#MetricStrip, QFrame#StatusStrip,
-QFrame#ReadinessPanel, QFrame#ActivityPanel, QFrame#WorkspacePanel {{
+QFrame#ReadinessPanel, QFrame#ActivityPanel, QFrame#WorkspacePanel,
+QFrame#SpectrumValueCard {{
     background: {tokens.surface_1};
     border: 1px solid {tokens.panel_border};
     border-radius: {tokens.radius_medium}px;
