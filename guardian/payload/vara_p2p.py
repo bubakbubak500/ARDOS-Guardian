@@ -87,29 +87,33 @@ class VaraP2PBackend(PayloadBackend):
                     self.vara.prepare_data_transfer()
                     envelope = encode_envelope(msg.msg_id, data)
                     self.vara.write_data(envelope)
-                    self.vara.finish_data_write()
-                    queued = self.vara.state.tx_buffer_bytes
-                    if queued is None:
-                        buffer_detail = "BUFFER notification pending"
-                    else:
-                        buffer_detail = f"buffer {queued}"
-                    self.on_log(
-                        f"VARA P2P: payload #{msg.msg_id} handed to VARA "
-                        f"({len(data)} payload bytes / {len(envelope)} wire bytes, "
-                        f"{buffer_detail})"
-                    )
-                    self.vara.disconnect_link()
-                    if self.vara.wait_link("DISCONNECTED", TRANSFER_TIMEOUT):
+                    if not self.vara.wait_data_accepted(5.0):
                         self.on_log(
-                            f"VARA P2P: payload #{msg.msg_id} transmitted "
-                            "and VARA link closed"
-                        )
-                        success = True
-                    else:
-                        self.on_log(
-                            f"VARA P2P: transfer #{msg.msg_id} did not finish"
+                            f"VARA P2P: data port did not queue payload "
+                            f"#{msg.msg_id} ({len(envelope)} wire bytes); aborting "
+                            "empty VARA session"
                         )
                         self._abort_link()
+                    else:
+                        queued = self.vara.state.tx_buffer_bytes
+                        self.on_log(
+                            f"VARA P2P: payload #{msg.msg_id} queued by VARA "
+                            f"({len(data)} payload bytes / {len(envelope)} wire bytes, "
+                            f"buffer {queued})"
+                        )
+                        self.vara.finish_data_write()
+                        self.vara.disconnect_link()
+                        if self.vara.wait_link("DISCONNECTED", TRANSFER_TIMEOUT):
+                            self.on_log(
+                                f"VARA P2P: payload #{msg.msg_id} transmitted "
+                                "and VARA link closed"
+                            )
+                            success = True
+                        else:
+                            self.on_log(
+                                f"VARA P2P: transfer #{msg.msg_id} did not finish"
+                            )
+                            self._abort_link()
             except Exception as exc:  # noqa: BLE001
                 self.on_log(f"VARA P2P send failed: {exc}")
                 if link_started:
@@ -190,10 +194,6 @@ class VaraP2PBackend(PayloadBackend):
                         self._abort_link()
                 else:
                     self._abort_link()
-                try:
-                    self.vara.listen(False)
-                except Exception:
-                    pass
                 if acquired and self.on_release:
                     self._safe(self.on_release)
         done(success)

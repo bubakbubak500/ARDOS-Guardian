@@ -97,6 +97,9 @@ def test_vara_reconnects_the_complete_tcp_pair_when_existing_state_is_dead(
         def settimeout(self, value) -> None:
             self.timeout = value
 
+        def setsockopt(self, level, option, value) -> None:
+            pass
+
     old_cmd = FakeSocket()
     old_data = FakeSocket()
     fresh_cmd = FakeSocket()
@@ -139,6 +142,7 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     assert outgoing.commands == [
         ("connect", "OK1AAA"),
         ("prepare",),
+        ("accepted",),
         ("finish-write",),
         ("disconnect",),
     ]
@@ -154,7 +158,6 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     assert incoming.commands == [
         ("listen", True),
         ("disconnect",),
-        ("listen", False),
     ]
     assert received.payload_bytes == b"bundle"
 
@@ -213,6 +216,26 @@ def test_vara_disconnect_follows_data_handoff_barrier() -> None:
     assert vara.commands.index(("finish-write",)) < vara.commands.index(
         ("disconnect",)
     )
+
+
+def test_vara_aborts_empty_session_when_data_port_never_queues_payload() -> None:
+    class RejectingVara(FakeVara):
+        def wait_data_accepted(self, timeout: float) -> bool:
+            self.commands.append(("accepted",))
+            return False
+
+    vara = RejectingVara()
+    result = []
+
+    VaraP2PBackend(vara)._send(
+        Message(19, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        result.append,
+    )
+
+    assert result == [False]
+    assert ("abort",) in vara.commands
+    assert ("disconnect",) not in vara.commands
+    assert ("finish-write",) not in vara.commands
 
 
 def test_vara_receive_releases_codec_before_received_callback() -> None:

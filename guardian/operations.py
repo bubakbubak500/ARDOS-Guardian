@@ -233,14 +233,15 @@ class Operations:
                         f"{self.config.vara_mode.upper()} did not open "
                         f"{self.config.vara_host}:{self.config.vara_cmd_port}"
                     ) from last_error
-            if self.config.callsign != "NOCALL":
-                self.vara.set_mycall(self.config.callsign)
             if self.vara.connected:
-                # Guardian envelopes are binary bundles, not plain text.
-                # Explicitly select VARA's file compressor and a known initial
-                # listening state.
-                self.vara.send_command("COMPRESSION FILES")
-                self.vara.listen(False)
+                # Use the initialization order expected by native VARA clients.
+                # Guardian already frames and CRC-protects its binary stream, so
+                # modem-side text/file compression is unnecessary.
+                self.vara.send_command("PUBLIC ON")
+                self.vara.send_command("COMPRESSION OFF")
+                if self.config.callsign != "NOCALL":
+                    self.vara.set_mycall(self.config.callsign)
+                self.vara.listen(True)
             return started
 
         def completed(result: TaskResult) -> None:

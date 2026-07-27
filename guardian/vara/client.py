@@ -78,10 +78,6 @@ class VaraClient:
                     (self.host, self.cmd_port), timeout=timeout
                 )
                 cmd.settimeout(None)
-                data = socket.create_connection(
-                    (self.host, self.data_port), timeout=timeout
-                )
-                data.settimeout(None)
             except OSError as exc:
                 if cmd is not None:
                     try:
@@ -91,15 +87,36 @@ class VaraClient:
                 self.state.error = f"VARA TCP pair: {exc}"
                 raise
             self._cmd = cmd
-            self._data = data
             self.state.cmd_connected = True
-            self.state.data_connected = True
+            self.state.data_connected = False
             self.state.error = None
 
+        # Match VARA's native-client lifecycle: start consuming the command
+        # stream before opening the associated data connection. Opening both
+        # back-to-back before the command listener existed could leave port
+        # 8301 accepted by Windows but not paired with the active host session.
         self._rx_thread = threading.Thread(
             target=self._reader, args=(cmd,), name="vara-rx", daemon=True
         )
         self._rx_thread.start()
+        time.sleep(0.05)
+
+        try:
+            data = socket.create_connection(
+                (self.host, self.data_port), timeout=timeout
+            )
+            data.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            data.settimeout(None)
+        except OSError as exc:
+            self.state.error = f"VARA data port: {exc}"
+            self.disconnect()
+            raise
+        with self._lock:
+            if self._cmd is not cmd or not self.state.cmd_connected:
+                data.close()
+                raise ConnectionError("VARA command port closed during data pairing")
+            self._data = data
+            self.state.data_connected = True
 
     def disconnect(self) -> None:
         self._stop.set()
@@ -173,6 +190,9 @@ class VaraClient:
         """Send payload bytes over the VARA data port."""
         if self._data is None:
             raise ConnectionError("VARA data port not connected")
+        socket_error = self._data.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        if socket_error:
+            raise OSError(socket_error, "VARA data socket is not healthy")
         self._data.sendall(data)
         self.state.data_bytes_written += len(data)
         self._last_data_write = time.monotonic()
