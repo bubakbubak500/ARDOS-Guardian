@@ -30,6 +30,8 @@ class VaraSnapshot:
     link_state: str = "DISCONNECTED"
     last_notification: str = ""
     tx_buffer_bytes: int | None = None
+    data_bytes_written: int = 0
+    data_bytes_read: int = 0
     ptt: bool = False
     error: str | None = None
 

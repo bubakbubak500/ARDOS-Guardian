@@ -34,6 +34,7 @@ class HamlibRadio(RadioDriver):
         self.timeout = timeout
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
+        self._rx_buffer = bytearray()
 
     @property
     def is_open(self) -> bool:
@@ -46,6 +47,7 @@ class HamlibRadio(RadioDriver):
             sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
             sock.settimeout(self.timeout)
             self._sock = sock
+            self._rx_buffer.clear()
 
     def close(self) -> None:
         with self._lock:
@@ -54,26 +56,33 @@ class HamlibRadio(RadioDriver):
                     self._sock.close()
                 finally:
                     self._sock = None
+                    self._rx_buffer.clear()
 
-    def _command(self, cmd: str) -> list[str]:
-        """Send one command, return reply lines (without trailing newline)."""
+    def _readline(self) -> str:
+        """Read one complete rigctld line without consuming the next reply."""
+        if self._sock is None:
+            raise ConnectionError("rigctld not connected")
+        while b"\n" not in self._rx_buffer:
+            chunk = self._sock.recv(1024)
+            if not chunk:
+                raise ConnectionError("rigctld closed the connection")
+            self._rx_buffer.extend(chunk)
+        raw, _, remaining = self._rx_buffer.partition(b"\n")
+        self._rx_buffer = bytearray(remaining)
+        return raw.rstrip(b"\r").decode("ascii", errors="replace")
+
+    def _command(self, cmd: str, reply_lines: int = 1) -> list[str]:
+        """Send one command and consume its complete logical reply.
+
+        Several rigctld getters have different reply lengths. In particular
+        ``m`` returns two lines (mode and passband). Reading an arbitrary TCP
+        chunk left the second line queued and shifted every later CAT reply,
+        which could turn a PTT command into a stale ``RPRT`` response.
+        """
         if self._sock is None:
             raise ConnectionError("rigctld not connected")
         self._sock.sendall((cmd + "\n").encode("ascii"))
-
-        # rigctld replies are short; read until we get a complete logical reply.
-        # Getters return the value line(s); we read one chunk which is enough
-        # for these tiny responses.
-        data = b""
-        while True:
-            chunk = self._sock.recv(1024)
-            if not chunk:
-                break
-            data += chunk
-            # Heuristic: a reply is complete once it ends in a newline.
-            if data.endswith(b"\n"):
-                break
-        return [ln for ln in data.decode("ascii", errors="replace").splitlines()]
+        return [self._readline() for _ in range(reply_lines)]
 
     @staticmethod
     def _ok(lines: list[str]) -> bool:
@@ -110,7 +119,7 @@ class HamlibRadio(RadioDriver):
         try:
             with self._lock:
                 freq = self._command("f")
-                mode = self._command("m")
+                mode = self._command("m", reply_lines=2)
                 ptt = self._command("t")
                 sig = self._command("l STRENGTH")
             if freq and freq[0].lstrip("-").isdigit():

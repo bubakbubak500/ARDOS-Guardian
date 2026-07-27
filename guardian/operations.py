@@ -66,6 +66,7 @@ class Operations:
         self.configure_vara_host_ptt()
         self.audio_transport: AudioControlTransport | None = None
         self._radio_lock = threading.RLock()
+        self._payload_active = threading.Event()
         self._last_radio_poll = 0.0
         self._stored_inbound: set[int] = set()
         self._qsy_previous: int | None = None
@@ -234,6 +235,12 @@ class Operations:
                     ) from last_error
             if self.config.callsign != "NOCALL":
                 self.vara.set_mycall(self.config.callsign)
+            if self.vara.connected:
+                # Guardian envelopes are binary bundles, not plain text.
+                # Explicitly select VARA's file compressor and a known initial
+                # listening state.
+                self.vara.send_command("COMPRESSION FILES")
+                self.vara.listen(False)
             return started
 
         def completed(result: TaskResult) -> None:
@@ -465,6 +472,11 @@ class Operations:
         force: bool = False,
     ) -> bool:
         now = time.monotonic() if now is None else now
+        # VARA host-PTT must be serviced within a very short timing window.
+        # Four periodic CAT getters can otherwise delay a PTT edge and clip the
+        # peer's short ARQ ACK. The final snapshot is refreshed after handoff.
+        if self._payload_active.is_set():
+            return False
         if not force and now - self._last_radio_poll < 1.0:
             return False
         self._last_radio_poll = now
@@ -509,6 +521,8 @@ class Operations:
                 link_state=state.link_state,
                 last_notification=state.last_notification,
                 tx_buffer_bytes=state.tx_buffer_bytes,
+                data_bytes_written=state.data_bytes_written,
+                data_bytes_read=state.data_bytes_read,
                 ptt=state.ptt,
                 error=state.error,
             )
@@ -588,7 +602,8 @@ class Operations:
 
     def _radio_ptt(self, enabled: bool) -> None:
         try:
-            self.radio.set_ptt(enabled)
+            with self._radio_lock:
+                self.radio.set_ptt(enabled)
         except Exception as exc:
             self._log(f"PTT error: {exc}", LogLevel.ERROR, source="radio")
 
@@ -599,37 +614,49 @@ class Operations:
         )
 
     def _suspend_control(self) -> None:
-        if self.audio_transport is not None:
-            if not self.audio_transport.wait_tx_idle(timeout=5.0):
-                raise TimeoutError(
-                    dual(
-                        "The pending control burst did not finish before VARA handoff.",
-                        "Čekající řídicí rámec nebyl dokončen před předáním VARA.",
+        self._payload_active.set()
+        try:
+            # Wait for a radio poll already in progress before VARA begins.
+            # Future polls remain suppressed until the codec is returned.
+            with self._radio_lock:
+                pass
+            if self.audio_transport is not None:
+                if not self.audio_transport.wait_tx_idle(timeout=5.0):
+                    raise TimeoutError(
+                        dual(
+                            "The pending control burst did not finish before VARA handoff.",
+                            "Čekající řídicí rámec nebyl dokončen před předáním VARA.",
+                        )
                     )
-                )
-            self.audio_transport.stop()
-            self._log(dual(
-                "Control audio released for payload.",
-                "Řídicí zvuk uvolněn pro datový přenos.",
-            ), source="control")
+                self.audio_transport.stop()
+                self._log(dual(
+                    "Control audio released for payload.",
+                    "Řídicí zvuk uvolněn pro datový přenos.",
+                ), source="control")
+        except Exception:
+            self._payload_active.clear()
+            raise
 
     def _resume_control(self) -> None:
-        if self.audio_transport is not None:
-            try:
+        try:
+            if self.audio_transport is not None:
                 self.audio_transport.start()
                 self._log(dual(
                     "Control audio resumed.",
                     "Řídicí zvuk byl obnoven.",
                 ), source="control")
-            except Exception as exc:
-                self._log(
-                    dual(
-                        f"Control audio resume failed: {exc}",
-                        f"Obnovení řídicího zvuku selhalo: {exc}",
-                    ),
-                    LogLevel.ERROR,
-                    source="control",
-                )
+        except Exception as exc:
+            self._log(
+                dual(
+                    f"Control audio resume failed: {exc}",
+                    f"Obnovení řídicího zvuku selhalo: {exc}",
+                ),
+                LogLevel.ERROR,
+                source="control",
+            )
+        finally:
+            self._payload_active.clear()
+            self.request_radio_poll(force=True)
 
     def _winlink_acquire(self) -> None:
         self._suspend_control()

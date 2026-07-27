@@ -28,7 +28,7 @@ _MAGIC = b"GPLD"
 _HDR = struct.Struct(">4sII")
 _CRC = struct.Struct(">H")
 CONNECT_TIMEOUT = 45.0
-TRANSFER_TIMEOUT = 180.0
+TRANSFER_TIMEOUT = 45.0
 
 
 def encode_envelope(msg_id: int, body: bytes) -> bytes:
@@ -85,7 +85,8 @@ class VaraP2PBackend(PayloadBackend):
                         else msg.body.encode("utf-8")
                     )
                     self.vara.prepare_data_transfer()
-                    self.vara.write_data(encode_envelope(msg.msg_id, data))
+                    envelope = encode_envelope(msg.msg_id, data)
+                    self.vara.write_data(envelope)
                     self.vara.finish_data_write()
                     queued = self.vara.state.tx_buffer_bytes
                     if queued is None:
@@ -94,7 +95,8 @@ class VaraP2PBackend(PayloadBackend):
                         buffer_detail = f"buffer {queued}"
                     self.on_log(
                         f"VARA P2P: payload #{msg.msg_id} handed to VARA "
-                        f"({len(data)} bytes, {buffer_detail})"
+                        f"({len(data)} payload bytes / {len(envelope)} wire bytes, "
+                        f"{buffer_detail})"
                     )
                     self.vara.disconnect_link()
                     if self.vara.wait_link("DISCONNECTED", TRANSFER_TIMEOUT):
@@ -159,6 +161,7 @@ class VaraP2PBackend(PayloadBackend):
                 if not self.vara.wait_link("CONNECTED", CONNECT_TIMEOUT):
                     self.on_log("VARA P2P: no incoming link")
                 else:
+                    self.on_log("VARA P2P: link established, waiting for data header")
                     head = self.vara.read_exactly(_HDR.size, TRANSFER_TIMEOUT)
                     magic, mid, length = _HDR.unpack(head)
                     if magic != _MAGIC:

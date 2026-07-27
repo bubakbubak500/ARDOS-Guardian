@@ -31,6 +31,8 @@ class VaraState:
     last_notification: str = ""
     error: str | None = None
     tx_buffer_bytes: int | None = None
+    data_bytes_written: int = 0
+    data_bytes_read: int = 0
     ptt: bool = False
 
 
@@ -160,6 +162,7 @@ class VaraClient:
     def prepare_data_transfer(self) -> None:
         """Discard stale BUFFER state before queuing a new payload."""
         self.state.tx_buffer_bytes = None
+        self.state.data_bytes_written = 0
         self._buffer_update.clear()
 
     def wait_data_accepted(self, timeout: float = 5.0) -> bool:
@@ -171,6 +174,7 @@ class VaraClient:
         if self._data is None:
             raise ConnectionError("VARA data port not connected")
         self._data.sendall(data)
+        self.state.data_bytes_written += len(data)
         self._last_data_write = time.monotonic()
 
     def finish_data_write(self, minimum_delay: float = 2.0) -> None:
@@ -213,6 +217,7 @@ class VaraClient:
             if not chunk:
                 raise ConnectionError("VARA data connection closed")
             buf += chunk
+            self.state.data_bytes_read += len(chunk)
         return bytes(buf)
 
     def wait_link(self, target: str, timeout: float = 30.0) -> bool:
