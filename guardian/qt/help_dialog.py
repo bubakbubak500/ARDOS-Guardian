@@ -127,9 +127,9 @@ def help_topics() -> list[HelpTopic]:
             callsign is normalized to uppercase and is embedded in ARDOS
             control frames and message metadata.</p>
             <p><b>Radio control</b> selects none, Hamlib/rigctld, or serial
-            VOX PTT. For Hamlib enter the rig model ID, CAT COM port, baud rate,
-            rigctld host/port and executable. For VOX choose the COM port and
-            RTS or DTR PTT line.</p>
+            VOX PTT. For Hamlib select the radio model by name, then set the CAT
+            COM port, baud rate, rigctld host/port and executable. For VOX
+            choose the COM port and RTS or DTR PTT line.</p>
             <p><b>VARA & payload</b> stores separate FM and HF command/data
             ports and executable paths. VARA P2P lets Guardian transfer the
             bundle. Manual Winlink hand-off pauses at an operator confirmation.</p>
@@ -146,9 +146,9 @@ def help_topics() -> list[HelpTopic]:
             značka se převádí na velká písmena a zapisuje do řídicích rámců
             ARDOS i metadat zpráv.</p>
             <p><b>Řízení rádia</b> nabízí žádné řízení, Hamlib/rigctld nebo
-            sériové PTT pro VOX. Pro Hamlib zadejte ID modelu, port COM pro CAT,
-            rychlost, adresu/port rigctld a cestu k programu. Pro VOX zvolte
-            port COM a linku PTT RTS nebo DTR.</p>
+            sériové PTT pro VOX. Pro Hamlib vyberte model rádia podle názvu a
+            nastavte port COM pro CAT, rychlost, adresu/port rigctld a cestu k
+            programu. Pro VOX zvolte port COM a linku PTT RTS nebo DTR.</p>
             <p><b>VARA a přenos</b> uchovává oddělené příkazové/datové porty a
             cesty k programům pro FM a HF. VARA P2P přenáší balíček přímo.
             Ruční Winlink se zastaví na potvrzení operátora.</p>
@@ -170,10 +170,12 @@ def help_topics() -> list[HelpTopic]:
             rather than implementing vendor CAT protocols. On Connect radio it
             may start the configured local rigctld and then open the driver.
             Existing responsive rigctld services are reused.</p>
-            <p>The model ID must match <code>rigctl -l</code>. The COM port must
-            belong to the radio interface and must not be held exclusively by
-            another application. A wrong model, baud rate or CI-V address can
-            make rigctld accept TCP while the radio does not answer.</p>
+            <p>Select a common radio from the model list, or use Browse all
+            supported radios to load the authoritative list from the installed
+            Hamlib. The COM port must belong to the radio interface and must not
+            be held exclusively by another application. A wrong model, baud
+            rate or CI-V address can make rigctld accept TCP while the radio
+            does not answer.</p>
             <p>VARA host PTT lets Guardian act on VARA's PTT ON/OFF notices.
             Use it only when VARA itself is configured not to own the same COM
             port. Never test PTT into an unsuitable load or occupied channel.</p>
@@ -184,10 +186,11 @@ def help_topics() -> list[HelpTopic]:
             TCP a neimplementuje jednotlivé protokoly CAT výrobců. Při volbě
             Připojit rádio může spustit nastavené místní rigctld a poté otevřít
             ovladač. Již spuštěná a odpovídající služba se znovu použije.</p>
-            <p>ID modelu musí odpovídat výpisu <code>rigctl -l</code>. Port COM
-            musí patřit rozhraní rádia a nesmí jej výhradně držet jiná aplikace.
-            Chybný model, rychlost nebo adresa CI-V mohou způsobit, že rigctld
-            přijímá TCP, ale rádio neodpovídá.</p>
+            <p>Běžné rádio vyberte ze seznamu modelů. Volba Všechna podporovaná
+            rádia načte úplný a směrodatný seznam z nainstalovaného Hamlibu.
+            Port COM musí patřit rozhraní rádia a nesmí jej výhradně držet jiná
+            aplikace. Chybný model, rychlost nebo adresa CI-V mohou způsobit,
+            že rigctld přijímá TCP, ale rádio neodpovídá.</p>
             <p>Hostitelské PTT VARA dovolí Guardianu reagovat na hlášení PTT
             ON/OFF. Použijte jej jen tehdy, když VARA sama neovládá stejný port
             COM. PTT nikdy netestujte do nevhodné zátěže ani na obsazeném kanálu.</p>

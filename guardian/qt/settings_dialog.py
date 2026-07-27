@@ -15,8 +15,10 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -27,6 +29,7 @@ from PySide6.QtWidgets import (
 from ..config import StationConfig
 from ..i18n import Language, dual, language, set_language, tr
 from ..modem.audio import list_audio_devices, match_device_name
+from ..radio.presets import CURATED, load_hamlib_models
 from .theme import ThemePreference
 from .inputs import UppercaseLineEdit
 
@@ -181,8 +184,30 @@ class SettingsDialog(QDialog):
         )
         index = self.radio_backend.findData(self.config.radio_backend)
         self.radio_backend.setCurrentIndex(max(0, index))
-        self.radio_name = QLineEdit(self.config.radio)
-        self.rig_model = _spin(0, 999_999, self.config.rig_model)
+        self.radio_model = QComboBox()
+        self.radio_model.addItem(
+            dual("Select a supported radio…", "Vyberte podporované rádio…"),
+            0,
+        )
+        for preset in CURATED:
+            if preset.backend == "hamlib" and preset.rig_model > 0:
+                self.radio_model.addItem(preset.label, preset.rig_model)
+        selected = self.radio_model.findData(self.config.rig_model)
+        if self.config.rig_model > 0 and selected < 0:
+            label = self.config.radio or dual("Saved radio", "Uložené rádio")
+            self.radio_model.addItem(label, self.config.rig_model)
+            selected = self.radio_model.count() - 1
+        self.radio_model.setCurrentIndex(max(0, selected))
+        browse_radios = QPushButton(
+            dual("Browse all supported radios…", "Všechna podporovaná rádia…")
+        )
+        browse_radios.clicked.connect(self._browse_radios)
+        radio_picker = QWidget()
+        radio_picker_layout = QHBoxLayout(radio_picker)
+        radio_picker_layout.setContentsMargins(0, 0, 0, 0)
+        radio_picker_layout.setSpacing(6)
+        radio_picker_layout.addWidget(self.radio_model, 1)
+        radio_picker_layout.addWidget(browse_radios)
         self.cat_port = QLineEdit(self.config.cat_port)
         self.cat_port.setPlaceholderText("COM7")
         self.cat_baud = _spin(0, 1_000_000, self.config.cat_baud)
@@ -193,14 +218,48 @@ class SettingsDialog(QDialog):
         self.ptt_line.addItems(["RTS", "DTR"])
         self.ptt_line.setCurrentText(self.config.ptt_line)
         form.addRow(dual("Control method", "Způsob řízení"), self.radio_backend)
-        form.addRow(dual("Radio model/name", "Model / název rádia"), self.radio_name)
-        form.addRow(dual("Hamlib model ID", "ID modelu Hamlib"), self.rig_model)
+        form.addRow(dual("Radio model", "Model rádia"), radio_picker)
         form.addRow(dual("CAT / PTT serial port", "Sériový port CAT / PTT"), self.cat_port)
         form.addRow(dual("CAT baud (0 = automatic)", "Rychlost CAT (0 = automaticky)"), self.cat_baud)
         form.addRow(dual("rigctld host", "Adresa rigctld"), self.rigctld_host)
         form.addRow(dual("rigctld port", "Port rigctld"), self.rigctld_port)
         form.addRow(dual("rigctld executable", "Program rigctld"), self.rigctld_path)
         form.addRow(dual("VOX PTT line", "Linka PTT pro VOX"), self.ptt_line)
+
+    def _browse_radios(self) -> None:
+        models = load_hamlib_models(self.rigctld_path.text())
+        if not models:
+            QMessageBox.warning(
+                self,
+                dual("Supported radios", "Podporovaná rádia"),
+                dual(
+                    "The Hamlib radio list is unavailable. Install or locate "
+                    "Hamlib, then try again.",
+                    "Seznam rádií Hamlib není dostupný. Nainstalujte nebo "
+                    "vyhledejte Hamlib a zkuste to znovu.",
+                ),
+            )
+            return
+        models.sort(key=lambda model: model.label.casefold())
+        labels = [model.label for model in models]
+        label, accepted = QInputDialog.getItem(
+            self,
+            dual("Select radio", "Vyberte rádio"),
+            dual("Supported radio model:", "Podporovaný model rádia:"),
+            labels,
+            editable=False,
+        )
+        if not accepted:
+            return
+        model = models[labels.index(label)]
+        index = self.radio_model.findData(model.model_id)
+        if index < 0:
+            self.radio_model.addItem(model.label, model.model_id)
+            index = self.radio_model.count() - 1
+        self.radio_model.setCurrentIndex(index)
+        self.radio_backend.setCurrentIndex(
+            self.radio_backend.findData("hamlib")
+        )
 
     def _build_audio(self) -> None:
         form = self._page(
@@ -473,11 +532,11 @@ class SettingsDialog(QDialog):
             errors.append(dual("rigctld host cannot be empty.", "Adresa rigctld nesmí být prázdná."))
         if not self.vara_host.text().strip():
             errors.append(dual("VARA host cannot be empty.", "Adresa VARA nesmí být prázdná."))
-        if self.radio_backend.currentData() == "hamlib" and self.rig_model.value() < 1:
+        if self.radio_backend.currentData() == "hamlib" and self.radio_model.currentData() < 1:
             errors.append(
                 dual(
-                    "Choose a Hamlib model ID when Hamlib control is enabled.",
-                    "Při řízení přes Hamlib zvolte ID modelu rádia.",
+                    "Choose a supported radio model when Hamlib control is enabled.",
+                    "Při řízení přes Hamlib vyberte podporovaný model rádia.",
                 )
             )
         for label, field in (
@@ -506,8 +565,12 @@ class SettingsDialog(QDialog):
         cfg.callsign = self.callsign.text().strip().upper() or "NOCALL"
         cfg.operator_name = self.operator_name.text().strip()
         cfg.radio_backend = self.radio_backend.currentData()
-        cfg.radio = self.radio_name.text().strip()
-        cfg.rig_model = self.rig_model.value()
+        if cfg.radio_backend == "hamlib":
+            cfg.radio = self.radio_model.currentText()
+            cfg.rig_model = int(self.radio_model.currentData())
+        else:
+            cfg.radio = ""
+            cfg.rig_model = 0
         cfg.cat_port = self.cat_port.text().strip()
         cfg.cat_baud = self.cat_baud.value()
         cfg.rigctld_host = self.rigctld_host.text().strip()

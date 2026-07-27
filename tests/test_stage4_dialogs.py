@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QSpinBox
 
 from guardian.config import StationConfig
 from guardian.install.dependencies import DependencyKind, DependencyStatus
@@ -35,6 +35,12 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         )
         dialog.audio_input.setCurrentText("USB Audio CODEC RX")
         dialog.audio_output.setCurrentText("USB Audio CODEC TX")
+        dialog.radio_backend.setCurrentIndex(
+            dialog.radio_backend.findData("hamlib")
+        )
+        dialog.radio_model.setCurrentIndex(
+            dialog.radio_model.findData(3073)
+        )
         assert dialog.apply()
         assert config.callsign == "OK7PS"
         assert config.operator_name == "Operator"
@@ -43,6 +49,31 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         assert config.payload_backend == "winlink_manual"
         assert config.audio_input == "USB Audio CODEC RX"
         assert config.audio_output == "USB Audio CODEC TX"
+        assert config.radio == "Icom IC-7300"
+        assert config.rig_model == 3073
+    finally:
+        dialog.close()
+
+
+def test_settings_radio_model_is_selected_by_name_not_typed_as_id() -> None:
+    _application()
+    config = StationConfig(
+        radio_backend="hamlib",
+        radio="Yaesu FT-891",
+        rig_model=1036,
+    )
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        assert not dialog.radio_model.isEditable()
+        assert dialog.radio_model.currentText() == "Yaesu FT-891"
+        assert dialog.radio_model.currentData() == 1036
+        labels = {
+            label.text()
+            for label in dialog.findChildren(QLabel)
+        }
+        assert "Hamlib model ID" not in labels
+        assert "ID modelu Hamlib" not in labels
+        assert all(spin.maximum() != 999_999 for spin in dialog.findChildren(QSpinBox))
     finally:
         dialog.close()
 
