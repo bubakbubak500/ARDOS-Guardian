@@ -47,6 +47,7 @@ class VaraClient:
         self._lock = threading.Lock()
         self._rx_thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._buffer_update = threading.Event()
 
         self.state = VaraState()
         # Callback for asynchronous command-port notifications (UI/log hook).
@@ -124,6 +125,11 @@ class VaraClient:
     def prepare_data_transfer(self) -> None:
         """Discard stale BUFFER state before queuing a new payload."""
         self.state.tx_buffer_bytes = None
+        self._buffer_update.clear()
+
+    def wait_data_accepted(self, timeout: float = 5.0) -> bool:
+        """Wait until VARA confirms that it consumed data from TCP port 8301."""
+        return self._buffer_update.wait(timeout)
 
     def write_data(self, data: bytes) -> None:
         """Send payload bytes over the VARA data port."""
@@ -213,6 +219,7 @@ class VaraClient:
             for token in upper.replace("=", " ").replace(":", " ").split()[1:]:
                 try:
                     self.state.tx_buffer_bytes = max(0, int(token))
+                    self._buffer_update.set()
                     break
                 except ValueError:
                     continue

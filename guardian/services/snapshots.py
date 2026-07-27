@@ -29,6 +29,8 @@ class VaraSnapshot:
     mycall: str = ""
     link_state: str = "DISCONNECTED"
     last_notification: str = ""
+    tx_buffer_bytes: int | None = None
+    ptt: bool = False
     error: str | None = None
 
 

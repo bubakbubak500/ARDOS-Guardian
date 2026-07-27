@@ -508,6 +508,8 @@ class Operations:
                 mycall=state.mycall,
                 link_state=state.link_state,
                 last_notification=state.last_notification,
+                tx_buffer_bytes=state.tx_buffer_bytes,
+                ptt=state.ptt,
                 error=state.error,
             )
         )
@@ -577,6 +579,11 @@ class Operations:
                 )
 
     def _on_vara_notification(self, text: str) -> None:
+        # BUFFER can change many times per second during a transfer. Its latest
+        # value is exposed in diagnostics; rendering every update would flood
+        # the activity panel and make the Qt UI sluggish.
+        if text.upper().startswith("BUFFER"):
+            return
         self._log(f"[VARA] {text}", source="vara")
 
     def _radio_ptt(self, enabled: bool) -> None:

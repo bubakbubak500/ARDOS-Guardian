@@ -86,22 +86,33 @@ class VaraP2PBackend(PayloadBackend):
                     )
                     self.vara.prepare_data_transfer()
                     self.vara.write_data(encode_envelope(msg.msg_id, data))
-                    self.vara.disconnect_link()
-                    self.on_log(
-                        f"VARA P2P: payload #{msg.msg_id} queued for "
-                        f"{msg.next_hop} ({len(data)} bytes)"
-                    )
-                    if self.vara.wait_link("DISCONNECTED", TRANSFER_TIMEOUT):
+                    if not self.vara.wait_data_accepted(5.0):
                         self.on_log(
-                            f"VARA P2P: payload #{msg.msg_id} transmitted "
-                            "and VARA link closed"
-                        )
-                        success = True
-                    else:
-                        self.on_log(
-                            f"VARA P2P: transfer #{msg.msg_id} did not finish"
+                            f"VARA P2P: VARA did not accept payload "
+                            f"#{msg.msg_id} on data port"
                         )
                         self._abort_link()
+                    else:
+                        queued = self.vara.state.tx_buffer_bytes
+                        self.on_log(
+                            f"VARA P2P: payload #{msg.msg_id} accepted by "
+                            f"VARA ({len(data)} bytes, buffer {queued})"
+                        )
+                        # Command and data use separate TCP sockets.  Sending
+                        # DISCONNECT before BUFFER arrives can overtake the
+                        # payload and produce a valid RF link with TX: 0 Bytes.
+                        self.vara.disconnect_link()
+                        if self.vara.wait_link("DISCONNECTED", TRANSFER_TIMEOUT):
+                            self.on_log(
+                                f"VARA P2P: payload #{msg.msg_id} transmitted "
+                                "and VARA link closed"
+                            )
+                            success = True
+                        else:
+                            self.on_log(
+                                f"VARA P2P: transfer #{msg.msg_id} did not finish"
+                            )
+                            self._abort_link()
             except Exception as exc:  # noqa: BLE001
                 self.on_log(f"VARA P2P send failed: {exc}")
                 if link_started:

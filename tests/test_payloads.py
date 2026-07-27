@@ -1,9 +1,11 @@
 import struct
+from types import SimpleNamespace
 
 from guardian.payload.vara_p2p import VaraP2PBackend, encode_envelope
 from guardian.payload.winlink_manual import WinlinkManualBackend
 from guardian.protocol import crc16
 from guardian.session import Message
+from guardian.vara.client import VaraClient
 
 
 class FakeVara:
@@ -13,6 +15,7 @@ class FakeVara:
         self.commands = []
         self.written = b""
         self.transfer_complete = True
+        self.state = SimpleNamespace(tx_buffer_bytes=None)
 
     def connect_to(self, callsign: str) -> None:
         self.commands.append(("connect", callsign))
@@ -31,6 +34,11 @@ class FakeVara:
 
     def prepare_data_transfer(self) -> None:
         self.commands.append(("prepare",))
+
+    def wait_data_accepted(self, timeout: float) -> bool:
+        self.commands.append(("accepted",))
+        self.state.tx_buffer_bytes = len(self.written)
+        return True
 
     def wait_transfer_complete(self, timeout: float) -> bool:
         return self.transfer_complete
@@ -58,6 +66,17 @@ def test_vara_envelope_contains_id_payload_and_crc() -> None:
     assert crc == crc16(envelope[:-2])
 
 
+def test_vara_buffer_notification_confirms_data_port_acceptance() -> None:
+    vara = VaraClient()
+    vara.prepare_data_transfer()
+
+    assert not vara.wait_data_accepted(0)
+    vara._handle_notification("BUFFER 411")
+
+    assert vara.wait_data_accepted(0)
+    assert vara.state.tx_buffer_bytes == 411
+
+
 def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     outgoing = FakeVara()
     send_result = []
@@ -70,6 +89,7 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     assert outgoing.commands == [
         ("connect", "OK1AAA"),
         ("prepare",),
+        ("accepted",),
         ("disconnect",),
     ]
     assert outgoing.written == encode_envelope(12, b"bundle")
@@ -128,6 +148,21 @@ def test_vara_send_keeps_codec_until_rf_transfer_finishes() -> None:
     )
 
     assert events == ["acquire", "rf-finished", "release", ("done", True)]
+
+
+def test_vara_does_not_disconnect_before_data_port_accepts_payload() -> None:
+    vara = FakeVara()
+    vara.wait_data_accepted = lambda timeout: False
+    result = []
+
+    VaraP2PBackend(vara)._send(
+        Message(18, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        result.append,
+    )
+
+    assert result == [False]
+    assert ("disconnect",) not in vara.commands
+    assert ("abort",) in vara.commands
 
 
 def test_vara_receive_releases_codec_before_received_callback() -> None:
