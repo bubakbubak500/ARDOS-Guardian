@@ -63,7 +63,7 @@ class Operations:
             config.vara_data_port,
         )
         self.vara.on_notification = self._on_vara_notification
-        self.vara.on_ptt = self._radio_ptt if config.vara_host_ptt else None
+        self.configure_vara_host_ptt()
         self.audio_transport: AudioControlTransport | None = None
         self._radio_lock = threading.RLock()
         self._last_radio_poll = 0.0
@@ -584,6 +584,12 @@ class Operations:
             self.radio.set_ptt(enabled)
         except Exception as exc:
             self._log(f"PTT error: {exc}", LogLevel.ERROR, source="radio")
+
+    def configure_vara_host_ptt(self) -> None:
+        """Apply the saved VARA host-PTT preference to the live client."""
+        self.vara.on_ptt = (
+            self._radio_ptt if self.config.vara_host_ptt else None
+        )
 
     def _suspend_control(self) -> None:
         if self.audio_transport is not None:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -29,6 +30,8 @@ class VaraState:
     link_state: str = "DISCONNECTED"   # as reported by VARA
     last_notification: str = ""
     error: str | None = None
+    tx_buffer_bytes: int | None = None
+    ptt: bool = False
 
 
 class VaraClient:
@@ -113,12 +116,34 @@ class VaraClient:
     def abort(self) -> None:
         self.send_command("ABORT")
 
+    def disconnect_link(self) -> None:
+        """Gracefully close after VARA has transmitted its queued data."""
+        self.send_command("DISCONNECT")
+
     # --- data path (payload bytes) --------------------------------------
+    def prepare_data_transfer(self) -> None:
+        """Discard stale BUFFER state before queuing a new payload."""
+        self.state.tx_buffer_bytes = None
+
     def write_data(self, data: bytes) -> None:
         """Send payload bytes over the VARA data port."""
         if self._data is None:
             raise ConnectionError("VARA data port not connected")
         self._data.sendall(data)
+
+    def wait_transfer_complete(self, timeout: float = 180.0) -> bool:
+        """Wait until VARA drains its RF queue or the peer closes the link."""
+        deadline = time.monotonic() + timeout
+        was_connected = self.state.link_state == "CONNECTED"
+        while time.monotonic() < deadline:
+            if self.state.tx_buffer_bytes == 0:
+                return True
+            if was_connected and self.state.link_state == "DISCONNECTED":
+                return True
+            if self.state.link_state == "CONNECTED":
+                was_connected = True
+            time.sleep(0.05)
+        return self.state.tx_buffer_bytes == 0
 
     def read_exactly(self, n: int, timeout: float = 60.0) -> bytes:
         """Read exactly n payload bytes (raises on timeout/short read)."""
@@ -184,7 +209,15 @@ class VaraClient:
             self.state.link_state = "DISCONNECTED"
         elif upper.startswith("PENDING") or upper.startswith("CONNECTING"):
             self.state.link_state = "CONNECTING"
+        elif upper.startswith("BUFFER"):
+            for token in upper.replace("=", " ").replace(":", " ").split()[1:]:
+                try:
+                    self.state.tx_buffer_bytes = max(0, int(token))
+                    break
+                except ValueError:
+                    continue
         elif upper == "PTT ON" or upper == "PTT OFF":
+            self.state.ptt = upper == "PTT ON"
             # VARA wants to key/unkey. If a host-PTT hook is wired, Guardian does
             # the actual keying (so VARA needs no COM port of its own).
             if self.on_ptt is not None:

@@ -12,6 +12,7 @@ class FakeVara:
         self.incoming = bytearray(incoming)
         self.commands = []
         self.written = b""
+        self.transfer_complete = True
 
     def connect_to(self, callsign: str) -> None:
         self.commands.append(("connect", callsign))
@@ -20,7 +21,19 @@ class FakeVara:
         self.commands.append(("listen", enabled))
 
     def wait_link(self, state: str, timeout: float) -> bool:
-        return state == "CONNECTED"
+        return state in {"CONNECTED", "DISCONNECTED"}
+
+    def abort(self) -> None:
+        self.commands.append(("abort",))
+
+    def disconnect_link(self) -> None:
+        self.commands.append(("disconnect",))
+
+    def prepare_data_transfer(self) -> None:
+        self.commands.append(("prepare",))
+
+    def wait_transfer_complete(self, timeout: float) -> bool:
+        return self.transfer_complete
 
     def write_data(self, data: bytes) -> None:
         self.written += data
@@ -54,7 +67,11 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     backend._send(message, send_result.append)
 
     assert send_result == [True]
-    assert outgoing.commands == [("connect", "OK1AAA")]
+    assert outgoing.commands == [
+        ("connect", "OK1AAA"),
+        ("prepare",),
+        ("disconnect",),
+    ]
     assert outgoing.written == encode_envelope(12, b"bundle")
 
     incoming = FakeVara(outgoing.written)
@@ -64,7 +81,11 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     VaraP2PBackend(incoming)._receive(received, receive_result.append)
 
     assert receive_result == [True]
-    assert incoming.commands == [("listen", True)]
+    assert incoming.commands == [
+        ("listen", True),
+        ("disconnect",),
+        ("listen", False),
+    ]
     assert received.payload_bytes == b"bundle"
 
 
@@ -84,7 +105,45 @@ def test_vara_qsy_happens_before_handoff_and_restore_after_release() -> None:
     )
 
     assert events[:2] == [("qsy", "OK1AAA"), "acquire"]
-    assert events[-2:] == ["release", "restore"]
+    assert events[-3:] == ["release", "restore", ("done", True)]
+
+
+def test_vara_send_keeps_codec_until_rf_transfer_finishes() -> None:
+    events = []
+
+    class OrderedVara(FakeVara):
+        def wait_link(self, state: str, timeout: float) -> bool:
+            if state == "DISCONNECTED":
+                events.append("rf-finished")
+            return super().wait_link(state, timeout)
+
+    backend = VaraP2PBackend(
+        OrderedVara(),
+        on_acquire=lambda: events.append("acquire"),
+        on_release=lambda: events.append("release"),
+    )
+    backend._send(
+        Message(16, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        lambda ok: events.append(("done", ok)),
+    )
+
+    assert events == ["acquire", "rf-finished", "release", ("done", True)]
+
+
+def test_vara_receive_releases_codec_before_received_callback() -> None:
+    events = []
+    incoming = FakeVara(encode_envelope(17, b"x"))
+    backend = VaraP2PBackend(
+        incoming,
+        on_acquire=lambda: events.append("acquire"),
+        on_release=lambda: events.append("release"),
+    )
+    backend._receive(
+        Message(17, "OK1AAA", "OK7PS", "OK7PS"),
+        lambda ok: events.append(("done", ok)),
+    )
+
+    assert events == ["acquire", "release", ("done", True)]
 
 
 def test_vara_does_not_connect_when_audio_handoff_fails() -> None:

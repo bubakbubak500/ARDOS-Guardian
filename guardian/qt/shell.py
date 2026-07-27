@@ -640,6 +640,7 @@ class GuardianMainWindow(QMainWindow):
                         )
                     )
             applied_audio[:] = selected_audio
+            self.runtime.operations.configure_vara_host_ptt()
             self.theme_controller.set_preference(dialog.selected_theme)
             self._rebuild_translated_ui()
             self.runtime.refresh()

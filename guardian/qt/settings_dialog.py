@@ -355,6 +355,17 @@ class SettingsDialog(QDialog):
         self.control_modem.setCurrentIndex(
             max(0, self.control_modem.findData(self.config.control_modem))
         )
+        self.vara_host_ptt = QCheckBox(dual(
+            "Let Guardian key the radio for VARA",
+            "Klíčovat rádio pro VARA prostřednictvím Guardianu",
+        ))
+        self.vara_host_ptt.setChecked(self.config.vara_host_ptt)
+        self.vara_host_ptt.setToolTip(dual(
+            "Guardian reacts to VARA PTT ON/OFF through Hamlib. "
+            "Do not configure VARA to own the same COM port.",
+            "Guardian reaguje na povely VARA PTT ON/OFF přes Hamlib. "
+            "Nenastavujte ve VARA současně vlastnictví stejného portu COM.",
+        ))
         form.addRow(dual("Active VARA mode", "Aktivní režim VARA"), self.vara_mode)
         form.addRow(dual("Payload workflow", "Způsob přenosu"), self.payload_backend)
         form.addRow(dual("VARA host", "Adresa VARA"), self.vara_host)
@@ -365,6 +376,8 @@ class SettingsDialog(QDialog):
         form.addRow(dual("VARA HF data port", "Datový port VARA HF"), self.vara_hf_data)
         form.addRow(dual("VARA HF executable", "Program VARA HF"), self.vara_hf_path)
         form.addRow(dual("Control-burst modem", "Modem řídicích rámců"), self.control_modem)
+
+        form.addRow(self.vara_host_ptt)
 
     def _build_network(self) -> None:
         form = self._page(
@@ -512,6 +525,7 @@ class SettingsDialog(QDialog):
         cfg.vara_hf_path = self.vara_hf_path.text()
         cfg.payload_backend = self.payload_backend.currentData()
         cfg.control_modem = self.control_modem.currentData()
+        cfg.vara_host_ptt = self.vara_host_ptt.isChecked()
         cfg.apply_vara_mode(self.vara_mode.currentText())
         cfg.default_ttl = self.default_ttl.value()
         cfg.auto_route = self.auto_route.isChecked()
