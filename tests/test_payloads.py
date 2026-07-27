@@ -26,10 +26,6 @@ class FakeVara:
     def connect_to(self, callsign: str) -> None:
         self.commands.append(("connect", callsign))
 
-    def renew_connection_pair(self) -> None:
-        self.state.data_socket_generation += 1
-        self.commands.append(("renew-pair",))
-
     def listen(self, enabled: bool) -> None:
         self.commands.append(("listen", enabled))
 
@@ -141,75 +137,6 @@ def test_vara_reconnects_the_complete_tcp_pair_when_existing_state_is_dead(
     assert vara.state.data_connected
 
 
-def test_vara_renews_complete_socket_pair_before_payload_session(
-    monkeypatch,
-) -> None:
-    class FakeSocket:
-        def __init__(self, local=None, peer=None) -> None:
-            self.closed = False
-            self.local = local
-            self.peer = peer
-            self.sent = []
-
-        def shutdown(self, how) -> None:
-            pass
-
-        def close(self) -> None:
-            self.closed = True
-
-        def settimeout(self, value) -> None:
-            pass
-
-        def setsockopt(self, level, option, value) -> None:
-            pass
-
-        def sendall(self, data) -> None:
-            self.sent.append(data)
-
-        def getsockname(self):
-            return self.local
-
-        def getpeername(self):
-            return self.peer
-
-    old_cmd = FakeSocket()
-    old_data = FakeSocket()
-    new_cmd = FakeSocket()
-    new_data = FakeSocket(
-        ("127.0.0.1", 50123), ("127.0.0.1", 8301)
-    )
-    sockets = iter((new_cmd, new_data))
-    vara = VaraClient()
-    vara._cmd = old_cmd
-    vara._data = old_data
-    vara.state.cmd_connected = True
-    vara.state.data_connected = True
-    vara.state.mycall = "OK7PS"
-    monkeypatch.setattr(
-        "guardian.vara.client.socket.create_connection",
-        lambda address, timeout: next(sockets),
-    )
-    monkeypatch.setattr(
-        "guardian.vara.client.threading.Thread.start", lambda self: None
-    )
-    monkeypatch.setattr("guardian.vara.client.time.sleep", lambda timeout: None)
-
-    vara.renew_connection_pair()
-
-    assert old_cmd.closed
-    assert old_data.closed
-    assert vara._cmd is new_cmd
-    assert vara._data is new_data
-    assert vara.state.data_socket_generation == 1
-    assert vara.state.data_local_endpoint == "127.0.0.1:50123"
-    assert vara.state.data_peer_endpoint == "127.0.0.1:8301"
-    assert new_cmd.sent == [
-        b"PUBLIC ON\r",
-        b"COMPRESSION OFF\r",
-        b"MYCALL OK7PS\r",
-    ]
-
-
 def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     outgoing = FakeVara()
     send_result = []
@@ -220,7 +147,6 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert send_result == [True]
     assert outgoing.commands == [
-        ("renew-pair",),
         ("listen", False),
         ("connect", "OK1AAA"),
         ("data-ready",),
@@ -239,8 +165,6 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert receive_result == [True]
     assert incoming.commands == [
-        ("renew-pair",),
-        ("listen", True),
         ("disconnect",),
     ]
     assert received.payload_bytes == b"bundle"
@@ -336,6 +260,30 @@ def test_vara_send_does_not_require_immediate_buffer_notification() -> None:
     assert ("abort",) not in vara.commands
     assert ("finish-write",) in vara.commands
     assert ("disconnect",) in vara.commands
+
+
+def test_vara_payload_session_keeps_startup_tcp_pair_and_inbound_listener() -> None:
+    outgoing = FakeVara()
+    incoming = FakeVara(encode_envelope(21, b"x"))
+    outgoing_generation = outgoing.state.data_socket_generation
+    incoming_generation = incoming.state.data_socket_generation
+
+    send_result = []
+    receive_result = []
+    VaraP2PBackend(outgoing)._send(
+        Message(21, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        send_result.append,
+    )
+    VaraP2PBackend(incoming)._receive(
+        Message(21, "OK7PS", "OK1AAA", "OK1AAA"),
+        receive_result.append,
+    )
+
+    assert send_result == [True]
+    assert receive_result == [True]
+    assert outgoing.state.data_socket_generation == outgoing_generation
+    assert incoming.state.data_socket_generation == incoming_generation
+    assert ("listen", True) not in incoming.commands
 
 
 def test_vara_receive_releases_codec_before_received_callback() -> None:

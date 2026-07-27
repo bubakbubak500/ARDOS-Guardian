@@ -158,32 +158,6 @@ class VaraClient:
         self.state.data_local_endpoint = self._endpoint(data)
         self.state.data_peer_endpoint = self._endpoint(data, peer=True)
 
-    def renew_connection_pair(self, timeout: float = 3.0) -> None:
-        """Replace VARA's command/data TCP pair before an RF session.
-
-        VARA treats ports 8300 and 8301 as one application session. Closing
-        either socket makes VARA close the other one as well, so attempting to
-        renew only the data socket races the command reader and cannot produce
-        a valid replacement pair.
-        """
-        with self._lock:
-            if self._cmd is None or not self.state.cmd_connected:
-                raise ConnectionError("VARA command port not connected")
-            mycall = self.state.mycall
-
-        self.disconnect()
-        # Give VARA time to retire both halves of the old application session
-        # before offering the next command/data pair.
-        time.sleep(0.25)
-        self.connect(timeout=timeout)
-
-        # A fresh command socket is a fresh VARA application session. Restore
-        # the protocol settings before the caller selects LISTEN ON/OFF.
-        self.send_command("PUBLIC ON")
-        self.send_command("COMPRESSION OFF")
-        if mycall:
-            self.set_mycall(mycall)
-
     @property
     def connected(self) -> bool:
         return (

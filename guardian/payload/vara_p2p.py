@@ -80,9 +80,8 @@ class VaraP2PBackend(PayloadBackend):
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
-                self.vara.renew_connection_pair()
                 self.on_log(
-                    "VARA P2P: renewed TCP pair 8300/8301 "
+                    "VARA P2P: using persistent TCP pair 8300/8301 "
                     f"(generation {self.vara.state.data_socket_generation})"
                 )
                 # An outbound station must not remain in inbound-listen mode.
@@ -173,12 +172,14 @@ class VaraP2PBackend(PayloadBackend):
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
-                self.vara.renew_connection_pair()
                 self.on_log(
-                    "VARA P2P: renewed TCP pair 8300/8301 "
+                    "VARA P2P: using persistent TCP pair 8300/8301 "
                     f"(generation {self.vara.state.data_socket_generation})"
                 )
-                self.vara.listen(True)
+                # LISTEN ON is established once when Guardian connects to
+                # VARA. Reissuing it here can reach VARA while the inbound RF
+                # handshake is already pending; the native protocol explicitly
+                # says LISTEN ON/OFF during a connection causes disconnect.
                 if not self.vara.wait_link("CONNECTED", CONNECT_TIMEOUT):
                     self.on_log("VARA P2P: no incoming link")
                 else:

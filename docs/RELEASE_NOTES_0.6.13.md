@@ -1,5 +1,8 @@
 # Guardian 0.6.13
 
+This release is superseded by 0.6.14, which keeps the original VARA TCP
+application session alive instead of replacing it during each RF handshake.
+
 This release stops aborting a valid VARA session while waiting for optional
 transmit-buffer telemetry.
 
