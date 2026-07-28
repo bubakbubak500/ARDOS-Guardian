@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import tempfile
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -28,7 +30,13 @@ from PySide6.QtWidgets import (
 )
 
 from ..i18n import language, tr
-from ..message import Attachment, Folder, MailMessage, Status
+from ..message import (
+    Attachment,
+    Folder,
+    MailMessage,
+    Status,
+    safe_attachment_name,
+)
 from ..message.forms import FORMS
 from ..protocol import Priority
 from .inputs import RowTable, UppercaseLineEdit
@@ -258,6 +266,7 @@ class MailWorkspace(QWidget):
         self.runtime = runtime
         self.folder = Folder.INBOX
         self.selected_id: int | None = None
+        self._attachments: list[Attachment] = []
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 8, 10, 8)
         top = QHBoxLayout()
@@ -296,6 +305,28 @@ class MailWorkspace(QWidget):
         self.reader = QPlainTextEdit()
         self.reader.setReadOnly(True)
         reader_layout.addWidget(self.reader, 1)
+
+        self.attachment_bar = QWidget()
+        attachment_row = QHBoxLayout(self.attachment_bar)
+        attachment_row.setContentsMargins(0, 4, 0, 0)
+        self.attachment_label = QLabel()
+        self.attachment_label.setObjectName("Metadata")
+        self.attachment_picker = QComboBox()
+        self.attachment_picker.setMinimumWidth(220)
+        self.open_attachment_button = QPushButton()
+        self.open_attachment_button.clicked.connect(self.open_attachment)
+        self.save_attachment_button = QPushButton()
+        self.save_attachment_button.clicked.connect(self.save_attachment)
+        self.save_all_button = QPushButton()
+        self.save_all_button.clicked.connect(self.save_all_attachments)
+        attachment_row.addWidget(self.attachment_label)
+        attachment_row.addWidget(self.attachment_picker, 1)
+        attachment_row.addWidget(self.open_attachment_button)
+        attachment_row.addWidget(self.save_attachment_button)
+        attachment_row.addWidget(self.save_all_button)
+        self.attachment_bar.setVisible(False)
+        reader_layout.addWidget(self.attachment_bar)
+
         actions = QHBoxLayout()
         self.reply_button = QPushButton()
         self.reply_button.clicked.connect(self.reply)
@@ -331,6 +362,10 @@ class MailWorkspace(QWidget):
             ]
         )
         self.reader.setPlaceholderText(tr("mail.select"))
+        self.attachment_label.setText(tr("mail.attachments"))
+        self.open_attachment_button.setText(tr("mail.attachment_open"))
+        self.save_attachment_button.setText(tr("mail.attachment_save"))
+        self.save_all_button.setText(tr("mail.attachment_save_all"))
         self.reply_button.setText(tr("mail.reply"))
         self.send_button.setText(tr("mail.send_queued"))
         self.delete_button.setText(tr("mail.delete"))
@@ -347,6 +382,126 @@ class MailWorkspace(QWidget):
         self.reader.clear()
         self.reply_button.setEnabled(False)
         self.send_button.setEnabled(False)
+        self._show_attachments(None)
+
+    # ---------------------------- attachments ------------------------- #
+    # Attachment names arrive over the air from another station, so they are
+    # never used as a path: only the bare filename is kept, and the operator
+    # always picks the destination.
+    RISKY_SUFFIXES = frozenset({
+        ".bat", ".cmd", ".com", ".cpl", ".dll", ".exe", ".hta", ".inf", ".jar",
+        ".js", ".jse", ".lnk", ".msc", ".msi", ".msp", ".pif", ".ps1", ".reg",
+        ".scr", ".sct", ".vb", ".vbe", ".vbs", ".wsf", ".wsh",
+    })
+
+    _safe_name = staticmethod(safe_attachment_name)
+
+    def _show_attachments(self, message: MailMessage | None) -> None:
+        self._attachments = list(message.attachments) if message else []
+        self.attachment_picker.clear()
+        for item in self._attachments:
+            self.attachment_picker.addItem(
+                f"{self._safe_name(item.name)}  ({item.size} B)"
+            )
+        has_any = bool(self._attachments)
+        self.attachment_bar.setVisible(has_any)
+        self.open_attachment_button.setEnabled(has_any)
+        self.save_attachment_button.setEnabled(has_any)
+        self.save_all_button.setEnabled(len(self._attachments) > 1)
+
+    def _current_attachment(self) -> Attachment | None:
+        index = self.attachment_picker.currentIndex()
+        if 0 <= index < len(self._attachments):
+            return self._attachments[index]
+        return None
+
+    def open_attachment(self) -> None:
+        attachment = self._current_attachment()
+        if attachment is None:
+            return
+        name = self._safe_name(attachment.name)
+        if Path(name).suffix.lower() in self.RISKY_SUFFIXES:
+            source = "?"
+            if self.selected_id is not None:
+                message = self.runtime.mailstore.get(self.selected_id)
+                source = message.source if message else "?"
+            answer = QMessageBox.warning(
+                self,
+                tr("mail.attachment_risky_title"),
+                tr("mail.attachment_risky", name=name, source=source),
+                QMessageBox.StandardButton.Open
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Open:
+                return
+        target = Path(tempfile.mkdtemp(prefix="guardian-attachment-")) / name
+        try:
+            target.write_bytes(attachment.data)
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                tr("mail.attachments"),
+                tr("mail.attachment_save_error", name=name, error=str(exc)),
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
+            QMessageBox.information(
+                self,
+                tr("mail.attachments"),
+                tr("mail.attachment_open_error", name=name),
+            )
+
+    def save_attachment(self) -> None:
+        attachment = self._current_attachment()
+        if attachment is None:
+            return
+        name = self._safe_name(attachment.name)
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, tr("mail.attachment_save"), name
+        )
+        if not chosen:
+            return
+        try:
+            Path(chosen).write_bytes(attachment.data)
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                tr("mail.attachments"),
+                tr("mail.attachment_save_error", name=name, error=str(exc)),
+            )
+            return
+        self.runtime.events.publish(
+            tr("mail.attachment_saved", name=name, path=chosen),
+            source="mail",
+        )
+
+    def save_all_attachments(self) -> None:
+        if not self._attachments:
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, tr("mail.attachment_choose_folder")
+        )
+        if not folder:
+            return
+        saved = 0
+        for attachment in self._attachments:
+            name = self._safe_name(attachment.name)
+            try:
+                (Path(folder) / name).write_bytes(attachment.data)
+            except OSError as exc:
+                QMessageBox.warning(
+                    self,
+                    tr("mail.attachments"),
+                    tr("mail.attachment_save_error", name=name, error=str(exc)),
+                )
+                continue
+            saved += 1
+        if saved:
+            self.runtime.events.publish(
+                tr("mail.attachment_saved_all", count=saved, path=folder),
+                source="mail",
+            )
 
     def refresh(self) -> None:
         counts = self.runtime.mailstore.counts()
@@ -402,6 +557,7 @@ class MailWorkspace(QWidget):
         message = self.runtime.mailstore.get(self.selected_id)
         if message is None:
             self.reader.setPlainText(tr("mail.not_found"))
+            self._show_attachments(None)
             return
         route = " -> ".join(message.hops) or "-"
         attachments = "\n".join(
@@ -424,6 +580,7 @@ class MailWorkspace(QWidget):
         self.send_button.setEnabled(
             message.folder in (Folder.OUTBOX, Folder.TRANSIT)
         )
+        self._show_attachments(message)
         self.refresh()
 
     def compose(self, *, reply_to: MailMessage | None = None) -> None:

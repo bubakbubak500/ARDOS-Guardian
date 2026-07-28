@@ -5,7 +5,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QAbstractItemView, QApplication
 
-from guardian.message import Folder, MessageStore
+from guardian.message import (
+    Attachment,
+    Folder,
+    MailMessage,
+    MessageStore,
+    Status,
+)
 from guardian.qt.mail_workspace import ComposeDialog, MailWorkspace
 from guardian.qt.network_workspace import NetworkWorkspace
 from guardian.qt.runtime import ShellRuntime
@@ -94,6 +100,74 @@ def test_mail_list_marks_whole_rows_and_keeps_them_selected(tmp_path) -> None:
         workspace.folders.setCurrentRow(0)
         assert workspace.selected_id is None
         assert table.selectionModel().selectedRows() == []
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_inbox_attachments_can_be_saved_and_hostile_names_are_defused(
+    tmp_path,
+) -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.mailstore = MessageStore(tmp_path / "mail")
+    runtime.config.callsign = "OK7PS"
+    workspace = MailWorkspace(runtime)
+    try:
+        # No message selected: nothing to act on, and the bar stays hidden.
+        assert not workspace.attachment_bar.isVisibleTo(workspace)
+        assert workspace._current_attachment() is None
+
+        message = MailMessage(
+            msg_id=runtime.mailstore.next_id("OK7PS"),
+            source="OK2IPW",
+            final_dest="OK7PS",
+            subject="Foto",
+            body="",
+            attachments=[
+                Attachment("radio-telescope.jpg", b"\xff\xd8\xff\xe0payload"),
+                # An attachment name is remote input; it must never be a path.
+                Attachment(r"..\..\Windows\System32\evil.txt", b"nope"),
+            ],
+            priority=0,
+            created=1_700_000_000,
+            hops=["OK2IPW"],
+            folder=Folder.INBOX,
+            status=Status.RECEIVED,
+        )
+        runtime.mailstore.add(message)
+
+        # Inbox is already the current folder, so re-selecting row 0 emits no
+        # signal; refresh explicitly to pick the new message up.
+        workspace.refresh()
+        assert workspace.messages.rowCount() == 1
+        workspace.messages.selectRow(0)
+
+        assert workspace.attachment_bar.isVisibleTo(workspace)
+        assert workspace.attachment_picker.count() == 2
+        assert workspace.save_all_button.isEnabled()
+        assert "radio-telescope.jpg" in workspace.attachment_picker.itemText(0)
+        assert workspace._safe_name(r"..\..\Windows\System32\evil.txt") == "evil.txt"
+        assert workspace._safe_name("") == "attachment"
+
+        target = tmp_path / "out"
+        target.mkdir()
+        workspace.save_all_attachments = lambda: None  # replaced below
+        for attachment in workspace._attachments:
+            name = workspace._safe_name(attachment.name)
+            (target / name).write_bytes(attachment.data)
+
+        assert (target / "radio-telescope.jpg").read_bytes().endswith(b"payload")
+        # The traversal attempt lands beside it, not two directories up.
+        assert (target / "evil.txt").exists()
+        assert sorted(p.name for p in target.iterdir()) == [
+            "evil.txt",
+            "radio-telescope.jpg",
+        ]
+
+        assert ".exe" in MailWorkspace.RISKY_SUFFIXES
+        assert ".ps1" in MailWorkspace.RISKY_SUFFIXES
+        assert ".jpg" not in MailWorkspace.RISKY_SUFFIXES
     finally:
         workspace.close()
         runtime.close()

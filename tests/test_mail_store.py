@@ -1,3 +1,5 @@
+import io
+import zipfile
 from pathlib import Path
 
 from guardian.message import Attachment, Folder, MailMessage, MessageStore, Status
@@ -29,6 +31,53 @@ def test_mail_bundle_round_trip_preserves_transferred_content() -> None:
     assert restored.subject == original.subject
     assert restored.body == original.body
     assert restored.attachments == original.attachments
+
+
+def test_hostile_attachment_names_survive_the_bundle_without_escaping_it() -> None:
+    # An attachment name is peer input. Used raw it went straight into the zip
+    # path, where it escaped the archive for anything calling extractall() and
+    # failed to round-trip -- the attachment was silently lost.
+    mail = MailMessage(
+        msg_id=7,
+        source="OK2IPW",
+        final_dest="OK7PS",
+        attachments=[
+            Attachment(r"..\..\Windows\System32\evil.txt", b"nope"),
+            Attachment("../../../etc/passwd", b"also nope"),
+            Attachment("photo.jpg", b"jpeg"),
+            Attachment("", b"unnamed"),
+        ],
+    )
+
+    restored = MailMessage.from_bundle(mail.to_bundle())
+
+    assert len(restored.attachments) == 4
+    names = [a.name for a in restored.attachments]
+    assert names == ["evil.txt", "passwd", "photo.jpg", "attachment"]
+    assert not any("/" in name or "\\" in name for name in names)
+    assert {a.name: a.data for a in restored.attachments}["photo.jpg"] == b"jpeg"
+
+    with zipfile.ZipFile(io.BytesIO(mail.to_bundle())) as archive:
+        for entry in archive.namelist():
+            assert ".." not in entry
+            assert not entry.startswith("/")
+
+
+def test_attachments_that_sanitise_alike_stay_distinguishable() -> None:
+    mail = MailMessage(
+        msg_id=8,
+        source="OK2IPW",
+        final_dest="OK7PS",
+        attachments=[
+            Attachment("a/report.pdf", b"first"),
+            Attachment("b/report.pdf", b"second"),
+        ],
+    )
+
+    restored = MailMessage.from_bundle(mail.to_bundle())
+
+    assert [a.name for a in restored.attachments] == ["report.pdf", "report-2.pdf"]
+    assert [a.data for a in restored.attachments] == [b"first", b"second"]
 
 
 def test_store_persists_index_bundle_and_status(tmp_path: Path) -> None:

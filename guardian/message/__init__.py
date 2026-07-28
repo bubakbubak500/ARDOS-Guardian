@@ -6,7 +6,20 @@ VARA P2P; the MessageStore persists messages in folders (inbox / outbox / sent
 / transit) so they survive restarts and can wait for a hop to become reachable.
 """
 
-from .mail import Attachment, MailMessage, Folder, Status
+from .mail import (
+    Attachment,
+    MailMessage,
+    Folder,
+    Status,
+    safe_attachment_name,
+)
 from .store import MessageStore
 
-__all__ = ["Attachment", "MailMessage", "Folder", "Status", "MessageStore"]
+__all__ = [
+    "Attachment",
+    "MailMessage",
+    "Folder",
+    "Status",
+    "MessageStore",
+    "safe_attachment_name",
+]

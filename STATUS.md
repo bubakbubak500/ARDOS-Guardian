@@ -206,10 +206,26 @@ and polish.
 1. **On-air control channel** — Net tab → audio devices + control channel
    "audio": loopback-cable test (TX into RX), then on-air with a real rig. Add
    RX level/squelch meters; confirm PTT keys via the radio driver.
-2. **Live `vara_p2p`** — the TCP-pair lifecycle, post-write `BUFFER > 0`
-   ingestion proof, `BUFFER 0` drain-before-disconnect ordering, early peer
-   close handling, and conservative transfer timeouts are covered in software;
-   verify the complete sequence between two stations on air.
+2. ~~**Live `vara_p2p`**~~ — **DONE 2026-07-28.** First successful two-station
+   on-air transfer, OK7PS ↔ OK2IPW on 145.2375 MHz FM, IC-705 both ends. A
+   370-byte message went out in 14 s over the primary `BUFFER`-drain path
+   (`RF queue drained` → `transmitted and VARA link closed` → end-to-end
+   `DELIVERED`), and OK2IPW's 362-byte reply came back the same way. VARA
+   stepped 566 → 1188 → 2390 bps as it moved real data.
+
+   What had blocked it was Guardian's VARA session setup, not RF. Checked
+   against *VARA Protocol Native TNC Commands* (EA5HVK, 2025-10-10): Guardian
+   sent `LISTEN OFF` immediately before `CONNECT`, which the reference warns
+   "will cause a disconnection if it is received in the middle of a VARA
+   connection". The link came up at RF level but the port 8301 bridge never
+   attached — no `BUFFER` notification ever arrived, and VARA idled at a fixed
+   1.87 s keying cycle with nothing to send. Fixed in 0.6.20 together with
+   `CHAT OFF` (bounds VARA's idle loops) and re-enabled `COMPRESSION TEXT`;
+   the three went out at once, so the individual contribution is not isolated.
+
+   Diagnostics gained `buffer_reports`, `ptt_keyings`, `tx_bitrate_bps`,
+   `rejected_commands`, `transport_lost` and data-socket health — a zero
+   `buffer_reports` is the fastest way to spot this class of fault again.
 3. **Channel scanning on a real radio** — verify tune/mode via rigctld; wire an
    activity threshold from the S-meter.
 

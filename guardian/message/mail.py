@@ -14,6 +14,7 @@ import io
 import json
 import zipfile
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 BUNDLE_VERSION = 1
 
@@ -41,6 +42,35 @@ class Status:
     WAITING_PICKUP = "waiting"   # in transit, awaiting onward hop
     FORWARDED = "forwarded"      # relayed onward
     FAILED = "failed"
+
+
+def safe_attachment_name(name: str) -> str:
+    """Reduce a peer-supplied attachment name to a bare, safe filename.
+
+    Attachment names arrive from another station.  Unchecked they go straight
+    into the bundle's zip paths, where "..\\..\\evil.txt" both escapes the
+    archive for anything that extracts it and fails to round-trip back through
+    from_bundle(), silently losing the attachment.
+    """
+    cleaned = PurePosixPath(str(name).replace("\\", "/")).name.strip()
+    if cleaned in ("", ".", ".."):
+        return "attachment"
+    return cleaned
+
+
+def _unique_name(name: str, taken: set[str]) -> str:
+    """Keep two attachments that sanitise to the same name distinguishable."""
+    if name not in taken:
+        taken.add(name)
+        return name
+    stem, dot, suffix = name.rpartition(".")
+    base, extension = (stem, f".{suffix}") if dot else (name, "")
+    index = 2
+    while f"{base}-{index}{extension}" in taken:
+        index += 1
+    unique = f"{base}-{index}{extension}"
+    taken.add(unique)
+    return unique
 
 
 @dataclass
@@ -84,6 +114,11 @@ class MailMessage:
 
     # ------------------------------------------------------------------ #
     def to_bundle(self) -> bytes:
+        taken: set[str] = set()
+        names = [
+            _unique_name(safe_attachment_name(a.name), taken)
+            for a in self.attachments
+        ]
         manifest = {
             "v": BUNDLE_VERSION,
             "msg_id": self.msg_id,
@@ -93,14 +128,14 @@ class MailMessage:
             "priority": self.priority,
             "created": self.created,
             "hops": self.hops,
-            "attachments": [a.name for a in self.attachments],
+            "attachments": names,
         }
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("manifest.json", json.dumps(manifest))
             zf.writestr("body.txt", self.body.encode("utf-8"))
-            for a in self.attachments:
-                zf.writestr(f"att/{a.name}", a.data)
+            for name, a in zip(names, self.attachments):
+                zf.writestr(f"att/{name}", a.data)
         return buf.getvalue()
 
     @classmethod
@@ -109,10 +144,14 @@ class MailMessage:
             manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
             body = zf.read("body.txt").decode("utf-8", errors="replace") if "body.txt" in zf.namelist() else ""
             atts = []
+            entries = set(zf.namelist())
+            # Never trust the manifest: sanitise again on the way in, so a
+            # hand-crafted bundle cannot steer a name back out of att/.
             for name in manifest.get("attachments", []):
-                arc = f"att/{name}"
-                if arc in zf.namelist():
-                    atts.append(Attachment(name=name, data=zf.read(arc)))
+                safe = safe_attachment_name(name)
+                arc = f"att/{safe}"
+                if arc in entries:
+                    atts.append(Attachment(name=safe, data=zf.read(arc)))
         return cls(
             msg_id=int(manifest.get("msg_id", 0)),
             source=manifest.get("source", ""),

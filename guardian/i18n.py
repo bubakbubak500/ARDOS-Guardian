@@ -210,6 +210,39 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     ),
     "mail.no_subject": ("(no subject)", "(bez předmětu)"),
     "mail.none": ("none", "žádné"),
+    "mail.attachment_open": ("Open", "Otevřít"),
+    "mail.attachment_save": ("Save as…", "Uložit jako…"),
+    "mail.attachment_save_all": ("Save all…", "Uložit vše…"),
+    "mail.attachment_saved": (
+        "Saved {name} to {path}.",
+        "Uloženo {name} do {path}.",
+    ),
+    "mail.attachment_saved_all": (
+        "Saved {count} attachments to {path}.",
+        "Uloženo {count} příloh do {path}.",
+    ),
+    "mail.attachment_save_error": (
+        "Could not save {name}: {error}",
+        "Nepodařilo se uložit {name}: {error}",
+    ),
+    "mail.attachment_open_error": (
+        "Windows could not open {name}. Save it and open it yourself.",
+        "Windows nedokázal otevřít {name}. Uložte jej a otevřete ručně.",
+    ),
+    "mail.attachment_choose_folder": (
+        "Choose a folder for the attachments",
+        "Vyberte složku pro přílohy",
+    ),
+    "mail.attachment_risky": (
+        "{name} is a program or script. Opening it runs code that arrived over "
+        "the radio from {source}. Open it anyway?",
+        "{name} je program nebo skript. Otevřením spustíte kód, který přišel "
+        "rádiem od {source}. Přesto otevřít?",
+    ),
+    "mail.attachment_risky_title": (
+        "Executable attachment",
+        "Spustitelná příloha",
+    ),
     "mail.not_found": ("(message not found)", "(zpráva nebyla nalezena)"),
     "status.draft": ("Draft", "Koncept"),
     "status.queued": ("Queued", "Ve frontě"),
