@@ -47,6 +47,136 @@ def test_idle_operations_never_transmit_and_keep_mail_queued(tmp_path) -> None:
         workers.close(wait=True)
 
 
+def _operations(tmp_path, **overrides) -> tuple[Operations, WorkerPool, MessageStore]:
+    config = StationConfig(callsign="OK7PS", radio_backend="none", **overrides)
+    workers = WorkerPool(max_workers=1)
+    mailstore = MessageStore(tmp_path / "mail")
+    operations = Operations(
+        config,
+        EventBus(),
+        SnapshotStore(),
+        workers,
+        mailstore,
+        RouteTable(),
+        HeardStations(),
+    )
+    return operations, workers, mailstore
+
+
+def test_beacon_and_auto_delivery_stay_silent_without_a_control_channel(
+    tmp_path,
+) -> None:
+    # Both behaviours key the radio with no operator asking. Neither may fire
+    # while the control channel is down -- there is nothing to transmit on.
+    operations, workers, mailstore = _operations(
+        tmp_path, beacon_enabled=True, beacon_interval=15.0, auto_deliver=True
+    )
+    sent = []
+    operations.net.send_beacon = lambda: sent.append("beacon")
+    operations.heard.record("OK1AAA", 1_000.0)
+    mailstore.add(
+        MailMessage(
+            msg_id=1,
+            source="OK7PS",
+            final_dest="OK1AAA",
+            body="waiting",
+            folder=Folder.OUTBOX,
+            status=Status.QUEUED,
+        )
+    )
+    try:
+        assert operations.audio_transport is None
+        for _ in range(5):
+            operations.tick()
+        assert sent == []
+        assert mailstore.get(1).status == Status.QUEUED
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_the_beacon_switch_actually_beacons_on_its_interval(tmp_path) -> None:
+    # beacon_enabled was a dead checkbox until 0.6.27: send_beacon() existed
+    # but nothing ever called it.
+    operations, workers, _ = _operations(
+        tmp_path, beacon_enabled=True, beacon_interval=60.0
+    )
+    sent = []
+    operations.net.send_beacon = lambda: sent.append("beacon")
+    operations.audio_transport = SimpleNamespace(pump=lambda: 0)
+    try:
+        operations._tick_beacon(1_000.0)
+        assert sent == ["beacon"]
+
+        operations._tick_beacon(1_030.0)      # inside the interval
+        assert sent == ["beacon"]
+
+        operations._tick_beacon(1_061.0)      # past it
+        assert len(sent) == 2
+
+        operations.config.beacon_enabled = False
+        operations._tick_beacon(2_000.0)
+        assert len(sent) == 2
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_auto_delivery_waits_for_the_next_hop_to_be_heard(tmp_path) -> None:
+    operations, workers, mailstore = _operations(tmp_path, auto_deliver=True)
+    attempts = []
+    operations.send_queued = lambda msg_id: attempts.append(msg_id) or True
+    operations.audio_transport = SimpleNamespace(pump=lambda: 0)
+    for msg_id, dest, status in (
+        (1, "OK1AAA", Status.QUEUED),
+        (2, "OK9XXX", Status.QUEUED),
+        (3, "OK1AAA", Status.FAILED),
+    ):
+        mailstore.add(
+            MailMessage(
+                msg_id=msg_id,
+                source="OK7PS",
+                final_dest=dest,
+                body="waiting",
+                folder=Folder.OUTBOX,
+                status=status,
+            )
+        )
+    try:
+        # Nobody heard yet: nothing goes out.
+        operations._tick_auto_deliver(1_000.0)
+        assert attempts == []
+
+        operations.heard.record("OK1AAA", 1_100.0)
+        operations._tick_auto_deliver(1_100.0)
+        assert attempts == [1]
+
+        # #2's hop is still unheard and #3 failed, so the operator owns it.
+        operations._tick_auto_deliver(1_200.0)
+        assert attempts == [1]
+
+        operations.config.auto_deliver = False
+        operations.heard.record("OK9XXX", 1_300.0)
+        operations._tick_auto_deliver(1_300.0)
+        assert attempts == [1]
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_hf_bandwidth_is_only_sent_in_hf_mode(tmp_path) -> None:
+    config = StationConfig(callsign="OK7PS", radio_backend="none")
+
+    assert config.vara_hf_bandwidth == "BW2300"
+    config.apply_vara_mode("HF")
+    assert config.vara_mode == "HF"
+    # FM has no bandwidth command in VARA's reference; the setting is HF-only.
+    config.apply_vara_mode("FM")
+    assert config.vara_hf_bandwidth == "BW2300"
+
+
 def test_both_payload_modes_use_the_existing_backend_factory(tmp_path) -> None:
     for payload_backend in ("vara_p2p",):
         config = StationConfig(

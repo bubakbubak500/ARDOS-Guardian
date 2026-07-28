@@ -90,6 +90,9 @@ class StationConfig:
     vara_hf_data_port: int = 8301
     vara_fm_path: str = ""           # optional explicit VARAFM.exe location
     vara_hf_path: str = ""           # optional explicit VARA.exe location
+    # VARA HF only. BW2300 is VARA's own default; BW500 is the narrow mode for
+    # poor conditions, BW2750 the tactical one. Both stations must agree.
+    vara_hf_bandwidth: str = "BW2300"   # "BW500" | "BW2300" | "BW2750"
 
     # Control-burst modem: "auto" picks AFSK1200 for FM, MFSK16 for HF.
     control_modem: str = "auto"       # "auto" | "afsk1200" | "mfsk16"

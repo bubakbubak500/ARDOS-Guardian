@@ -411,6 +411,28 @@ class SettingsDialog(QDialog):
         self.control_modem.setCurrentIndex(
             max(0, self.control_modem.findData(self.config.control_modem))
         )
+        # VARA HF only; the reference lists no bandwidth command for FM, so the
+        # row is hidden in FM mode rather than sending something VARA rejects.
+        self.vara_hf_bandwidth = QComboBox()
+        self.vara_hf_bandwidth.addItem(
+            dual("2300 Hz — standard (default)", "2300 Hz — standardní (výchozí)"),
+            "BW2300",
+        )
+        self.vara_hf_bandwidth.addItem(
+            dual("500 Hz — narrow", "500 Hz — úzké"), "BW500"
+        )
+        self.vara_hf_bandwidth.addItem(
+            dual("2750 Hz — tactical", "2750 Hz — taktické"), "BW2750"
+        )
+        self.vara_hf_bandwidth.setCurrentIndex(
+            max(0, self.vara_hf_bandwidth.findData(self.config.vara_hf_bandwidth))
+        )
+        self.vara_hf_bandwidth.setToolTip(dual(
+            "Both stations must agree. Narrower is slower but survives worse "
+            "conditions and fits a crowded band.",
+            "Obě stanice se musí shodnout. Užší je pomalejší, ale snese horší "
+            "podmínky a vejde se do obsazeného pásma.",
+        ))
         self.vara_host_ptt = QCheckBox(dual(
             "Let Guardian key the radio for VARA",
             "Klíčovat rádio pro VARA prostřednictvím Guardianu",
@@ -431,9 +453,21 @@ class SettingsDialog(QDialog):
         form.addRow(dual("VARA HF command port", "Příkazový port VARA HF"), self.vara_hf_cmd)
         form.addRow(dual("VARA HF data port", "Datový port VARA HF"), self.vara_hf_data)
         form.addRow(dual("VARA HF executable", "Program VARA HF"), self.vara_hf_path)
+        self.vara_hf_bandwidth_label = QLabel(
+            dual("VARA HF bandwidth", "Šířka pásma VARA HF")
+        )
+        form.addRow(self.vara_hf_bandwidth_label, self.vara_hf_bandwidth)
+        self.vara_mode.currentTextChanged.connect(self._sync_bandwidth_row)
+        self._sync_bandwidth_row(self.vara_mode.currentText())
         form.addRow(dual("Control-burst modem", "Modem řídicích rámců"), self.control_modem)
 
         form.addRow(self.vara_host_ptt)
+
+    def _sync_bandwidth_row(self, mode: str) -> None:
+        """Bandwidth is a VARA HF command; hide it when the station is on FM."""
+        visible = mode.upper() == "HF"
+        self.vara_hf_bandwidth.setVisible(visible)
+        self.vara_hf_bandwidth_label.setVisible(visible)
 
     def _build_network(self) -> None:
         form = self._page(
@@ -585,6 +619,7 @@ class SettingsDialog(QDialog):
         cfg.vara_hf_path = self.vara_hf_path.text()
         cfg.payload_backend = self.payload_backend.currentData()
         cfg.control_modem = self.control_modem.currentData()
+        cfg.vara_hf_bandwidth = self.vara_hf_bandwidth.currentData()
         cfg.vara_host_ptt = self.vara_host_ptt.isChecked()
         cfg.apply_vara_mode(self.vara_mode.currentText())
         cfg.default_ttl = self.default_ttl.value()

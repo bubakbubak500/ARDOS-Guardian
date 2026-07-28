@@ -104,6 +104,12 @@ fallback for when VARA reports no `BITRATE`; the real rate is parsed and used.
   two VARA flavours cannot run at once until one pair is changed.
 - **Multi-hop relay on air.** Only the two-station direct case has flown; the
   A→B→C chain is loopback-tested only.
+- **Presence beacon and auto-delivery.** Both were dead switches until 0.6.27
+  (`send_beacon()` had no caller; `auto_deliver` had no consumer at all despite
+  defaulting to on). Now wired and unit-tested, never run on air. They are the
+  only two behaviours that key the radio without an operator asking, so they
+  are gated on a live control channel, no session in flight and no payload
+  transfer holding the codec.
 - Channel scanning against a physical radio (tune/mode via rigctld).
 - MFSK-16 over a real HF path (bit-sync is tuned for clean audio).
 
@@ -271,17 +277,13 @@ and polish.
   instead and deriving each station's table locally makes one shared file
   correct everywhere. Written up in `docs/MESH_ROUTING.md`; worth building at
   four or five stations, not at two.
-- **`BW500` in settings** (VARA HF only). Narrow 500 Hz mode for poor
-  conditions or a crowded band; default `BW2300` is what VARA uses today. Both
-  ends must agree, so it is an operator setting, not something to infer.
 - **`COMPRESSION FILES` for binary attachments.** The reference marks it
   "designed for File transfers" against `TEXT`'s Huffman. Unmeasured, and a
   JPEG is already compressed, so the gain may be nil. Whether the setting is
   sender-side only or must match at both ends is **not established** — verify
   before shipping it.
-- **`CLEANTXBUFFER`** became available with the VARA licence (registered users
-  only). It would let an aborted transfer clear VARA's queue instead of
-  leaving stale bytes for the next session.
+- **`CLEANTXBUFFER`** — rejected 2026-07-28. Registered-user only, so it
+  cannot be relied on across a net of mixed licences.
 
 **Robustness / polish**
 - MFSK soft-decision Viterbi + PLL bit-sync for real fading (current sync is

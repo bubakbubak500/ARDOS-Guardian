@@ -37,6 +37,9 @@ from .vara import VaraClient
 class Operations:
     """Own hardware objects while exposing only non-blocking UI commands."""
 
+    # Auto-delivery sweeps this often; a heard peer is not going anywhere.
+    _AUTO_DELIVER_INTERVAL = 10.0
+
     def __init__(
         self,
         config: StationConfig,
@@ -69,6 +72,10 @@ class Operations:
         self._last_radio_poll = 0.0
         self._stored_inbound: set[int] = set()
         self._qsy_previous: int | None = None
+        self._last_beacon = 0.0
+        self._last_auto_deliver = 0.0
+        # Sent once per run so a peer that stays heard is not hammered.
+        self._auto_delivered: set[int] = set()
         self._vara_process: subprocess.Popen | None = None
         self.net = self._build_net(NullTransport())
 
@@ -224,6 +231,8 @@ class Operations:
                 self.vara.send_command("COMPRESSION TEXT")
                 self.vara.send_command("CHAT OFF")
                 if self.config.vara_mode.upper() == "HF":
+                    # Bandwidth is a VARA HF command; FM would answer WRONG.
+                    self.vara.send_command(self.config.vara_hf_bandwidth)
                     # HF/SAT only, and the reference is explicit: "This command
                     # must be used for P2P connections, not for Gateways
                     # connections."  Without it VARA HF keeps the 4.0 s
@@ -453,9 +462,81 @@ class Operations:
         if self.audio_transport is not None:
             self.audio_transport.pump()
         self.net.tick(now)
+        self._tick_beacon(now)
+        self._tick_auto_deliver(now)
         self.request_radio_poll(now=now)
         self._update_vara_snapshot()
         self._update_network_snapshot(now)
+
+    def _net_idle(self) -> bool:
+        """True when it is safe for Guardian to start transmitting by itself.
+
+        Both automatic behaviours below key the radio without an operator
+        asking, so they only run with a live control channel, nothing already
+        in flight, and no payload transfer holding the codec.
+        """
+        if self.audio_transport is None or self._payload_active.is_set():
+            return False
+        return not any(
+            not message.state.terminal for message in self.net.sessions.values()
+        )
+
+    def _tick_beacon(self, now: float) -> None:
+        """Announce presence so peers can hear this station and route to it."""
+        if not self.config.beacon_enabled or not self._net_idle():
+            return
+        interval = max(15.0, float(self.config.beacon_interval))
+        if now - self._last_beacon < interval:
+            return
+        self._last_beacon = now
+        try:
+            self.net.send_beacon()
+        except Exception as exc:  # noqa: BLE001
+            self._log(
+                dual(f"Beacon failed: {exc}", f"Maják selhal: {exc}"),
+                LogLevel.WARNING,
+                source="network",
+            )
+            return
+        self._log(
+            dual("Presence beacon sent.", "Odeslán maják přítomnosti."),
+            source="network",
+        )
+
+    def _tick_auto_deliver(self, now: float) -> None:
+        """Send waiting mail as soon as its next hop is actually heard.
+
+        Only one message per sweep, and only to a station heard right now --
+        the point is to catch a peer coming on air, not to retry blindly.
+        """
+        if not self.config.auto_deliver or not self._net_idle():
+            return
+        if now - self._last_auto_deliver < self._AUTO_DELIVER_INTERVAL:
+            return
+        self._last_auto_deliver = now
+        heard = {station.callsign for station in self.heard.active(now)}
+        if not heard:
+            return
+        for folder in (Folder.OUTBOX, Folder.TRANSIT):
+            for meta in self.mailstore.list(folder):
+                if meta.get("status") == Status.FAILED:
+                    continue          # a failure is the operator's to retry
+                msg_id = meta["msg_id"]
+                if msg_id in self._auto_delivered:
+                    continue
+                hop = meta.get("next_hop") or meta.get("final_dest") or ""
+                if hop.upper() not in heard:
+                    continue
+                self._auto_delivered.add(msg_id)
+                self._log(
+                    dual(
+                        f"{hop} is heard — sending waiting message #{msg_id}.",
+                        f"{hop} je slyšet — odesílám čekající zprávu #{msg_id}.",
+                    ),
+                    source="network",
+                )
+                self.send_queued(msg_id)
+                return
 
     def request_radio_poll(
         self,
