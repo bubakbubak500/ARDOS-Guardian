@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from PySide6.QtGui import QValidator
-from PySide6.QtWidgets import QLineEdit, QSpinBox
+from PySide6.QtWidgets import (
+    QLineEdit,
+    QSpinBox,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+    QTableWidget,
+)
 
 
 class UppercaseLineEdit(QLineEdit):
@@ -56,3 +63,30 @@ class FrequencySpinBox(QSpinBox):
         if 0 <= value <= self.maximum() / 1_000_000:
             return QValidator.State.Acceptable, text, pos
         return QValidator.State.Invalid, text, pos
+
+
+class _RowFocusDelegate(QStyledItemDelegate):
+    """Drop the per-cell focus rectangle so only the row highlight remains."""
+
+    def paint(self, painter, option, index) -> None:
+        cleaned = QStyleOptionViewItem(option)
+        cleaned.state &= ~QStyle.StateFlag.State_HasFocus
+        super().paint(painter, cleaned, index)
+
+
+class RowTable(QTableWidget):
+    """A read-only table that marks one whole row instead of single cells."""
+
+    def __init__(self, rows: int, columns: int, parent=None) -> None:
+        super().__init__(rows, columns, parent)
+        self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.setItemDelegate(_RowFocusDelegate(self))
+        self.setShowGrid(False)
+        self.setWordWrap(False)
+        self.setCornerButtonEnabled(False)
+        self.setAlternatingRowColors(True)
+        self.verticalHeader().hide()
+        self.verticalHeader().setDefaultSectionSize(24)
+        self.horizontalHeader().setHighlightSections(False)

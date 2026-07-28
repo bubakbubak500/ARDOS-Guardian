@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTabWidget,
-    QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -21,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from ..routing import Route
 from ..i18n import dual, tr
-from .inputs import FrequencySpinBox, UppercaseLineEdit
+from .inputs import FrequencySpinBox, RowTable, UppercaseLineEdit
 from .runtime import ShellRuntime
 
 
@@ -43,7 +42,7 @@ class NetworkWorkspace(QWidget):
     def _routes_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        self.routes_table = QTableWidget(0, 5)
+        self.routes_table = RowTable(0, 5)
         self.routes_table.setHorizontalHeaderLabels(
             [
                 tr("network.destination"),
@@ -52,9 +51,6 @@ class NetworkWorkspace(QWidget):
                 tr("network.frequency"),
                 tr("network.mode"),
             ]
-        )
-        self.routes_table.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
         )
         route_header = self.routes_table.horizontalHeader()
         route_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -99,7 +95,7 @@ class NetworkWorkspace(QWidget):
         )
         detail.setObjectName("Metadata")
         layout.addWidget(detail)
-        self.heard_table = QTableWidget(0, 5)
+        self.heard_table = RowTable(0, 5)
         self.heard_table.setHorizontalHeaderLabels(
             [
                 tr("network.callsign"),

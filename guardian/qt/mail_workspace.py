@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
-    QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -32,7 +31,7 @@ from ..i18n import language, tr
 from ..message import Attachment, Folder, MailMessage, Status
 from ..message.forms import FORMS
 from ..protocol import Priority
-from .inputs import UppercaseLineEdit
+from .inputs import RowTable, UppercaseLineEdit
 from .runtime import ShellRuntime
 
 
@@ -284,12 +283,7 @@ class MailWorkspace(QWidget):
         splitter.addWidget(self.folders)
 
         content = QSplitter(Qt.Orientation.Vertical)
-        self.messages = QTableWidget(0, 5)
-        self.messages.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
-        )
-        self.messages.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.messages.verticalHeader().hide()
+        self.messages = RowTable(0, 5)
         self.messages.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch
         )
@@ -345,7 +339,14 @@ class MailWorkspace(QWidget):
     def _select_folder(self, row: int) -> None:
         if 0 <= row < len(self.FOLDER_KEYS):
             self.folder = self.FOLDER_KEYS[row][1]
+            self._clear_selection()
             self.refresh()
+
+    def _clear_selection(self) -> None:
+        self.selected_id = None
+        self.reader.clear()
+        self.reply_button.setEnabled(False)
+        self.send_button.setEnabled(False)
 
     def refresh(self) -> None:
         counts = self.runtime.mailstore.counts()
@@ -356,28 +357,41 @@ class MailWorkspace(QWidget):
                 f"{tr(key)} ({counts.get(folder, 0)}{suffix})"
             )
         rows = self.runtime.mailstore.list(self.folder)
-        self.messages.setRowCount(len(rows))
-        for row, metadata in enumerate(rows):
-            peer = (
-                metadata["source"]
-                if self.folder == Folder.INBOX
-                else metadata["final_dest"]
-            )
-            values = (
-                peer,
-                metadata.get("subject") or tr("mail.no_subject"),
-                tr(f"status.{metadata.get('status', '')}"),
-                str(metadata.get("att", 0)),
-                f"{metadata.get('size', 0)} B",
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setData(Qt.ItemDataRole.UserRole, metadata["msg_id"])
-                if not metadata.get("read", True):
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                self.messages.setItem(row, column, item)
+        # Rebuilding the rows drops the selection, so restore it afterwards
+        # instead of leaving the operator with a bare focus rectangle.
+        selected_row = -1
+        self.messages.blockSignals(True)
+        try:
+            self.messages.setRowCount(len(rows))
+            for row, metadata in enumerate(rows):
+                peer = (
+                    metadata["source"]
+                    if self.folder == Folder.INBOX
+                    else metadata["final_dest"]
+                )
+                values = (
+                    peer,
+                    metadata.get("subject") or tr("mail.no_subject"),
+                    tr(f"status.{metadata.get('status', '')}"),
+                    str(metadata.get("att", 0)),
+                    f"{metadata.get('size', 0)} B",
+                )
+                if metadata["msg_id"] == self.selected_id:
+                    selected_row = row
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    item.setData(Qt.ItemDataRole.UserRole, metadata["msg_id"])
+                    if not metadata.get("read", True):
+                        font = item.font()
+                        font.setBold(True)
+                        item.setFont(font)
+                    self.messages.setItem(row, column, item)
+            if selected_row >= 0:
+                self.messages.selectRow(selected_row)
+            else:
+                self.messages.clearSelection()
+        finally:
+            self.messages.blockSignals(False)
 
     def _open_selected(self) -> None:
         selected = self.messages.selectedItems()

@@ -219,6 +219,23 @@ QTreeWidget {{
     border: 1px solid {tokens.panel_border};
     selection-background-color: {tokens.selected};
 }}
+QTableView {{
+    background: {tokens.surface_1};
+    alternate-background-color: {tokens.surface_2};
+    border: 1px solid {tokens.panel_border};
+    gridline-color: transparent;
+    selection-background-color: {tokens.selected};
+    selection-color: {tokens.text_primary};
+    outline: none;
+}}
+QTableView::item {{
+    border: 0;
+    padding: {tokens.spacing_1}px {tokens.spacing_2}px;
+}}
+QTableView::item:selected, QTableView::item:selected:!active {{
+    background: {tokens.selected};
+    color: {tokens.text_primary};
+}}
 QTabWidget::pane {{
     background: {tokens.surface_1};
     border: 1px solid {tokens.panel_border};

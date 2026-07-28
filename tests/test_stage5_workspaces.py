@@ -2,7 +2,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QAbstractItemView, QApplication
 
 from guardian.message import Folder, MessageStore
 from guardian.qt.mail_workspace import ComposeDialog, MailWorkspace
@@ -40,6 +41,81 @@ def test_compose_queues_real_bundle_and_mail_workspace_reads_it(tmp_path) -> Non
         assert workspace.messages.rowCount() == 1
     finally:
         dialog.close()
+        workspace.close()
+        runtime.close()
+
+
+def test_mail_list_marks_whole_rows_and_keeps_them_selected(tmp_path) -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.mailstore = MessageStore(tmp_path / "mail")
+    runtime.config.callsign = "OK7PS"
+    workspace = MailWorkspace(runtime)
+    try:
+        for index in range(2):
+            dialog = ComposeDialog(runtime)
+            dialog.destination.setText("OK2IPW")
+            dialog.subject.setText(f"Message {index}")
+            dialog.body.setPlainText("Body.")
+            dialog._queue()
+            dialog.close()
+
+        table = workspace.messages
+        assert (
+            table.selectionBehavior()
+            == QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        assert (
+            table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        assert not table.showGrid()
+
+        workspace.folders.setCurrentRow(1)
+        assert workspace.selected_id is None
+        assert table.rowCount() == 2
+
+        table.selectRow(1)
+        selected_id = workspace.selected_id
+        assert selected_id is not None
+        columns = sorted(
+            index.column() for index in table.selectionModel().selectedIndexes()
+        )
+        assert columns == [0, 1, 2, 3, 4]
+
+        # Marking the message read rebuilds the table; the row must stay marked.
+        workspace.refresh()
+        assert workspace.selected_id == selected_id
+        selected_rows = table.selectionModel().selectedRows()
+        assert len(selected_rows) == 1
+        row = selected_rows[0].row()
+        assert int(table.item(row, 0).data(Qt.ItemDataRole.UserRole)) == selected_id
+
+        # Switching folders starts from a clean, unselected list.
+        workspace.folders.setCurrentRow(0)
+        assert workspace.selected_id is None
+        assert table.selectionModel().selectedRows() == []
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_network_tables_are_read_only_row_selectors() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.routes = RouteTable()
+    workspace = NetworkWorkspace(runtime)
+    try:
+        for table in (workspace.routes_table, workspace.heard_table):
+            assert (
+                table.selectionBehavior()
+                == QAbstractItemView.SelectionBehavior.SelectRows
+            )
+            assert (
+                table.editTriggers()
+                == QAbstractItemView.EditTrigger.NoEditTriggers
+            )
+            assert not table.showGrid()
+    finally:
         workspace.close()
         runtime.close()
 
