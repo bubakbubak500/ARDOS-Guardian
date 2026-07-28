@@ -522,12 +522,15 @@ class Operations:
                 link_state=state.link_state,
                 last_notification=state.last_notification,
                 tx_buffer_bytes=state.tx_buffer_bytes,
+                buffer_reports=state.buffer_reports,
+                tx_bitrate_bps=state.tx_bitrate_bps,
                 data_bytes_written=state.data_bytes_written,
                 data_bytes_read=state.data_bytes_read,
                 data_socket_generation=state.data_socket_generation,
                 data_local_endpoint=state.data_local_endpoint,
                 data_peer_endpoint=state.data_peer_endpoint,
                 ptt=state.ptt,
+                ptt_keyings=state.ptt_keyings,
                 error=state.error,
             )
         )

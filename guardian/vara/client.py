@@ -41,12 +41,15 @@ class VaraState:
     last_notification: str = ""
     error: str | None = None
     tx_buffer_bytes: int | None = None
+    buffer_reports: int = 0
+    tx_bitrate_bps: int | None = None
     data_bytes_written: int = 0
     data_bytes_read: int = 0
     data_socket_generation: int = 0
     data_local_endpoint: str | None = None
     data_peer_endpoint: str | None = None
     ptt: bool = False
+    ptt_keyings: int = 0
 
 
 class VaraClient:
@@ -66,6 +69,7 @@ class VaraClient:
         self._buffer_nonzero = threading.Event()
         self._last_data_write = 0.0
         self._link_connected_at = 0.0
+        self._last_ptt_activity = 0.0
 
         self.state = VaraState()
         # Callback for asynchronous command-port notifications (UI/log hook).
@@ -211,7 +215,9 @@ class VaraClient:
         self._buffer_reported.clear()
         self._buffer_nonzero.clear()
         self.state.tx_buffer_bytes = None
+        self.state.buffer_reports = 0
         self.state.data_bytes_written = 0
+        self.state.ptt_keyings = 0
 
     def wait_data_ready(self, minimum_connected: float = 1.0) -> None:
         """Let VARA finish its CONNECTED/BREAK transition before port 8301 I/O.
@@ -304,18 +310,48 @@ class VaraClient:
             except OSError:
                 pass
 
-    def wait_link(self, target: str, timeout: float = 30.0) -> bool:
-        """Block until link_state reaches `target` (e.g. 'CONNECTED')."""
-        import time as _t
-        deadline = _t.monotonic() + timeout
-        while _t.monotonic() < deadline:
+    def ptt_quiet_for(self) -> float:
+        """Seconds since VARA last keyed or unkeyed; 0.0 while transmitting."""
+        if self.state.ptt:
+            return 0.0
+        if not self._last_ptt_activity:
+            return float("inf")
+        return time.monotonic() - self._last_ptt_activity
+
+    def wait_link(
+        self,
+        target: str,
+        timeout: float = 30.0,
+        *,
+        ptt_grace: float = 0.0,
+        max_wait: float | None = None,
+    ) -> bool:
+        """Block until link_state reaches `target` (e.g. 'CONNECTED').
+
+        With ptt_grace > 0 the deadline is pushed back for as long as VARA
+        keeps keying the transmitter.  A graceful DISCONNECT puts the queued
+        RF payload on the air *before* closing, and at VARA FM's unregistered
+        566 bps rate that easily outlasts any fixed timeout -- giving up there
+        aborts a transfer that is still being sent.  max_wait bounds the total
+        wait so a stuck modem cannot hold the session open forever.
+        """
+        start = time.monotonic()
+        deadline = start + timeout
+        hard_deadline = None if max_wait is None else start + max_wait
+        while True:
             if self.state.link_state == target:
                 return True
-            if target == "CONNECTED" and self.state.link_state == "DISCONNECTED" \
-                    and _t.monotonic() > deadline - timeout + 1:
-                pass  # keep waiting; DISCONNECTED is the initial state
-            _t.sleep(0.1)
-        return self.state.link_state == target
+            if self._stop.is_set():
+                return False
+            now = time.monotonic()
+            if hard_deadline is not None and now >= hard_deadline:
+                return self.state.link_state == target
+            if now >= deadline:
+                if ptt_grace <= 0 or self.ptt_quiet_for() >= ptt_grace:
+                    return self.state.link_state == target
+                # Still keying: VARA is draining its RF queue, keep waiting.
+                deadline = now + ptt_grace
+            self._stop.wait(0.1)
 
     # --- background notification reader ----------------------------------
     def _reader(self, cmd: socket.socket) -> None:
@@ -366,14 +402,30 @@ class VaraClient:
                 try:
                     value = max(0, int(token))
                     self.state.tx_buffer_bytes = value
+                    self.state.buffer_reports += 1
                     self._buffer_reported.set()
                     if value > 0:
                         self._buffer_nonzero.set()
                     break
                 except ValueError:
                     continue
+        elif upper.startswith("BITRATE"):
+            # e.g. "BITRATE (1)  566 bps TX" -- the rate drives our airtime
+            # estimate, which is the only progress signal an unregistered
+            # VARA FM link gives us.
+            tokens = upper.replace("(", " ").replace(")", " ").split()
+            for index, token in enumerate(tokens):
+                if token == "BPS" and index:
+                    try:
+                        self.state.tx_bitrate_bps = max(0, int(tokens[index - 1]))
+                    except ValueError:
+                        pass
+                    break
         elif upper == "PTT ON" or upper == "PTT OFF":
             self.state.ptt = upper == "PTT ON"
+            self._last_ptt_activity = time.monotonic()
+            if self.state.ptt:
+                self.state.ptt_keyings += 1
             # VARA wants to key/unkey. If a host-PTT hook is wired, Guardian does
             # the actual keying (so VARA needs no COM port of its own).
             if self.on_ptt is not None:

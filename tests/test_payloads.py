@@ -2,9 +2,12 @@ import struct
 from types import SimpleNamespace
 
 from guardian.payload.vara_p2p import (
+    DISCONNECT_TIMEOUT,
     MIN_WIRE_SIZE,
     TRANSFER_TIMEOUT,
     VaraP2PBackend,
+    airtime_for,
+    disconnect_timeout_for,
     encode_envelope,
     transfer_timeout_for,
 )
@@ -22,8 +25,13 @@ class FakeVara:
         self.written = b""
         self.transfer_result = TransferResult.DRAINED
         self.transfer_timeout = None
+        self.closing_timeout = None
         self.state = SimpleNamespace(
-            tx_buffer_bytes=None, data_socket_generation=1
+            tx_buffer_bytes=None,
+            data_socket_generation=1,
+            tx_bitrate_bps=None,
+            data_bytes_read=0,
+            ptt_keyings=0,
         )
 
     def connect_to(self, callsign: str) -> None:
@@ -32,7 +40,16 @@ class FakeVara:
     def listen(self, enabled: bool) -> None:
         self.commands.append(("listen", enabled))
 
-    def wait_link(self, state: str, timeout: float) -> bool:
+    def wait_link(
+        self,
+        state: str,
+        timeout: float,
+        *,
+        ptt_grace: float = 0.0,
+        max_wait: float | None = None,
+    ) -> bool:
+        if state == "DISCONNECTED":
+            self.closing_timeout = timeout
         return state in {"CONNECTED", "DISCONNECTED"}
 
     def abort(self) -> None:
@@ -248,10 +265,10 @@ def test_vara_send_keeps_codec_until_rf_transfer_finishes() -> None:
     events = []
 
     class OrderedVara(FakeVara):
-        def wait_link(self, state: str, timeout: float) -> bool:
+        def wait_link(self, state: str, timeout: float, **kwargs) -> bool:
             if state == "DISCONNECTED":
                 events.append("rf-finished")
-            return super().wait_link(state, timeout)
+            return super().wait_link(state, timeout, **kwargs)
 
     backend = VaraP2PBackend(
         OrderedVara(),
@@ -280,6 +297,69 @@ def test_vara_disconnect_follows_data_handoff_barrier() -> None:
         ("disconnect",)
     )
     assert ("finish-write",) not in vara.commands
+
+
+def test_slow_unregistered_link_gets_more_than_the_flat_disconnect_budget() -> None:
+    # A padded 1024-byte block at VARA FM's unregistered 566 bps rate needs
+    # ~29 s of airtime -- the whole of the old flat 30 s disconnect budget,
+    # leaving nothing for a single ARQ retry, so transfers were aborted while
+    # VARA was still transmitting them.
+    airtime = airtime_for(MIN_WIRE_SIZE, 566)
+    assert airtime > DISCONNECT_TIMEOUT * 0.9
+    assert disconnect_timeout_for(MIN_WIRE_SIZE, 566) > 80.0
+    # A fast registered link must not be slowed down to that budget.
+    assert disconnect_timeout_for(MIN_WIRE_SIZE, 25_000) == DISCONNECT_TIMEOUT
+
+
+def test_degraded_send_budgets_disconnect_from_the_reported_bitrate() -> None:
+    vara = FakeVara()
+    vara.transfer_result = TransferResult.NO_BUFFER_REPORTS
+    vara.state.tx_bitrate_bps = 566
+    logs = []
+    result = []
+
+    VaraP2PBackend(vara, on_log=logs.append)._send(
+        Message(30, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        result.append,
+    )
+
+    assert result == [True]
+    assert vara.closing_timeout == disconnect_timeout_for(MIN_WIRE_SIZE, 566)
+    assert vara.closing_timeout > DISCONNECT_TIMEOUT
+    assert any("566 bps" in line for line in logs)
+
+
+def test_wait_link_holds_the_session_while_vara_keeps_keying() -> None:
+    vara = VaraClient()
+    vara.state.link_state = "CONNECTED"
+    vara._handle_notification("PTT ON")
+
+    # Transmitting: the elapsed timeout must not be treated as a failure yet.
+    assert vara.ptt_quiet_for() == 0.0
+    assert vara.wait_link("DISCONNECTED", 0.01, ptt_grace=0.05, max_wait=0.2) is False
+
+    # Quiet modem: the same wait gives up promptly instead of hanging.
+    vara._handle_notification("PTT OFF")
+    vara._last_ptt_activity -= 60.0
+    assert vara.ptt_quiet_for() > 10.0
+    assert vara.wait_link("DISCONNECTED", 0.01, ptt_grace=0.05) is False
+
+
+def test_vara_bitrate_notification_is_parsed_for_airtime_estimates() -> None:
+    vara = VaraClient()
+    vara._handle_notification("BITRATE (1)  566 bps TX")
+
+    assert vara.state.tx_bitrate_bps == 566
+
+
+def test_vara_counts_keyings_and_buffer_reports_for_diagnostics() -> None:
+    vara = VaraClient()
+    vara.prepare_data_transfer()
+    for notification in ("PTT ON", "PTT OFF", "PTT ON", "BUFFER 128"):
+        vara._handle_notification(notification)
+
+    assert vara.state.ptt_keyings == 2
+    assert vara.state.buffer_reports == 1
 
 
 def test_vara_send_waits_for_connected_link_to_settle_before_data_write() -> None:

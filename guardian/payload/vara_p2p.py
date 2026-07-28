@@ -39,6 +39,16 @@ TRANSFER_TIMEOUT = 120.0
 DISCONNECT_TIMEOUT = 30.0
 _SLOW_LINK_BPS = 300.0
 _TRANSFER_MARGIN = 3.0
+# An unregistered VARA FM link is capped at 566 bps, and its ARQ spends about
+# half the channel on the peer's acknowledgements.  A padded 1024-byte block
+# therefore costs roughly 30 seconds of wall clock -- far more than the fixed
+# 30 s disconnect budget that used to abort transfers mid-flight.
+UNREGISTERED_FM_BPS = 566.0
+_ARQ_DUTY_CYCLE = 0.5
+_AIRTIME_MARGIN = 3.0
+# VARA keys the transmitter about once a second while it drains its RF queue,
+# so ten quiet seconds mean it has genuinely stopped sending.
+PTT_QUIET_SECONDS = 10.0
 
 
 def transfer_timeout_for(wire_bytes: int) -> float:
@@ -46,6 +56,22 @@ def transfer_timeout_for(wire_bytes: int) -> float:
     return max(
         TRANSFER_TIMEOUT,
         wire_bytes * 8 / _SLOW_LINK_BPS * _TRANSFER_MARGIN,
+    )
+
+
+def airtime_for(wire_bytes: int, bitrate_bps: float | None = None) -> float:
+    """Wall-clock seconds VARA needs to put wire_bytes on the air."""
+    rate = bitrate_bps if bitrate_bps and bitrate_bps > 0 else UNREGISTERED_FM_BPS
+    return wire_bytes * 8 / rate / _ARQ_DUTY_CYCLE
+
+
+def disconnect_timeout_for(
+    wire_bytes: int, bitrate_bps: float | None = None
+) -> float:
+    """A graceful DISCONNECT transmits the queue first, so budget for it."""
+    return max(
+        DISCONNECT_TIMEOUT,
+        airtime_for(wire_bytes, bitrate_bps) * _AIRTIME_MARGIN,
     )
 
 
@@ -123,6 +149,11 @@ class VaraP2PBackend(PayloadBackend):
                         f"reported buffer {queued})"
                     )
                     transfer_timeout = transfer_timeout_for(len(envelope))
+                    bitrate = getattr(
+                        self.vara.state, "tx_bitrate_bps", None
+                    )
+                    airtime = airtime_for(len(envelope), bitrate)
+                    closing = disconnect_timeout_for(len(envelope), bitrate)
                     result = self.vara.wait_transfer_complete(transfer_timeout)
                     if result is TransferResult.DRAINED:
                         self.on_log(
@@ -130,9 +161,7 @@ class VaraP2PBackend(PayloadBackend):
                             "disconnecting"
                         )
                         self.vara.disconnect_link()
-                        if self.vara.wait_link(
-                            "DISCONNECTED", DISCONNECT_TIMEOUT
-                        ):
+                        if self._wait_closed(closing):
                             self.on_log(
                                 f"VARA P2P: payload #{msg.msg_id} transmitted "
                                 "and VARA link closed"
@@ -146,14 +175,15 @@ class VaraP2PBackend(PayloadBackend):
                             self._abort_link()
                     elif result is TransferResult.NO_BUFFER_REPORTS:
                         self.on_log(
-                            f"VARA P2P: no usable BUFFER telemetry for payload "
-                            f"#{msg.msg_id}; using degraded command/data barrier"
+                            f"VARA P2P: no BUFFER telemetry for payload "
+                            f"#{msg.msg_id}; holding the link until VARA stops "
+                            f"keying (~{airtime:.0f}s of airtime at "
+                            f"{bitrate or UNREGISTERED_FM_BPS:.0f} bps, "
+                            f"budget {closing:.0f}s)"
                         )
                         self.vara.finish_data_write()
                         self.vara.disconnect_link()
-                        if self.vara.wait_link(
-                            "DISCONNECTED", DISCONNECT_TIMEOUT
-                        ):
+                        if self._wait_closed(closing):
                             self.on_log(
                                 f"VARA P2P: payload #{msg.msg_id} completed "
                                 "without buffer-drain confirmation"
@@ -162,7 +192,8 @@ class VaraP2PBackend(PayloadBackend):
                         else:
                             self.on_log(
                                 f"VARA P2P: transfer #{msg.msg_id} did not "
-                                "finish on the degraded path"
+                                f"finish on the degraded path "
+                                f"({self._keyings()} PTT keyings observed)"
                             )
                             self._abort_link()
                     else:
@@ -194,6 +225,27 @@ class VaraP2PBackend(PayloadBackend):
         except Exception:
             pass
 
+    def _keyings(self) -> int:
+        return int(getattr(self.vara.state, "ptt_keyings", 0) or 0)
+
+    def _wait_closed(self, timeout: float) -> bool:
+        """Await DISCONNECTED, extending while VARA is still keying.
+
+        VARA flushes its RF queue before honouring a graceful DISCONNECT, so a
+        link that is still transmitting has not failed -- it is finishing the
+        job.  Only a modem that has gone quiet is genuinely stuck.
+        """
+        try:
+            return self.vara.wait_link(
+                "DISCONNECTED",
+                timeout,
+                ptt_grace=PTT_QUIET_SECONDS,
+                max_wait=timeout * 2,
+            )
+        except TypeError:
+            # A VARA stand-in without the PTT-aware signature.
+            return self.vara.wait_link("DISCONNECTED", timeout)
+
     def _abort_link(self) -> None:
         """Stop a failed/stale exchange and briefly await RF release."""
         try:
@@ -216,6 +268,7 @@ class VaraP2PBackend(PayloadBackend):
             return
         success = False
         acquired = False
+        read_before = int(getattr(self.vara.state, "data_bytes_read", 0) or 0)
         with self._transfer_lock:
             try:
                 if self.on_acquire:
@@ -271,7 +324,14 @@ class VaraP2PBackend(PayloadBackend):
                     )
                     success = True
             except Exception as exc:  # noqa: BLE001
-                self.on_log(f"VARA P2P receive failed: {exc}")
+                read_now = int(
+                    getattr(self.vara.state, "data_bytes_read", 0) or 0
+                )
+                self.on_log(
+                    f"VARA P2P receive failed: {exc} "
+                    f"({read_now - read_before} payload bytes arrived, "
+                    f"{self._keyings()} PTT keyings observed)"
+                )
             finally:
                 # The sender owns drain-before-disconnect ordering.  Do not
                 # race its final BUFFER 0 by disconnecting from the responder.
