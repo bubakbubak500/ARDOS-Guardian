@@ -154,6 +154,10 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Waiting to send: {count}",
         "Čeká na odeslání: {count}",
     ),
+    "context.outbox_failed": (
+        "Failed, awaiting retry: {count}",
+        "Selhalo, čeká na opakování: {count}",
+    ),
     "context.transit": (
         "Waiting to relay: {count}",
         "Čeká na předání: {count}",

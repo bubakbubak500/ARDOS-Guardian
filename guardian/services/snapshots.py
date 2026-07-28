@@ -50,6 +50,8 @@ class MailboxSnapshot:
     inbox: int = 0
     unread: int = 0
     outbox: int = 0
+    # Of `outbox`, how many are parked after a failed send rather than queued.
+    outbox_failed: int = 0
     transit: int = 0
 
 

@@ -476,8 +476,15 @@ class GuardianMainWindow(QMainWindow):
         context_items = []
         if mailbox.unread:
             context_items.append(tr("context.unread", count=mailbox.unread))
-        if mailbox.outbox:
-            context_items.append(tr("context.outbox", count=mailbox.outbox))
+        # A failed message stays in the outbox so it can be retried, but it is
+        # not waiting to send -- report the two separately.
+        pending = mailbox.outbox - mailbox.outbox_failed
+        if pending > 0:
+            context_items.append(tr("context.outbox", count=pending))
+        if mailbox.outbox_failed:
+            context_items.append(
+                tr("context.outbox_failed", count=mailbox.outbox_failed)
+            )
         if mailbox.transit:
             context_items.append(tr("context.transit", count=mailbox.transit))
         if snapshot.network.active_sessions:

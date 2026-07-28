@@ -33,6 +33,32 @@ def test_mail_bundle_round_trip_preserves_transferred_content() -> None:
     assert restored.attachments == original.attachments
 
 
+def test_a_failed_message_is_not_counted_as_waiting_to_send(tmp_path: Path) -> None:
+    # A failed send parks the message in the outbox for a retry. Counting it
+    # as pending left the station context reading "waiting to send: 1"
+    # indefinitely with nothing actually in flight.
+    store = MessageStore(tmp_path / "mail")
+    for index, status in enumerate((Status.QUEUED, Status.FAILED)):
+        store.add(
+            MailMessage(
+                msg_id=index + 1,
+                source="OK7PS",
+                final_dest="OK2IPW",
+                body="x",
+                folder=Folder.OUTBOX,
+                status=status,
+            )
+        )
+
+    assert store.counts()[Folder.OUTBOX] == 2
+    assert store.awaiting_send() == 1
+    assert store.failed() == 1
+
+    store.set_status(2, status=Status.QUEUED)
+    assert store.awaiting_send() == 2
+    assert store.failed() == 0
+
+
 def test_hostile_attachment_names_survive_the_bundle_without_escaping_it() -> None:
     # An attachment name is peer input. Used raw it went straight into the zip
     # path, where it escaped the archive for anything calling extractall() and

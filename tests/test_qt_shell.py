@@ -89,6 +89,26 @@ def test_station_context_shows_actionable_mail_state(tmp_path) -> None:
         assert "Unread messages: 1" in text
         assert "Waiting to send: 3" in text
         assert window.context_activity.isVisibleTo(window)
+
+        # A failed message stays in the outbox for a retry, but it is not
+        # waiting to send: reporting it as pending left the line reading
+        # "waiting to send: 1" forever with nothing in flight.
+        runtime.snapshots.update(
+            mailbox=MailboxSnapshot(inbox=2, unread=0, outbox=1, outbox_failed=1)
+        )
+        window._refresh()
+        text = window.context_activity.text()
+        assert "Waiting to send" not in text
+        assert "Failed, awaiting retry: 1" in text
+
+        # Both at once stay distinguishable.
+        runtime.snapshots.update(
+            mailbox=MailboxSnapshot(inbox=0, unread=0, outbox=3, outbox_failed=1)
+        )
+        window._refresh()
+        text = window.context_activity.text()
+        assert "Waiting to send: 2" in text
+        assert "Failed, awaiting retry: 1" in text
     finally:
         window.close()
         runtime.close()

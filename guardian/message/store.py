@@ -90,6 +90,23 @@ class MessageStore:
         return sum(1 for m in self._index.values()
                    if m.get("folder") == folder and not m.get("read", True))
 
+    def failed(self, folder: str = Folder.OUTBOX) -> int:
+        """Messages parked in a folder because sending them did not work."""
+        return sum(1 for m in self._index.values()
+                   if m.get("folder") == folder
+                   and m.get("status") == Status.FAILED)
+
+    def awaiting_send(self, folder: str = Folder.OUTBOX) -> int:
+        """Messages actually queued for transmission.
+
+        A failed message stays in the outbox so it can be retried, but it is
+        not waiting for anything -- counting it as pending leaves the station
+        context reading "waiting to send: 1" forever with nothing in flight.
+        """
+        return sum(1 for m in self._index.values()
+                   if m.get("folder") == folder
+                   and m.get("status") != Status.FAILED)
+
     def mark_read(self, msg_id: int) -> None:
         meta = self._index.get(msg_id)
         if meta and not meta.get("read", True):

@@ -64,6 +64,7 @@ class ShellRuntime:
                 inbox=counts.get(Folder.INBOX, 0),
                 unread=self.mailstore.unread(Folder.INBOX),
                 outbox=counts.get(Folder.OUTBOX, 0),
+                outbox_failed=self.mailstore.failed(Folder.OUTBOX),
                 transit=counts.get(Folder.TRANSIT, 0),
             ),
             network=NetworkSnapshot(
