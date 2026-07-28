@@ -490,7 +490,7 @@ class Operations:
             return
         self._last_beacon = now
         try:
-            self.net.send_beacon()
+            self.net.beacon()
         except Exception as exc:  # noqa: BLE001
             self._log(
                 dual(f"Beacon failed: {exc}", f"Maják selhal: {exc}"),

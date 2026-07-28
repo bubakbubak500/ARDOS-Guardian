@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from guardian.config import StationConfig
 from guardian.message import Folder, MailMessage, MessageStore, Status
 from guardian.operations import Operations
+from guardian.protocol import FrameType
 from guardian.routing import HeardStations, Route, RouteTable
 from guardian.services import EventBus, SnapshotStore, WorkerPool
 from guardian.session import SessionState
@@ -63,6 +64,25 @@ def _operations(tmp_path, **overrides) -> tuple[Operations, WorkerPool, MessageS
     return operations, workers, mailstore
 
 
+def _spy_transmissions(operations) -> list:
+    """Capture what actually reaches the transport.
+
+    Replacing an orchestrator method instead would create the attribute it is
+    meant to exercise: 0.6.27 called a non-existent `send_beacon()` and the
+    test passed anyway because it had just invented one.
+    """
+    sent = []
+    transport = operations.net.transport
+    original = transport.send
+
+    def record(frame):
+        sent.append(frame)
+        return original(frame)
+
+    transport.send = record
+    return sent
+
+
 def test_beacon_and_auto_delivery_stay_silent_without_a_control_channel(
     tmp_path,
 ) -> None:
@@ -71,8 +91,7 @@ def test_beacon_and_auto_delivery_stay_silent_without_a_control_channel(
     operations, workers, mailstore = _operations(
         tmp_path, beacon_enabled=True, beacon_interval=15.0, auto_deliver=True
     )
-    sent = []
-    operations.net.send_beacon = lambda: sent.append("beacon")
+    sent = _spy_transmissions(operations)
     operations.heard.record("OK1AAA", 1_000.0)
     mailstore.add(
         MailMessage(
@@ -101,15 +120,16 @@ def test_the_beacon_switch_actually_beacons_on_its_interval(tmp_path) -> None:
     operations, workers, _ = _operations(
         tmp_path, beacon_enabled=True, beacon_interval=60.0
     )
-    sent = []
-    operations.net.send_beacon = lambda: sent.append("beacon")
+    sent = _spy_transmissions(operations)
     operations.audio_transport = SimpleNamespace(pump=lambda: 0)
     try:
         operations._tick_beacon(1_000.0)
-        assert sent == ["beacon"]
+        assert len(sent) == 1
+        assert sent[0].type is FrameType.BEACON
+        assert sent[0].source == "OK7PS"
 
         operations._tick_beacon(1_030.0)      # inside the interval
-        assert sent == ["beacon"]
+        assert len(sent) == 1
 
         operations._tick_beacon(1_061.0)      # past it
         assert len(sent) == 2
