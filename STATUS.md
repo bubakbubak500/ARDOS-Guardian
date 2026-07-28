@@ -54,6 +54,37 @@ remaining (*needs hardware*):
 
 ## 3. What's verified vs. needs hardware
 
+**Verified on air, OK7PS ↔ OK2IPW, 2026-07-28** (145.2375 / 145.300 MHz FM,
+IC-705 both ends, Hamlib + USB codec, host PTT via CAT):
+
+- The full control handshake over real AFSK 1200:
+  `HAVE_MSG → ACK_HAVE → START_VARA → RECEIVED → DELIVERED`, both directions.
+- `vara_p2p` payload transfer end-to-end, both directions, over the primary
+  `BUFFER`-drain path. A 370-byte message in 14 s; a 34 KB attachment in
+  4 min 04 s with 48 `BUFFER` reports and no data-socket reopens.
+- Auto-QSY per station (route `freq_hz`) before connecting, and the control
+  channel handing the shared codec to VARA and taking it back.
+- Attachments survive the bundle and open from the reader.
+- Occasional lost control bursts are normal and handled: `RX bad frame: bad
+  magic` appears in most runs and the retry logic covers it.
+
+Two things bit us on the way and are worth remembering:
+
+1. Guardian sent `LISTEN OFF` immediately before `CONNECT`. The reference warns
+   that either `LISTEN` command "will cause a disconnection if it is received
+   in the middle of a VARA connection". The RF link came up but the port 8301
+   bridge never attached: no `BUFFER` ever arrived and VARA idled at a fixed
+   1.87 s keying cycle with nothing to send. Fixed in 0.6.20.
+2. **`BUFFER` is the fastest diagnostic there is.** It is "sent when VARA adds
+   data to queue" — before anything is transmitted. `buffer_reports: 0` in the
+   diagnostics therefore proves the payload never reached VARA and rules out
+   every RF, PTT-timing and airtime explanation in one step.
+
+Speed levels sat at 566/1188 bps because the stations were unregistered; VARA
+FM caps the unregistered rate. OK7PS is licensed as of 2026-07-28, so the
+ceiling should lift. `UNREGISTERED_FM_BPS` in `payload/vara_p2p.py` is only a
+fallback for when VARA reports no `BITRATE`; the real rate is parsed and used.
+
 **Verified in software (no radio):**
 - Control-frame encode/decode + CRC-16 round-trip.
 - Full handshake over a loopback channel: direct delivery, relay hop, and
@@ -66,8 +97,15 @@ remaining (*needs hardware*):
 - UI builds/renders; tray + window icon; USB-serial detection.
 
 **Needs real hardware/peers to verify:**
-- AFSK over the actual USB audio codec + PTT keying on a rig.
-- rigctld talking to a physical radio (CAT read/PTT).
+- **VARA HF.** Never run on air. The path is the same as FM, and 0.6.24 adds
+  the one command the reference marks as required for peer-to-peer work
+  (`P2P SESSION`, HF/SAT only — without it VARA HF keeps the 4.0 s Winlink
+  gateway retry cycle). Note both HF and FM ports default to 8300/8301, so the
+  two VARA flavours cannot run at once until one pair is changed.
+- **Multi-hop relay on air.** Only the two-station direct case has flown; the
+  A→B→C chain is loopback-tested only.
+- Channel scanning against a physical radio (tune/mode via rigctld).
+- MFSK-16 over a real HF path (bit-sync is tuned for clean audio).
 
 ---
 
@@ -227,11 +265,30 @@ and polish.
 3. **Channel scanning on a real radio** — verify tune/mode via rigctld; wire an
    activity threshold from the S-meter.
 
+**Open, deliberately not built yet** (each needs an operator decision first)
+- **Topology import for mesh routing.** The 0.6.26 CSV imports *routes*, which
+  are directional and therefore only correct at one station. Importing *links*
+  instead and deriving each station's table locally makes one shared file
+  correct everywhere. Written up in `docs/MESH_ROUTING.md`; worth building at
+  four or five stations, not at two.
+- **`BW500` in settings** (VARA HF only). Narrow 500 Hz mode for poor
+  conditions or a crowded band; default `BW2300` is what VARA uses today. Both
+  ends must agree, so it is an operator setting, not something to infer.
+- **`COMPRESSION FILES` for binary attachments.** The reference marks it
+  "designed for File transfers" against `TEXT`'s Huffman. Unmeasured, and a
+  JPEG is already compressed, so the gain may be nil. Whether the setting is
+  sender-side only or must match at both ends is **not established** — verify
+  before shipping it.
+- **`CLEANTXBUFFER`** became available with the VARA licence (registered users
+  only). It would let an aborted transfer clear VARA's queue instead of
+  leaving stale bytes for the next session.
+
 **Robustness / polish**
 - MFSK soft-decision Viterbi + PLL bit-sync for real fading (current sync is
   tuned for clean audio).
 - Heard-station signal quality from the modem (SNR) to rank relay candidates.
-- Optional Pat HTTP-API payload backend (automated Winlink without Express).
+- Sanity-check an imported route table against heard stations and warn on a
+  next hop this station has never heard (see `docs/MESH_ROUTING.md`).
 
 **Cross-cutting TODO**
 - Persist session history / message log to disk.
