@@ -244,6 +244,13 @@ class Operations:
                 self.vara.send_command("PUBLIC ON")
                 self.vara.send_command("COMPRESSION TEXT")
                 self.vara.send_command("CHAT OFF")
+                if self.config.vara_mode.upper() == "HF":
+                    # HF/SAT only, and the reference is explicit: "This command
+                    # must be used for P2P connections, not for Gateways
+                    # connections."  Without it VARA HF keeps the 4.0 s
+                    # Winlink-gateway retry cycle, which is not what Guardian's
+                    # station-to-station transfers need.
+                    self.vara.send_command("P2P SESSION")
                 if self.config.callsign != "NOCALL":
                     self.vara.set_mycall(self.config.callsign)
                 self.vara.listen(True)

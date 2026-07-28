@@ -39,6 +39,15 @@ def test_direct_session_reaches_delivered_without_changing_payload_contract() ->
     assert sender.learned_paths["OK1AAA"] == "OK1AAA"
 
 
+def test_session_and_payload_agree_on_the_envelope_floor() -> None:
+    # The session layer duplicates the payload floor to avoid depending on a
+    # backend; if they drift, transfer deadlines stop matching reality.
+    from guardian.payload.vara_p2p import MIN_WIRE_SIZE
+    from guardian.session.orchestrator import _PAYLOAD_MIN_WIRE_SIZE
+
+    assert _PAYLOAD_MIN_WIRE_SIZE == MIN_WIRE_SIZE
+
+
 def test_received_from_the_final_destination_closes_the_session() -> None:
     # A lost DELIVERED frame used to leave the session in CONFIRMED forever,
     # so the shell kept showing "active transfers: 1" long after the message

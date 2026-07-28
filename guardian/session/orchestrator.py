@@ -50,7 +50,10 @@ CONFIRM_TIMEOUT = 120.0
 MAX_ANNOUNCE = 3
 _PAYLOAD_TRANSFER_TIMEOUT = 120.0
 _PAYLOAD_WIRE_OVERHEAD = 14
-_PAYLOAD_MIN_WIRE_SIZE = 1024
+# Mirrors payload.vara_p2p.MIN_WIRE_SIZE; kept as a local constant so the
+# session layer does not depend on a payload backend.  test_session asserts the
+# two stay equal.
+_PAYLOAD_MIN_WIRE_SIZE = 256
 _SLOW_LINK_BPS = 300.0
 _TRANSFER_MARGIN = 3.0
 _SESSION_MARGIN = 60.0

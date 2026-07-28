@@ -303,16 +303,31 @@ def test_vara_disconnect_follows_data_handoff_barrier() -> None:
     assert ("finish-write",) not in vara.commands
 
 
+def test_short_messages_no_longer_pay_for_a_kilobyte_of_padding() -> None:
+    # The 1024-byte floor was ~14 s of airtime at 566 bps on every short
+    # operational message, and it was chosen while transfers were failing for
+    # an unrelated reason.
+    assert MIN_WIRE_SIZE == 256
+    assert airtime_for(MIN_WIRE_SIZE, 566) < 8.0
+
+    envelope = encode_envelope(1, b"QRV")
+    assert len(envelope) == MIN_WIRE_SIZE
+
+    # Anything past the floor is never padded, so attachments are unaffected.
+    big = encode_envelope(2, b"z" * 5000)
+    assert len(big) == 12 + 5000 + 2
+
+
 def test_slow_unregistered_link_gets_more_than_the_flat_disconnect_budget() -> None:
-    # A padded 1024-byte block at VARA FM's unregistered 566 bps rate needs
-    # ~29 s of airtime -- the whole of the old flat 30 s disconnect budget,
-    # leaving nothing for a single ARQ retry, so transfers were aborted while
-    # VARA was still transmitting them.
-    airtime = airtime_for(MIN_WIRE_SIZE, 566)
-    assert airtime > DISCONNECT_TIMEOUT * 0.9
-    assert disconnect_timeout_for(MIN_WIRE_SIZE, 566) > 80.0
+    # Anything of real size on VARA FM's unregistered 566 bps rate outruns the
+    # old flat 30 s disconnect budget, which aborted transfers while VARA was
+    # still transmitting them. A 4 KB block is ~2 minutes there.
+    assert airtime_for(4096, 566) > DISCONNECT_TIMEOUT
+    assert disconnect_timeout_for(4096, 566) > 300.0
     # A fast registered link must not be slowed down to that budget.
-    assert disconnect_timeout_for(MIN_WIRE_SIZE, 25_000) == DISCONNECT_TIMEOUT
+    assert disconnect_timeout_for(4096, 25_000) == DISCONNECT_TIMEOUT
+    # A short message stays inside the flat budget, as it always did.
+    assert disconnect_timeout_for(MIN_WIRE_SIZE, 566) == DISCONNECT_TIMEOUT
 
 
 def test_degraded_send_budgets_disconnect_from_the_reported_bitrate() -> None:
@@ -322,13 +337,15 @@ def test_degraded_send_budgets_disconnect_from_the_reported_bitrate() -> None:
     logs = []
     result = []
 
+    payload = b"x" * 4000
     VaraP2PBackend(vara, on_log=logs.append)._send(
-        Message(30, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        Message(30, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=payload),
         result.append,
     )
 
     assert result == [True]
-    assert vara.closing_timeout == disconnect_timeout_for(MIN_WIRE_SIZE, 566)
+    wire = len(encode_envelope(30, payload))
+    assert vara.closing_timeout == disconnect_timeout_for(wire, 566)
     assert vara.closing_timeout > DISCONNECT_TIMEOUT
     assert any("566 bps" in line for line in logs)
 

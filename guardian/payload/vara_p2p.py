@@ -29,11 +29,15 @@ from .base import DoneCb, PayloadBackend
 _MAGIC = b"GPLD"
 _HDR = struct.Struct(">4sII")
 _CRC = struct.Struct(">H")
-# VARA FM can enter a BREAK/link-estimation loop when the application gives it
-# less than one low-rate air frame.  A 1024-byte block is about 14 seconds at
-# the unregistered 566 bps rate and is large enough to make the first frame
-# actionable without making short Guardian messages excessively expensive.
-MIN_WIRE_SIZE = 1024
+# Envelopes are padded to a floor so VARA always gets a usable air frame.  The
+# original 1024 bytes was chosen while transfers were failing for an unrelated
+# reason (Guardian toggling LISTEN around CONNECT, fixed in 0.6.20), and it
+# costs about 14 seconds of airtime at the unregistered 566 bps rate -- paid by
+# every short operational message.  256 bytes is roughly 3.6 seconds there and
+# still a substantial frame.  It stays a shared constant rather than a
+# negotiated value: both ends must agree on the padding length exactly, and a
+# wire-format change is not worth the risk for the remaining few seconds.
+MIN_WIRE_SIZE = 256
 CONNECT_TIMEOUT = 45.0
 TRANSFER_TIMEOUT = 120.0
 DISCONNECT_TIMEOUT = 30.0
