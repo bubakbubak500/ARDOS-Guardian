@@ -32,6 +32,7 @@ class VaraSnapshot:
     transport_lost: bool = False
     tx_buffer_bytes: int | None = None
     buffer_reports: int = 0
+    rejected_commands: int = 0
     data_socket_reopens: int = 0
     tx_bitrate_bps: int | None = None
     data_bytes_written: int = 0

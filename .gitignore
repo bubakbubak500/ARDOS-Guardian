@@ -38,3 +38,6 @@ artifacts/
 release/*.exe
 release/*.zip
 release/SHA256SUMS.txt
+
+# Vendor documentation kept locally: third-party copyright, not ours to publish.
+VARA Doc/

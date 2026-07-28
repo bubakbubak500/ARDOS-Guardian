@@ -111,7 +111,6 @@ class VaraP2PBackend(PayloadBackend):
         success = False
         acquired = False
         link_started = False
-        listen_disabled = False
         with self._transfer_lock:
             if self.on_qsy:
                 self._safe(lambda: self.on_qsy(msg.next_hop))
@@ -123,10 +122,11 @@ class VaraP2PBackend(PayloadBackend):
                     "VARA P2P: using persistent TCP pair 8300/8301 "
                     f"(generation {self.vara.state.data_socket_generation})"
                 )
-                # An outbound station must not remain in inbound-listen mode.
-                # This also matches VARA's native client lifecycle.
-                self.vara.listen(False)
-                listen_disabled = True
+                # Do NOT toggle LISTEN around a connection.  VARA's native
+                # command reference documents the outbound flow as MYCALL,
+                # LISTEN ON, CONNECT, and warns that either LISTEN ON or
+                # LISTEN OFF "will cause a disconnection if it is received in
+                # the middle of a VARA connection".
                 self.vara.connect_to(msg.next_hop)
                 link_started = True
                 if not self.vara.wait_link("CONNECTED", CONNECT_TIMEOUT):
@@ -215,9 +215,6 @@ class VaraP2PBackend(PayloadBackend):
                 if link_started:
                     self._abort_link()
             finally:
-                # Return to unattended receive operation for the next session.
-                if listen_disabled:
-                    self._safe(lambda: self.vara.listen(True))
                 if acquired and self.on_release:
                     self._safe(self.on_release)
                 if self.on_unqsy:

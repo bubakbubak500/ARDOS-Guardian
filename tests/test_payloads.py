@@ -227,13 +227,11 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
 
     assert send_result == [True]
     assert outgoing.commands == [
-        ("listen", False),
         ("connect", "OK1AAA"),
         ("data-ready",),
         ("prepare",),
         ("wait-transfer",),
         ("disconnect",),
-        ("listen", True),
     ]
     assert outgoing.written == encode_envelope(12, b"bundle")
 
@@ -349,6 +347,33 @@ def test_wait_link_holds_the_session_while_vara_keeps_keying() -> None:
     vara._last_ptt_activity -= 60.0
     assert vara.ptt_quiet_for() > 10.0
     assert vara.wait_link("DISCONNECTED", 0.01, ptt_grace=0.05) is False
+
+
+def test_send_never_toggles_listen_around_a_connection() -> None:
+    # VARA's native command reference: LISTEN ON and LISTEN OFF each "will
+    # cause a disconnection if it is received in the middle of a VARA
+    # connection".  The documented outbound flow is MYCALL, LISTEN ON, CONNECT.
+    vara = FakeVara()
+
+    VaraP2PBackend(vara)._send(
+        Message(34, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        lambda _ok: None,
+    )
+
+    assert not [command for command in vara.commands if command[0] == "listen"]
+    assert ("connect", "OK1AAA") in vara.commands
+
+
+def test_vara_rejection_is_surfaced_instead_of_silently_ignored() -> None:
+    vara = VaraClient()
+    notes = []
+    vara.on_notification = notes.append
+    vara._last_command = "PUBLIC ON"
+
+    vara._handle_notification("WRONG")
+
+    assert vara.state.rejected_commands == 1
+    assert any("PUBLIC ON" in note for note in notes)
 
 
 def test_lost_vara_tcp_session_is_not_reported_as_a_closed_rf_link() -> None:

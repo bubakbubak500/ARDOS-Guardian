@@ -234,11 +234,16 @@ class Operations:
                         f"{self.config.vara_host}:{self.config.vara_cmd_port}"
                     ) from last_error
             if self.vara.connected:
-                # Use the initialization order expected by native VARA clients.
-                # Guardian already frames and CRC-protects its binary stream, so
-                # modem-side text/file compression is unnecessary.
+                # "VARA Protocol Native TNC Commands" (EA5HVK, 2025-10-10)
+                # documents the initialization order as MYCALL, LISTEN ON,
+                # CONNECT -- and CHAT OFF as the setting that bounds VARA's
+                # idle loops so two stations cannot stay linked forever.
+                # Compression stays on: Guardian pads every envelope to
+                # MIN_WIRE_SIZE, and at 566 bps that padding is otherwise
+                # tens of seconds of airtime.
                 self.vara.send_command("PUBLIC ON")
-                self.vara.send_command("COMPRESSION OFF")
+                self.vara.send_command("COMPRESSION TEXT")
+                self.vara.send_command("CHAT OFF")
                 if self.config.callsign != "NOCALL":
                     self.vara.set_mycall(self.config.callsign)
                 self.vara.listen(True)
@@ -524,6 +529,7 @@ class Operations:
                 transport_lost=state.transport_lost,
                 tx_buffer_bytes=state.tx_buffer_bytes,
                 buffer_reports=state.buffer_reports,
+                rejected_commands=state.rejected_commands,
                 data_socket_reopens=state.data_socket_reopens,
                 tx_bitrate_bps=state.tx_bitrate_bps,
                 data_bytes_written=state.data_bytes_written,

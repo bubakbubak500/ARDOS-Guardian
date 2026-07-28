@@ -46,6 +46,7 @@ class VaraState:
     transport_lost: bool = False
     tx_buffer_bytes: int | None = None
     buffer_reports: int = 0
+    rejected_commands: int = 0
     data_socket_reopens: int = 0
     tx_bitrate_bps: int | None = None
     data_bytes_written: int = 0
@@ -75,6 +76,7 @@ class VaraClient:
         self._last_data_write = 0.0
         self._link_connected_at = 0.0
         self._last_ptt_activity = 0.0
+        self._last_command = ""
 
         self.state = VaraState()
         # Callback for asynchronous command-port notifications (UI/log hook).
@@ -196,6 +198,7 @@ class VaraClient:
             if self._cmd is None:
                 raise ConnectionError("VARA command port not connected")
             self._cmd.sendall((command + "\r").encode("ascii"))
+            self._last_command = command
 
     def set_mycall(self, callsign: str) -> None:
         self.state.mycall = callsign.upper()
@@ -489,6 +492,12 @@ class VaraClient:
                     break
                 except ValueError:
                     continue
+        elif upper == "WRONG":
+            # VARA rejected the last command.  Silently ignoring this hides
+            # an unsupported or mis-ordered command for a whole session.
+            self.state.rejected_commands += 1
+            self.state.error = f"VARA rejected: {self._last_command}"
+            self._notify(f"VARA rejected command: {self._last_command}")
         elif upper.startswith("BITRATE"):
             # e.g. "BITRATE (1)  566 bps TX" -- the rate drives our airtime
             # estimate, which is the only progress signal an unregistered
