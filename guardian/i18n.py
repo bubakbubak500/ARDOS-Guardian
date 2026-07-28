@@ -210,6 +210,18 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     ),
     "mail.no_subject": ("(no subject)", "(bez předmětu)"),
     "mail.none": ("none", "žádné"),
+    "mail.route": ("Route", "Trasa"),
+    "compose.large_attachments_title": (
+        "Large attachments",
+        "Velké přílohy",
+    ),
+    "compose.large_attachments": (
+        "{size} KB of attachments is roughly {minutes} minutes of airtime on a "
+        "VARA FM link, and the channel is occupied the whole time. Queue it "
+        "anyway?",
+        "{size} kB příloh je na spoji VARA FM zhruba {minutes} minut vysílání a "
+        "kanál je po celou dobu obsazený. Přesto zařadit k odeslání?",
+    ),
     "mail.attachment_open": ("Open", "Otevřít"),
     "mail.attachment_save": ("Save as…", "Uložit jako…"),
     "mail.attachment_save_all": ("Save all…", "Uložit vše…"),

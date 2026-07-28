@@ -1,7 +1,8 @@
-from guardian.protocol import FrameType
+from guardian.protocol import ControlFrame, FrameType
 from guardian.session import LoopbackBus, Message, Orchestrator, SessionState
 from guardian.routing import Route, RouteTable
 from guardian.session.orchestrator import (
+    CONFIRM_TIMEOUT,
     TRANSFER_TIMEOUT,
     session_transfer_timeout_for,
 )
@@ -36,6 +37,59 @@ def test_direct_session_reaches_delivered_without_changing_payload_contract() ->
     assert message.state is SessionState.DELIVERED
     assert receiver.sessions[100].state is SessionState.DELIVERED
     assert sender.learned_paths["OK1AAA"] == "OK1AAA"
+
+
+def test_received_from_the_final_destination_closes_the_session() -> None:
+    # A lost DELIVERED frame used to leave the session in CONFIRMED forever,
+    # so the shell kept showing "active transfers: 1" long after the message
+    # had been delivered and filed.
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    message = sender.send_message(
+        "OK2IPW", "hello", msg_id=200, next_hop="OK2IPW"
+    )
+    message.state = SessionState.TRANSFERRING
+
+    sender._rx_received(
+        ControlFrame(
+            type=FrameType.RECEIVED,
+            source="OK2IPW",
+            destination="OK2IPW",
+            next_hop="OK2IPW",
+            message_id=200,
+        )
+    )
+
+    assert message.state is SessionState.DELIVERED
+    assert message.state.terminal
+
+
+def test_a_relay_confirmation_stops_counting_as_an_active_transfer() -> None:
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    message = sender.send_message(
+        "OK1AAA", "hello", msg_id=201, next_hop="OK2IPW"
+    )
+    message.state = SessionState.TRANSFERRING
+
+    sender._rx_received(
+        ControlFrame(
+            type=FrameType.RECEIVED,
+            source="OK2IPW",
+            destination="OK1AAA",
+            next_hop="OK2IPW",
+            message_id=201,
+        )
+    )
+
+    # Relayed: the next hop is not the final destination, so the end-to-end
+    # receipt is still genuinely outstanding.
+    assert message.state is SessionState.CONFIRMED
+    sender.tick(message.t_state + CONFIRM_TIMEOUT - 1)
+    assert message.state is SessionState.CONFIRMED
+
+    sender.tick(message.t_state + CONFIRM_TIMEOUT + 1)
+    assert message.state is SessionState.DELIVERED
 
 
 def test_no_route_with_auto_route_disabled_attempts_destination_directly() -> None:

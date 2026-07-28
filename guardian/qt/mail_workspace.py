@@ -38,6 +38,7 @@ from ..message import (
     safe_attachment_name,
 )
 from ..message.forms import FORMS
+from ..payload.vara_p2p import airtime_for
 from ..protocol import Priority
 from .inputs import RowTable, UppercaseLineEdit
 from .runtime import ShellRuntime
@@ -208,6 +209,10 @@ class ComposeDialog(QDialog):
             )
         )
 
+    # Attachments above this are worth a word before they occupy the channel
+    # for minutes. It is a heads-up, not a limit: the operator decides.
+    ATTACHMENT_WARN_BYTES = 200_000
+
     def _queue(self) -> None:
         destination = self.destination.text().strip().upper()
         if not destination:
@@ -217,6 +222,22 @@ class ComposeDialog(QDialog):
                 tr("compose.destination_required"),
             )
             return
+        attached = sum(item.size for item in self.attachments)
+        if attached > self.ATTACHMENT_WARN_BYTES:
+            answer = QMessageBox.question(
+                self,
+                tr("compose.large_attachments_title"),
+                tr(
+                    "compose.large_attachments",
+                    size=round(attached / 1000),
+                    minutes=max(1, round(airtime_for(attached) / 60)),
+                ),
+                QMessageBox.StandardButton.Ok
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
+            )
+            if answer != QMessageBox.StandardButton.Ok:
+                return
         code = self.template.currentData()
         if code == "Plain":
             subject = self._widget_value(self.field_widgets["subject"])
@@ -250,6 +271,50 @@ class ComposeDialog(QDialog):
         )
         self.queued.emit(message.msg_id)
         self.accept()
+
+
+class MessageDialog(QDialog):
+    """Read a received message in the same laid-out form used to write one."""
+
+    def __init__(self, message: MailMessage, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(message.subject or tr("mail.no_subject"))
+        self.setMinimumSize(720, 640)
+
+        outer = QVBoxLayout(self)
+        header = QFormLayout()
+        for label, value in (
+            (tr("mail.peer"), f"{message.source} → {message.final_dest}"),
+            (tr("mail.subject"), message.subject or tr("mail.no_subject")),
+            (tr("mail.status"), tr(f"status.{message.status}")),
+            (tr("mail.route"), " → ".join(message.hops) or "-"),
+        ):
+            field = QLineEdit(value)
+            field.setReadOnly(True)
+            header.addRow(label, field)
+        outer.addLayout(header)
+
+        if message.attachments:
+            summary = QLabel(
+                ", ".join(
+                    f"{safe_attachment_name(a.name)} ({a.size} B)"
+                    for a in message.attachments
+                )
+            )
+            summary.setObjectName("Metadata")
+            summary.setWordWrap(True)
+            header.addRow(tr("mail.attachments"), summary)
+
+        body = QPlainTextEdit(message.body)
+        body.setReadOnly(True)
+        outer.addWidget(body, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText(
+            tr("common.close")
+        )
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
 
 
 class MailWorkspace(QWidget):
@@ -297,6 +362,7 @@ class MailWorkspace(QWidget):
             1, QHeaderView.ResizeMode.Stretch
         )
         self.messages.itemSelectionChanged.connect(self._open_selected)
+        self.messages.doubleClicked.connect(self.open_in_window)
         content.addWidget(self.messages)
 
         reader = QWidget()
@@ -582,6 +648,15 @@ class MailWorkspace(QWidget):
         )
         self._show_attachments(message)
         self.refresh()
+
+    def open_in_window(self, *_args) -> None:
+        """Double-click: read the message in the roomier form layout."""
+        if self.selected_id is None:
+            return
+        message = self.runtime.mailstore.get(self.selected_id)
+        if message is None:
+            return
+        MessageDialog(message, self).exec()
 
     def compose(self, *, reply_to: MailMessage | None = None) -> None:
         dialog = ComposeDialog(self.runtime, self, reply_to=reply_to)

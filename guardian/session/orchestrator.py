@@ -43,6 +43,10 @@ ACK_TIMEOUT = 8.0
 START_TIMEOUT = 12.0
 TRANSFER_TIMEOUT = 180.0
 BUSY_BACKOFF = 20.0
+# A relayed message sits in CONFIRMED until an end-to-end DELIVERED comes back
+# from the far end. That frame can be lost on RF, and CONFIRMED is not terminal,
+# so without this bound the session would stay "active" forever.
+CONFIRM_TIMEOUT = 120.0
 MAX_ANNOUNCE = 3
 _PAYLOAD_TRANSFER_TIMEOUT = 120.0
 _PAYLOAD_WIRE_OVERHEAD = 14
@@ -365,6 +369,16 @@ class Orchestrator:
                 self.notify_payload_delivered(msg.msg_id, ok=True)
             elif msg.state is SessionState.ROUTE_DISCOVERY and elapsed > DISCOVERY_TIMEOUT:
                 self._discovery_timeout(msg)
+            elif msg.state is SessionState.CONFIRMED and elapsed > CONFIRM_TIMEOUT:
+                # The next hop has the message; only the end-to-end receipt is
+                # missing. Close the session rather than count it as an active
+                # transfer for the rest of the run.
+                self._enter(msg, SessionState.DELIVERED)
+                self._emit(
+                    msg,
+                    "next hop holds the message; no end-to-end DELIVERED "
+                    "arrived before the confirmation timeout",
+                )
 
     def _discovery_timeout(self, msg: Message) -> None:
         if msg.offers:
@@ -495,11 +509,19 @@ class Orchestrator:
     def _rx_received(self, f: ControlFrame) -> None:
         msg = self._mine(f, "out")
         if msg and msg.state is SessionState.TRANSFERRING:
-            self._enter(msg, SessionState.CONFIRMED)
-            self._emit(msg, f"{f.source} confirmed RECEIVED")
             # Learn that this next hop reaches this destination (for next time).
             if msg.next_hop:
                 self.learned_paths[msg.final_dest] = msg.next_hop
+            if msg.next_hop == msg.final_dest:
+                # The station confirming receipt *is* the final destination, so
+                # RECEIVED already proves end-to-end delivery. Waiting for a
+                # separate DELIVERED frame only risks losing it on RF and
+                # leaving the session open for good.
+                self._enter(msg, SessionState.DELIVERED)
+                self._emit(msg, f"{f.source} confirmed RECEIVED (final destination)")
+                return
+            self._enter(msg, SessionState.CONFIRMED)
+            self._emit(msg, f"{f.source} confirmed RECEIVED")
 
     def _rx_delivered(self, f: ControlFrame) -> None:
         msg = self.sessions.get(f.message_id)
