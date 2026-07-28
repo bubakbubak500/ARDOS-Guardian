@@ -2,6 +2,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from types import SimpleNamespace
+
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QSpinBox
 
@@ -12,6 +14,7 @@ from guardian.qt.readiness_dialog import ReadinessDialog
 from guardian.qt.runtime import ShellRuntime
 from guardian.qt.settings_dialog import SettingsDialog
 from guardian.qt.theme import ThemePreference
+from guardian.vara.client import VaraState
 
 
 def _application() -> QApplication:
@@ -99,6 +102,42 @@ def test_readiness_and_diagnostics_are_non_transmitting(tmp_path) -> None:
     finally:
         diagnostics.close()
         readiness.close()
+        runtime.close()
+
+
+def test_vara_probe_finds_the_client_and_never_writes_without_a_link() -> None:
+    _application()
+    runtime = ShellRuntime()
+    diagnostics = DiagnosticsDialog(runtime)
+    try:
+        # The probe used to look for runtime.vara, which does not exist, so it
+        # reported a connected VARA as disconnected.
+        assert runtime.operations.vara is not None
+
+        written = []
+        state = VaraState(
+            cmd_connected=True,
+            data_connected=True,
+            link_state="DISCONNECTED",
+            data_peer_endpoint="127.0.0.1:8301",
+        )
+        runtime.operations.vara = SimpleNamespace(
+            connected=True,
+            state=state,
+            data_socket_alive=lambda: True,
+            write_data=written.append,
+        )
+
+        diagnostics._probe_vara()
+        text = diagnostics.viewer.toPlainText()
+
+        assert "není připojena" not in text
+        assert "data socket  : alive" in text
+        # Port 8301 only bridges during a link; a stray write would land in
+        # the next real transfer.
+        assert written == []
+    finally:
+        diagnostics.close()
         runtime.close()
 
 

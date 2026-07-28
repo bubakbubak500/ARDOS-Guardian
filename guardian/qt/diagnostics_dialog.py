@@ -75,8 +75,9 @@ class DiagnosticsDialog(QDialog):
         VARA hold its end of the data socket, and does it acknowledge what
         Guardian writes with a BUFFER report?
         """
-        vara = getattr(self.runtime, "vara", None)
-        lines = [dual("VARA data path", "Datová cesta VARA"), "=" * 40]
+        operations = getattr(self.runtime, "operations", None)
+        vara = getattr(operations, "vara", None)
+        lines = [dual("VARA data path", "Datová cesta VARA"), "=" * 44]
         if vara is None or not getattr(vara, "connected", False):
             lines.append(dual(
                 "VARA is not connected -- connect it first.",
@@ -88,16 +89,49 @@ class DiagnosticsDialog(QDialog):
         state = vara.state
         alive = vara.data_socket_alive()
         before = state.buffer_reports
+        linked = state.link_state == "CONNECTED"
         lines += [
             f"command port : {state.cmd_connected}",
-            f"data port    : {state.data_connected} ({state.data_peer_endpoint})",
+            f"data port    : {state.data_connected}"
+            f" -> {state.data_peer_endpoint}",
             f"data socket  : {'alive' if alive else 'CLOSED BY VARA'}",
             f"generation   : {state.data_socket_generation}"
             f" ({state.data_socket_reopens} reopens)",
             f"link state   : {state.link_state}",
             f"BUFFER seen  : {before}",
+            f"rejected cmds: {state.rejected_commands}",
+            f"bitrate      : {state.tx_bitrate_bps}",
             "",
         ]
+
+        if not linked:
+            # Port 8301 is a bridge that only carries traffic during a link.
+            # Writing with no link would either be discarded or, worse, sit in
+            # VARA and corrupt the next real transfer -- so do not write.
+            lines += [
+                dual(
+                    "No VARA link is up, so nothing was written: port 8301 only "
+                    "carries data during a connection, and a stray write could "
+                    "corrupt the next transfer.",
+                    "Žádné spojení VARA neběží, proto se nic nezapisovalo: port "
+                    "8301 přenáší data jen během spojení a zápis mimo ně by "
+                    "mohl poškodit příští přenos.",
+                ),
+                "",
+                dual(
+                    "The socket line above is still the useful result. For the "
+                    "decisive check, run this again during a transfer, or watch "
+                    "VARA's own window: its DATA indicator and bps graph show "
+                    "whether Guardian's bytes ever reach the modem.",
+                    "Užitečný výsledek je i tak řádek o socketu. Rozhodující "
+                    "test: spusťte tohle znovu během přenosu, nebo sledujte "
+                    "okno samotné VARA — indikátor DATA a graf bps ukážou, "
+                    "jestli se Guardianovy bajty do modemu vůbec dostanou.",
+                ),
+            ]
+            self.viewer.setPlainText("\n".join(lines))
+            return
+
         try:
             vara.write_data(b"\0" * 256)
         except Exception as exc:  # noqa: BLE001
@@ -113,7 +147,7 @@ class DiagnosticsDialog(QDialog):
 
         gained = state.buffer_reports - before
         lines += [
-            "wrote 256 bytes to the data port",
+            "wrote 256 bytes into the live link",
             f"BUFFER reports in 5 s : {gained}",
             f"last BUFFER value     : {state.tx_buffer_bytes}",
             f"data socket afterwards: "
@@ -122,21 +156,19 @@ class DiagnosticsDialog(QDialog):
         ]
         if gained:
             lines.append(dual(
-                "VARA acknowledged the write. The data path works; a failing "
+                "VARA queued the write. The data path works; a failing "
                 "transfer is an RF or session problem, not this socket.",
-                "VARA zápis potvrdila. Datová cesta funguje; selhání přenosu "
-                "je pak problém RF nebo relace, nikoli tohoto socketu.",
+                "VARA zápis zařadila do fronty. Datová cesta funguje; selhání "
+                "přenosu je pak problém RF nebo relace, nikoli tohoto socketu.",
             ))
         else:
             lines.append(dual(
-                "VARA reported no BUFFER. Either this VARA build never sends "
-                "BUFFER, or it is not reading Guardian's data socket. Compare "
-                "with VARA's own window: if its queue stays empty, the bytes "
-                "are not reaching VARA at all.",
-                "VARA nehlásí žádný BUFFER. Buď tento build VARA BUFFER "
-                "neposílá, nebo nečte Guardianův datový socket. Porovnejte s "
-                "oknem samotné VARA: pokud její fronta zůstane prázdná, bajty "
-                "se k VARA vůbec nedostávají.",
+                "VARA reported no BUFFER during a live link. Per the native "
+                "command reference BUFFER is sent whenever VARA adds data to "
+                "the queue, so the bytes are not reaching the modem.",
+                "VARA nehlásila žádný BUFFER, přestože spojení běželo. Podle "
+                "specifikace se BUFFER posílá vždy, když VARA přidá data do "
+                "fronty — bajty se tedy do modemu nedostávají.",
             ))
         self.viewer.setPlainText("\n".join(lines))
 
