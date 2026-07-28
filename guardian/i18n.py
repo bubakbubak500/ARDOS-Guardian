@@ -154,6 +154,26 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Waiting to send: {count}",
         "Čeká na odeslání: {count}",
     ),
+    "menu.network_import": (
+        "Import network from CSV…",
+        "Importovat síť z CSV…",
+    ),
+    "menu.network_export": (
+        "Export network to CSV…",
+        "Exportovat síť do CSV…",
+    ),
+    "menu.network_template": (
+        "Save network template…",
+        "Uložit vzorový soubor sítě…",
+    ),
+    "network.import_done": (
+        "Imported {count} routes.",
+        "Importováno {count} tras.",
+    ),
+    "network.export_done": (
+        "Network written to {path}.",
+        "Síť zapsána do {path}.",
+    ),
     "context.outbox_failed": (
         "Failed, awaiting retry: {count}",
         "Selhalo, čeká na opakování: {count}",

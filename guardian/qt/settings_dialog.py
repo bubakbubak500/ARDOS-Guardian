@@ -389,15 +389,12 @@ class SettingsDialog(QDialog):
         self.vara_mode = QComboBox()
         self.vara_mode.addItems(["FM", "HF"])
         self.vara_mode.setCurrentText(self.config.vara_mode)
+        # The manual Winlink hand-off was dropped in 0.6.26 once VARA P2P was
+        # proven on air. The picker stays for the next transport rather than
+        # being rebuilt from scratch.
         self.payload_backend = QComboBox()
         self.payload_backend.addItem("Guardian VARA P2P", "vara_p2p")
-        self.payload_backend.addItem(
-            dual("Manual Winlink hand-off", "Ruční předání přes Winlink"),
-            "winlink_manual",
-        )
-        self.payload_backend.setCurrentIndex(
-            max(0, self.payload_backend.findData(self.config.payload_backend))
-        )
+        self.payload_backend.setCurrentIndex(0)
         self.vara_host = QLineEdit(self.config.vara_host)
         self.vara_fm_cmd = _spin(1, 65_535, self.config.vara_fm_cmd_port)
         self.vara_fm_data = _spin(1, 65_535, self.config.vara_fm_data_port)

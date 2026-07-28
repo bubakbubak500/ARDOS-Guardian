@@ -33,9 +33,6 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         dialog.callsign.setText("OK7PS")
         dialog.operator_name.setText("Operator")
         dialog.vara_mode.setCurrentText("HF")
-        dialog.payload_backend.setCurrentIndex(
-            dialog.payload_backend.findData("winlink_manual")
-        )
         dialog.audio_input.setCurrentText("USB Audio CODEC RX")
         dialog.audio_output.setCurrentText("USB Audio CODEC TX")
         dialog.radio_backend.setCurrentIndex(
@@ -49,7 +46,10 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         assert config.operator_name == "Operator"
         assert config.vara_mode == "HF"
         assert config.vara_cmd_port == config.vara_hf_cmd_port
-        assert config.payload_backend == "winlink_manual"
+        # The manual Winlink hand-off was removed in 0.6.26; VARA P2P is
+        # the only transport the picker offers.
+        assert dialog.payload_backend.count() == 1
+        assert config.payload_backend == "vara_p2p"
         assert config.audio_input == "USB Audio CODEC RX"
         assert config.audio_output == "USB Audio CODEC TX"
         assert config.radio == "Icom IC-7300"

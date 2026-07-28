@@ -15,8 +15,7 @@ VARA FM/HF** for amateur-radio emergency messaging (project codename **ARDOS**).
 
 Short **control bursts carry metadata only** (source, final destination, next
 hop, message id, priority, TTL, flags + CRC). The actual message body travels
-over VARA (or a manual Winlink session) once two stations have negotiated the
-hop. Guardian is the fast signalling/dispatch layer; VARA is the data modem.
+over VARA once two stations have negotiated the hop. Guardian is the fast signalling/dispatch layer; VARA is the data modem.
 
 Radio control is via **Hamlib / rigctld** (hundreds of rigs) with a serial
 RTS/DTR VOX fallback — no per-radio CAT reverse-engineering.
@@ -29,7 +28,7 @@ RTS/DTR VOX fallback — no per-radio CAT reverse-engineering.
 |------:|------|--------|
 | 1 | UI, station config, control-burst protocol, radio drivers | ✅ done |
 | 2 | VARA handshake state-machine (orchestrator) | ✅ done |
-| 3 | Control modem (AFSK + MFSK) + payload backends + audio channel | ✅ done* |
+| 3 | Control modem (AFSK + MFSK) + payload backend + audio channel | ✅ done* |
 | 4 | Smart routing / heard-stations | ✅ done |
 | 5 | Multi-channel scanning / mesh | ✅ done* |
 | 6 | Mail layer: store-and-forward + attachments | ✅ done |
@@ -43,13 +42,12 @@ correctly stops relaying. (*) Channel scanning needs a real radio to tune.
 
 **Phase 3 done in software.** Built + tested: AFSK 1200 modem, MFSK-16 HF modem
 (decodes to ~0 dB SNR in loopback), rate-1/2 K=7 convolutional FEC + Viterbi,
-both payload backends, audio device pickers, and a loopback↔audio control-channel
+the VARA P2P payload backend, audio device pickers, and a loopback↔audio control-channel
 selector (the audio transport starts/stops cleanly with real devices). Only
 remaining (*needs hardware*):
 - **On-air verification** — AFSK/MFSK over the real USB codec + PTT on a rig
   (loopback-cable test, then on-air). Audio I/O path is wired and starts, but
   not yet round-tripped through a radio.
-- **Real `vara_p2p` transfer** — needs VARA running on two stations.
 - MFSK bit-sync is tuned for clean audio; real fading may want a PLL/soft-decision.
 
 ---
@@ -62,15 +60,13 @@ remaining (*needs hardware*):
   no-responder retry→fail. (`HAVE_MSG→ACK_HAVE→START_VARA→RECEIVED→DELIVERED`,
   plus BUSY/CANCEL, ACK timeouts, backup-hop fallback.)
 - AFSK 1200 modem loopback: clean + noisy, at 8 k / 44.1 k / 48 k, multi-burst.
-- Both payload backends drive a session to DELIVERED (Winlink prompt auto-confirm
-  in tests; VARA P2P envelope round-trip).
+- The VARA P2P backend drives a session to DELIVERED (envelope round-trip).
 - Hamlib install + SHA256 verify; rigctld runs; live `rigctl -l` parse (312
   models); curated radio ids validated against installed Hamlib.
 - UI builds/renders; tray + window icon; USB-serial detection.
 
 **Needs real hardware/peers to verify:**
 - AFSK over the actual USB audio codec + PTT keying on a rig.
-- `vara_p2p` payload transfer between two live VARA stations.
 - rigctld talking to a physical radio (CAT read/PTT).
 
 ---
@@ -110,7 +106,6 @@ guardian/
   payload/            >>> Phase 3 <<<
     base.py           PayloadBackend interface
     vara_p2p.py       Guardian-owns-VARA direct P2P transfer
-    winlink_manual.py operator-confirmed Winlink hand-off
   install/
     hamlib_installer.py  download + SHA256-verify + unpack official Hamlib
   assets/
@@ -122,7 +117,7 @@ guardian/
 UI (reorganised for a guided journey): operational tabs **Home · Mail · Net ·
 Mesh · Log** up front, all configuration under **⚙ Settings** (sections:
 Station, Radio, VARA, Channel, Mesh, Routing, Advanced). **Home** has an
-operating-mode selector (Live·VARA P2P / Live·Winlink) and a mode-aware
+operating-mode selector and a mode-aware
 **setup checklist** that shows what to configure first (with "Go" buttons
 jumping to the right settings section) plus live status cards. The sidebar
 shows callsign, mode, Radio/VARA/PTT/Control-channel dots and mailbox counts.
@@ -130,7 +125,8 @@ shows callsign, mode, Radio/VARA/PTT/Control-channel dots and mailbox counts.
 The control flow is transport-agnostic: the production UI uses
 `NullTransport` while idle and `AudioControlTransport` for real RF.
 `LoopbackBus` remains available to automated tests. Payload is handled by
-`vara_p2p` or `winlink_manual`; swapping either does not touch the state-machine.
+`vara_p2p` behind the `PayloadBackend` interface; swapping it does not touch
+the state-machine.
 
 ---
 
@@ -141,10 +137,12 @@ The control flow is transport-agnostic: the production UI uses
   VARA. Therefore control bursts always travel **outside** the VARA data session
   on their own AFSK/MFSK modem (wake/announce/route-negotiation happen before any
   connection exists). The control modem is needed regardless of payload backend.
-- **Payload backends: both `vara_p2p` and `winlink_manual`** (operator's choice,
-  2026-06-01). P2P for the automated self-contained Guardian net; manual for full
-  Winlink interop with zero scripting risk. (Pat HTTP-API automation is a
-  possible future third backend.)
+- **Payload backend: `vara_p2p` only** (2026-07-28). A `winlink_manual`
+  hand-off shipped alongside it from 2026-06-01 as insurance while P2P was
+  unproven on air. Once two-station transfers worked it only offered a slower
+  manual workflow, so it was removed in 0.6.26; the `PayloadBackend` interface
+  and the settings picker stay for the next transport (Pat HTTP-API remains a
+  candidate).
 - **Modulation:** AFSK 1200 (Bell 202) for VARA **FM**; MFSK-16 + FEC planned for
   VARA **HF** (AFSK is too wide and lacks capture effect on SSB). Auto-selected
   by `vara_mode`.

@@ -48,7 +48,7 @@ def test_idle_operations_never_transmit_and_keep_mail_queued(tmp_path) -> None:
 
 
 def test_both_payload_modes_use_the_existing_backend_factory(tmp_path) -> None:
-    for payload_backend in ("vara_p2p", "winlink_manual"):
+    for payload_backend in ("vara_p2p",):
         config = StationConfig(
             callsign="OK7PS",
             payload_backend=payload_backend,

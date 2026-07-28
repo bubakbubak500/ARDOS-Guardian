@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QFileDialog,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -24,6 +25,8 @@ from PySide6.QtWidgets import (
 from .. import __app_name__, __version__
 from ..assets import get_ico_path
 from ..i18n import dual, tr
+from ..routing import read_csv, write_csv
+from ..routing.csv_io import TEMPLATE_ROWS
 from ..services import ApplicationSnapshot
 from .diagnostics_dialog import DiagnosticsDialog
 from .help_dialog import HelpDialog
@@ -83,7 +86,6 @@ class GuardianMainWindow(QMainWindow):
         self.runtime = runtime
         self.settings = settings
         self.theme_controller = ThemeController(settings, self)
-        self.runtime.operations.winlink_prompt = self._winlink_prompt
         # On Windows an owned top-level window is forced above its owner.
         # Keep the spectrum independent so either window can receive focus.
         self.spectrum_window = SpectrumWindow(runtime, settings)
@@ -110,6 +112,16 @@ class GuardianMainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu(tr("menu.file"))
+        import_network = QAction(tr("menu.network_import"), self)
+        import_network.triggered.connect(self._import_network)
+        file_menu.addAction(import_network)
+        export_network = QAction(tr("menu.network_export"), self)
+        export_network.triggered.connect(self._export_network)
+        file_menu.addAction(export_network)
+        network_template = QAction(tr("menu.network_template"), self)
+        network_template.triggered.connect(self._save_network_template)
+        file_menu.addAction(network_template)
+        file_menu.addSeparator()
         exit_action = QAction(tr("menu.exit"), self)
         exit_action.setShortcut("Alt+F4")
         exit_action.triggered.connect(self.close)
@@ -768,26 +780,61 @@ class GuardianMainWindow(QMainWindow):
         if answer == QMessageBox.StandardButton.Yes:
             self.runtime.operations.start_control_channel()
 
-    def _winlink_prompt(self, role: str, message, done) -> None:
-        action = (
-            dual("sent", "odeslána")
-            if role == "send"
-            else dual("received", "přijata")
+    # ------------------------------ network file ---------------------- #
+    _NETWORK_FILTER = "CSV (*.csv);;*"
+
+    def _import_network(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, tr("menu.network_import"), "", self._NETWORK_FILTER
         )
-        peer = message.next_hop if role == "send" else message.source
-        answer = QMessageBox.question(
-            self,
-            dual("Winlink hand-off", "Předání přes Winlink"),
-            dual(
-                f"Message #{message.msg_id}\nPeer: {peer}\n"
-                f"Final destination: {message.final_dest}\n\n"
-                f"Confirm {action} only after the Winlink transfer completes.",
-                f"Zpráva #{message.msg_id}\nProtistanice: {peer}\n"
-                f"Konečný cíl: {message.final_dest}\n\n"
-                f"Potvrďte, že zpráva byla {action}, až po dokončení přenosu Winlink.",
-            ),
+        if not chosen:
+            return
+        try:
+            report = read_csv(chosen)
+        except OSError as exc:
+            QMessageBox.warning(self, tr("menu.network_import"), str(exc))
+            return
+        for route in report.routes:
+            self.runtime.routes.add(route)
+        if report.routes:
+            self.runtime.routes.save()
+            self.runtime.refresh()
+            self.workspace_names["network"].refresh()
+        summary = tr("network.import_done", count=report.imported)
+        if report.problems:
+            summary += "\n\n" + "\n".join(report.problems[:12])
+            if len(report.problems) > 12:
+                summary += f"\n… (+{len(report.problems) - 12})"
+        QMessageBox.information(self, tr("menu.network_import"), summary)
+        self.runtime.events.publish(
+            tr("network.import_done", count=report.imported), source="network"
         )
-        done(answer == QMessageBox.StandardButton.Yes)
+
+    def _export_network(self) -> None:
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, tr("menu.network_export"), "guardian-network.csv",
+            self._NETWORK_FILTER,
+        )
+        if chosen:
+            self._write_network(chosen, self.runtime.routes.routes)
+
+    def _save_network_template(self) -> None:
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, tr("menu.network_template"), "guardian-network-template.csv",
+            self._NETWORK_FILTER,
+        )
+        if chosen:
+            self._write_network(chosen, TEMPLATE_ROWS)
+
+    def _write_network(self, path: str, routes) -> None:
+        try:
+            write_csv(path, routes)
+        except OSError as exc:
+            QMessageBox.warning(self, tr("menu.network_export"), str(exc))
+            return
+        self.runtime.events.publish(
+            tr("network.export_done", path=path), source="network"
+        )
 
     def _restore_geometry(self) -> None:
         geometry = self.settings.value("ui/main_geometry")

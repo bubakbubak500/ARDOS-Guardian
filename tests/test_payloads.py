@@ -13,7 +13,6 @@ from guardian.payload.vara_p2p import (
     encode_envelope,
     transfer_timeout_for,
 )
-from guardian.payload.winlink_manual import WinlinkManualBackend
 from guardian.protocol import crc16
 from guardian.session import Message
 from guardian.vara.client import TransferResult, VaraClient
@@ -591,24 +590,3 @@ def test_vara_does_not_connect_when_audio_handoff_fails() -> None:
     assert vara.commands == []
 
 
-def test_winlink_handoff_preserves_prompt_and_resource_order() -> None:
-    events = []
-
-    def prompt(role, message, done):
-        events.append(("prompt", role, message.msg_id))
-        done(True)
-
-    backend = WinlinkManualBackend(
-        prompt=prompt,
-        on_acquire=lambda: events.append("acquire"),
-        on_release=lambda: events.append("release"),
-    )
-    result = []
-
-    backend.start_send(
-        Message(13, "OK7PS", "OK1AAA", "OK1AAA"),
-        result.append,
-    )
-
-    assert events == ["acquire", ("prompt", "send", 13), "release"]
-    assert result == [True]

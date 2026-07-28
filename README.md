@@ -107,11 +107,13 @@ test transport. Remaining is on-air bring-up over a real radio + codec.
   noise rejection and CRC framing). `AudioControlTransport` binds the modem to
   a sound device + radio PTT
   (half-duplex, dedup) and is a drop-in for the loopback bus.
-* **`guardian/payload/`** — two interchangeable payload backends:
+* **`guardian/payload/`** — the payload backend behind a swappable interface:
   * **`vara_p2p`** — Guardian opens VARA P2P and sends a framed payload envelope
     itself (immediate, self-contained, no internet).
-  * **`winlink_manual`** — Guardian coordinates; the operator moves the message
-    with their own Winlink session and confirms via a hand-off dialog.
+
+  An operator-driven `winlink_manual` hand-off existed until 0.6.26 as a
+  fallback while `vara_p2p` was unproven on air; once two-station transfers
+  worked it only offered a slower manual workflow.
 
   The production UI uses the real audio transport; the orchestrator remains
   transport-independent.

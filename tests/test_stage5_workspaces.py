@@ -26,7 +26,7 @@ from guardian.qt.mail_workspace import (
 )
 from guardian.qt.network_workspace import NetworkWorkspace
 from guardian.qt.runtime import ShellRuntime
-from guardian.routing import RouteTable
+from guardian.routing import Route, RouteTable
 
 
 def _application() -> QApplication:
@@ -304,6 +304,62 @@ def test_network_tables_are_read_only_row_selectors() -> None:
                 == QAbstractItemView.EditTrigger.NoEditTriggers
             )
             assert not table.showGrid()
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_selecting_a_route_loads_it_into_the_form_for_editing() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.routes = RouteTable()
+    workspace = NetworkWorkspace(runtime)
+    try:
+        runtime.routes.add(Route("OK2IPW", "OK1AAA", "ANY", 145_237_500, "FM"))
+        runtime.routes.add(Route("OK1BBB", "", "", 0, "USB"))
+        workspace.refresh()
+
+        # Editing used to require retyping the callsign exactly; selecting the
+        # row now fills the form so it can be corrected in place.
+        workspace.routes_table.selectRow(0)
+        first = runtime.routes.routes[0]
+        assert workspace.destination.text() == first.destination
+        assert workspace.preferred.text() == first.preferred
+        assert workspace.backup.text() == first.backup
+        assert workspace.frequency.value() == first.freq_hz
+        assert workspace.mode.currentData() == (first.mode or "FM")
+
+        workspace.routes_table.selectRow(1)
+        second = runtime.routes.routes[1]
+        assert workspace.destination.text() == second.destination
+        assert workspace.frequency.value() == second.freq_hz
+
+        # Saving the loaded row edits it rather than adding a duplicate.
+        workspace.preferred.setText("OK7PS")
+        workspace._save_route()
+        assert len(runtime.routes.routes) == 2
+        assert runtime.routes.lookup(second.destination).preferred == "OK7PS"
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_removing_a_route_clears_the_form_it_was_loaded_into() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.routes = RouteTable()
+    workspace = NetworkWorkspace(runtime)
+    try:
+        runtime.routes.add(Route("OK2IPW", "OK1AAA", "", 145_237_500, "FM"))
+        workspace.refresh()
+        workspace.routes_table.selectRow(0)
+        assert workspace.destination.text() == "OK2IPW"
+
+        workspace._remove_route()
+
+        assert runtime.routes.routes == []
+        assert workspace.destination.text() == ""
+        assert workspace.frequency.value() == 0
     finally:
         workspace.close()
         runtime.close()

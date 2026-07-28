@@ -52,6 +52,9 @@ class NetworkWorkspace(QWidget):
                 tr("network.mode"),
             ]
         )
+        # Selecting a row loads it into the form below, so an existing entry
+        # can be corrected in place instead of being retyped from scratch.
+        self.routes_table.itemSelectionChanged.connect(self._load_selected_route)
         route_header = self.routes_table.horizontalHeader()
         route_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         route_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -111,6 +114,32 @@ class NetworkWorkspace(QWidget):
         layout.addWidget(self.heard_table, 1)
         return page
 
+    def _selected_route(self) -> Route | None:
+        row = self.routes_table.currentRow()
+        item = self.routes_table.item(row, 0) if row >= 0 else None
+        if item is None:
+            return None
+        return self.runtime.routes.lookup(item.text())
+
+    def _load_selected_route(self) -> None:
+        route = self._selected_route()
+        if route is None:
+            return
+        self.destination.setText(route.destination)
+        self.preferred.setText(route.preferred)
+        self.backup.setText(route.backup)
+        self.frequency.setValue(route.freq_hz)
+        index = self.mode.findData(route.mode)
+        if index >= 0:
+            self.mode.setCurrentIndex(index)
+
+    def _clear_form(self) -> None:
+        self.destination.clear()
+        self.preferred.clear()
+        self.backup.clear()
+        self.frequency.setValue(0)
+        self.mode.setCurrentIndex(0)
+
     def _save_route(self) -> None:
         destination = self.destination.text().strip().upper()
         preferred = self.preferred.text().strip().upper()
@@ -146,11 +175,12 @@ class NetworkWorkspace(QWidget):
         self.refresh()
 
     def _remove_route(self) -> None:
-        row = self.routes_table.currentRow()
-        if row < 0:
+        route = self._selected_route()
+        if route is None:
             return
-        destination = self.routes_table.item(row, 0).text()
+        destination = route.destination
         self.runtime.routes.remove(destination)
+        self._clear_form()
         self.runtime.routes.save()
         self.runtime.events.publish(
             dual(

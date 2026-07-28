@@ -94,8 +94,9 @@ class StationConfig:
     # Control-burst modem: "auto" picks AFSK1200 for FM, MFSK16 for HF.
     control_modem: str = "auto"       # "auto" | "afsk1200" | "mfsk16"
 
-    # How the message payload is moved after the handshake.
-    payload_backend: str = "vara_p2p"  # "vara_p2p" | "winlink_manual"
+    # How the message payload is moved after the handshake. "winlink_manual"
+    # was dropped in 0.6.26; a config still holding it is coerced on load.
+    payload_backend: str = "vara_p2p"  # "vara_p2p"
 
     # Control-burst channel: "off" (idle) | "audio" (real RF via the radio).
     control_channel: str = "off"
@@ -129,6 +130,10 @@ class StationConfig:
         # Only keep keys we know about, so old/new files stay compatible.
         known = {f for f in cls.__dataclass_fields__}
         clean = {k: v for k, v in data.items() if k in known}
+        # The manual Winlink hand-off was removed in 0.6.26; a station whose
+        # config still selects it must not be left without a transport.
+        if clean.get("payload_backend") != "vara_p2p":
+            clean["payload_backend"] = "vara_p2p"
         return cls(**clean)
 
     def save(self, path: Path | str | None = None) -> Path:

@@ -130,7 +130,9 @@ def test_spectrum_auto_opens_only_for_vara_p2p(tmp_path) -> None:
 
     window.show_spectrum = record_show
     try:
-        runtime.config.payload_backend = "winlink_manual"
+        # The picker keeps room for a future transport; the spectrum is a
+        # VARA view and must stay shut for anything that is not VARA P2P.
+        runtime.config.payload_backend = "some_future_transport"
         window.show_spectrum_if_applicable()
         assert calls == 0
         runtime.config.payload_backend = "vara_p2p"

@@ -32,7 +32,6 @@ from .services import (
 from .session import NullTransport, Orchestrator, SessionState
 from .vara import VaraClient
 
-WinlinkPrompt = Callable[[str, object, Callable[[bool], None]], None]
 
 
 class Operations:
@@ -71,7 +70,6 @@ class Operations:
         self._stored_inbound: set[int] = set()
         self._qsy_previous: int | None = None
         self._vara_process: subprocess.Popen | None = None
-        self.winlink_prompt: WinlinkPrompt | None = None
         self.net = self._build_net(NullTransport())
 
     def _log(
@@ -96,36 +94,17 @@ class Operations:
         )
 
     def _make_payload_backend(self):
-        if self.config.payload_backend == "winlink_manual":
-            acquire, release = self._winlink_acquire, self._winlink_release
-        else:
-            acquire, release = self._suspend_control, self._resume_control
         return make_backend(
             self.config.payload_backend,
             vara=self.vara,
-            prompt=self._prompt_winlink,
             on_log=lambda value: self._log(value, source="payload"),
             on_qsy=self._qsy_to,
             # Keep the radio on the peer's channel until the control-layer
             # RECEIVED/DELIVERED confirmation arrives.
             on_unqsy=None,
-            on_acquire=acquire,
-            on_release=release,
+            on_acquire=self._suspend_control,
+            on_release=self._resume_control,
         )
-
-    def _prompt_winlink(self, role: str, message, done) -> None:
-        if self.winlink_prompt is None:
-            self._log(
-                dual(
-                    "Winlink hand-off needs operator confirmation.",
-                    "Předání službě Winlink vyžaduje potvrzení operátora.",
-                ),
-                LogLevel.WARNING,
-                source="winlink",
-            )
-            done(False)
-            return
-        self.winlink_prompt(role, message, done)
 
     def connect_radio(self) -> bool:
         radio = self.radio
@@ -679,17 +658,6 @@ class Operations:
         finally:
             self._payload_active.clear()
             self.request_radio_poll(force=True)
-
-    def _winlink_acquire(self) -> None:
-        self._suspend_control()
-        if self.config.vara_handoff_com:
-            self.radio.close()
-            self.rigctld.stop()
-
-    def _winlink_release(self) -> None:
-        if self.config.vara_handoff_com:
-            self.connect_radio()
-        self._resume_control()
 
     def _qsy_to(self, callsign: str) -> bool:
         if not self.config.auto_qsy:
