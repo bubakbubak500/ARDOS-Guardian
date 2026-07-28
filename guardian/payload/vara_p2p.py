@@ -146,7 +146,7 @@ class VaraP2PBackend(PayloadBackend):
                     self.on_log(
                         f"VARA P2P: payload #{msg.msg_id} handed to VARA "
                         f"({len(data)} payload bytes / {len(envelope)} wire bytes, "
-                        f"reported buffer {queued})"
+                        f"reported buffer {queued}, {self._socket_report()})"
                     )
                     transfer_timeout = transfer_timeout_for(len(envelope))
                     bitrate = getattr(
@@ -189,11 +189,19 @@ class VaraP2PBackend(PayloadBackend):
                                 "without buffer-drain confirmation"
                             )
                             success = True
+                        elif self._transport_lost():
+                            self.on_log(
+                                f"VARA P2P: lost the TCP session to VARA while "
+                                f"sending #{msg.msg_id}; the payload was NOT "
+                                f"confirmed on the air ({self._keyings()} PTT "
+                                "keyings observed)"
+                            )
                         else:
                             self.on_log(
                                 f"VARA P2P: transfer #{msg.msg_id} did not "
                                 f"finish on the degraded path "
-                                f"({self._keyings()} PTT keyings observed)"
+                                f"({self._keyings()} PTT keyings observed, "
+                                f"{self._socket_report()})"
                             )
                             self._abort_link()
                     else:
@@ -227,6 +235,26 @@ class VaraP2PBackend(PayloadBackend):
 
     def _keyings(self) -> int:
         return int(getattr(self.vara.state, "ptt_keyings", 0) or 0)
+
+    def _socket_report(self) -> str:
+        """Describe the data socket VARA is supposed to be reading from."""
+        state = self.vara.state
+        probe = getattr(self.vara, "data_socket_alive", None)
+        if probe is None:
+            health = "unknown"
+        else:
+            try:
+                health = "alive" if probe() else "CLOSED BY VARA"
+            except Exception:  # noqa: BLE001
+                health = "unknown"
+        return (
+            f"data socket {health}, generation "
+            f"{getattr(state, 'data_socket_generation', '?')}, "
+            f"{getattr(state, 'data_socket_reopens', 0)} reopens"
+        )
+
+    def _transport_lost(self) -> bool:
+        return bool(getattr(self.vara.state, "transport_lost", False))
 
     def _wait_closed(self, timeout: float) -> bool:
         """Await DISCONNECTED, extending while VARA is still keying.

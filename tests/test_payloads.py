@@ -1,4 +1,6 @@
+import socket
 import struct
+import time
 from types import SimpleNamespace
 
 from guardian.payload.vara_p2p import (
@@ -26,12 +28,15 @@ class FakeVara:
         self.transfer_result = TransferResult.DRAINED
         self.transfer_timeout = None
         self.closing_timeout = None
+        self.link_closes = True
         self.state = SimpleNamespace(
             tx_buffer_bytes=None,
             data_socket_generation=1,
+            data_socket_reopens=0,
             tx_bitrate_bps=None,
             data_bytes_read=0,
             ptt_keyings=0,
+            transport_lost=False,
         )
 
     def connect_to(self, callsign: str) -> None:
@@ -50,7 +55,8 @@ class FakeVara:
     ) -> bool:
         if state == "DISCONNECTED":
             self.closing_timeout = timeout
-        return state in {"CONNECTED", "DISCONNECTED"}
+            return self.link_closes
+        return state == "CONNECTED"
 
     def abort(self) -> None:
         self.commands.append(("abort",))
@@ -343,6 +349,70 @@ def test_wait_link_holds_the_session_while_vara_keeps_keying() -> None:
     vara._last_ptt_activity -= 60.0
     assert vara.ptt_quiet_for() > 10.0
     assert vara.wait_link("DISCONNECTED", 0.01, ptt_grace=0.05) is False
+
+
+def test_lost_vara_tcp_session_is_not_reported_as_a_closed_rf_link() -> None:
+    # Killing VARA drops the TCP pair, which forces link_state to
+    # DISCONNECTED -- the same value a graceful RF close produces.  Waiting
+    # for "DISCONNECTED" must not accept that as a completed transfer.
+    vara = VaraClient()
+    vara.state.link_state = "DISCONNECTED"
+    vara.state.transport_lost = True
+
+    assert vara.wait_link("DISCONNECTED", 0.05) is False
+
+
+def test_degraded_send_reports_a_killed_vara_as_an_unconfirmed_payload() -> None:
+    vara = FakeVara()
+    vara.transfer_result = TransferResult.NO_BUFFER_REPORTS
+    vara.state.transport_lost = True
+    vara.link_closes = False
+    logs = []
+    result = []
+
+    VaraP2PBackend(vara, on_log=logs.append)._send(
+        Message(32, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        result.append,
+    )
+
+    assert result == [False]
+    assert any("NOT confirmed on the air" in line for line in logs)
+    # A dead command port cannot carry an ABORT; do not pretend otherwise.
+    assert ("abort",) not in vara.commands
+
+
+def test_write_data_reconnects_a_data_socket_vara_has_closed() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+    port = listener.getsockname()[1]
+    opened = []
+
+    vara = VaraClient(data_port=port)
+    vara._data = socket.create_connection(("127.0.0.1", port), timeout=5)
+    opened.append(vara._data)
+    server_side = listener.accept()[0]
+    try:
+        # VARA drops its end; a lone sendall would then vanish silently.
+        server_side.close()
+        deadline = time.monotonic() + 5.0
+        while vara.data_socket_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not vara.data_socket_alive()
+
+        vara.write_data(b"payload")
+        opened.append(vara._data)
+        reconnected = listener.accept()[0]
+        opened.append(reconnected)
+
+        assert vara.state.data_socket_reopens == 1
+        assert reconnected.recv(16) == b"payload"
+    finally:
+        for sock in (*opened, listener):
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def test_vara_bitrate_notification_is_parsed_for_airtime_estimates() -> None:

@@ -40,8 +40,13 @@ class VaraState:
     link_state: str = "DISCONNECTED"   # as reported by VARA
     last_notification: str = ""
     error: str | None = None
+    # True once VARA's TCP session dies under us.  A dropped socket forces
+    # link_state to DISCONNECTED, which is indistinguishable from a graceful
+    # RF close -- without this flag a killed VARA reads as a delivered payload.
+    transport_lost: bool = False
     tx_buffer_bytes: int | None = None
     buffer_reports: int = 0
+    data_socket_reopens: int = 0
     tx_bitrate_bps: int | None = None
     data_bytes_written: int = 0
     data_bytes_read: int = 0
@@ -108,6 +113,7 @@ class VaraClient:
             self._cmd = cmd
             self.state.cmd_connected = True
             self.state.data_connected = False
+            self.state.transport_lost = False
             self.state.error = None
 
         try:
@@ -232,13 +238,75 @@ class VaraClient:
         if remaining > 0:
             self._stop.wait(remaining)
 
+    def _notify(self, text: str) -> None:
+        if self.on_notification is not None:
+            try:
+                self.on_notification(text)
+            except Exception:
+                pass
+
+    def data_socket_alive(self) -> bool:
+        """True while VARA still holds its end of the data connection.
+
+        A lone sendall() into a socket the peer has already closed succeeds
+        locally -- the reset only arrives afterwards -- so a payload can be
+        "written" to a VARA that will never see it.  Peek instead.
+        """
+        sock = self._data
+        if sock is None:
+            return False
+        try:
+            if sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR):
+                return False
+            sock.setblocking(False)
+            try:
+                pending = sock.recv(1, socket.MSG_PEEK)
+            finally:
+                sock.setblocking(True)
+        except BlockingIOError:
+            return True          # nothing readable: healthy and idle
+        except OSError:
+            return False
+        return bool(pending)     # b"" means VARA closed its end
+
+    def reopen_data_socket(self, timeout: float = 3.0) -> bool:
+        """Replace a data socket VARA has dropped, keeping the command port."""
+        try:
+            data = socket.create_connection(
+                (self.host, self.data_port), timeout=timeout
+            )
+            data.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            data.settimeout(None)
+        except OSError as exc:
+            self.state.error = f"VARA data port: {exc}"
+            self._notify(f"VARA data port reconnect failed: {exc}")
+            return False
+        with self._lock:
+            stale, self._data = self._data, data
+            self.state.data_connected = True
+            self.state.data_socket_reopens += 1
+            self._record_data_socket_locked(data)
+        if stale is not None:
+            try:
+                stale.close()
+            except OSError:
+                pass
+        self._notify(
+            "VARA data port reconnected (generation "
+            f"{self.state.data_socket_generation})"
+        )
+        return True
+
     def write_data(self, data: bytes) -> None:
         """Send payload bytes over the VARA data port."""
         if self._data is None:
             raise ConnectionError("VARA data port not connected")
-        socket_error = self._data.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-        if socket_error:
-            raise OSError(socket_error, "VARA data socket is not healthy")
+        if not self.data_socket_alive():
+            self._notify(
+                "VARA data socket was closed by VARA; reconnecting before write"
+            )
+            if not self.reopen_data_socket():
+                raise ConnectionError("VARA data port could not be reopened")
         self._data.sendall(data)
         self.state.data_bytes_written += len(data)
         # Do not mix locally written bytes with VARA's asynchronous BUFFER
@@ -339,6 +407,11 @@ class VaraClient:
         deadline = start + timeout
         hard_deadline = None if max_wait is None else start + max_wait
         while True:
+            # Checked first: a lost socket forces link_state to DISCONNECTED,
+            # so matching the target here would report a dead VARA as a clean
+            # close -- and a payload that never flew as delivered.
+            if self.state.transport_lost:
+                return False
             if self.state.link_state == target:
                 return True
             if self._stop.is_set():
@@ -378,6 +451,7 @@ class VaraClient:
                     if text:
                         self._handle_notification(text)
         finally:
+            lost = False
             with self._lock:
                 # An obsolete reader must not tear down a newer connection.
                 if self._cmd is cmd:
@@ -386,6 +460,12 @@ class VaraClient:
                     self.state.data_connected = False
                     self.state.link_state = "DISCONNECTED"
                     self.state.ptt = False
+                    # Only an unexpected loss counts; disconnect() is
+                    # deliberate and sets _stop before closing the socket.
+                    lost = not self._stop.is_set()
+                    self.state.transport_lost = lost
+            if lost:
+                self._notify("VARA TCP session lost (VARA closed or exited)")
 
     def _handle_notification(self, text: str) -> None:
         self.state.last_notification = text
