@@ -154,6 +154,14 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Waiting to send: {count}",
         "Čeká na odeslání: {count}",
     ),
+    "vara.settings_applied": (
+        "VARA settings applied ({bandwidth}).",
+        "Nastavení VARA použito ({bandwidth}).",
+    ),
+    "vara.reconnecting_for_settings": (
+        "Reconnecting VARA for the new mode or ports…",
+        "Znovu připojuji VARA kvůli novému režimu nebo portům…",
+    ),
     "menu.network_import": (
         "Import network from CSV…",
         "Importovat síť z CSV…",

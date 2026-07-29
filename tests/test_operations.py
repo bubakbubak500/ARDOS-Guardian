@@ -388,3 +388,79 @@ def test_direct_route_qsy_happens_before_message_announcement(
         operations.audio_transport = None
         operations.close()
         workers.close(wait=True)
+
+
+class _FakeVara:
+    """Records the command lines Guardian sends to VARA."""
+
+    def __init__(self, link_state: str = "DISCONNECTED") -> None:
+        self.connected = True
+        self.commands: list[str] = []
+        self.state = SimpleNamespace(link_state=link_state)
+
+    def send_command(self, command: str) -> None:
+        self.commands.append(command)
+
+
+def test_hf_bandwidth_reaches_vara_when_the_operator_changes_it(tmp_path) -> None:
+    # Before 0.6.33 the bandwidth was only ever sent inside connect_vara(), so
+    # switching 2300 -> 2750 in Settings left the modem on 2300 with nothing in
+    # the log to say so.
+    operations, workers, _ = _operations(tmp_path, vara_mode="HF")
+    operations.vara = _FakeVara()
+    try:
+        assert operations.apply_vara_session_settings()
+        assert "BW2300" in operations.vara.commands
+        assert "P2P SESSION" in operations.vara.commands
+
+        operations.vara.commands.clear()
+        operations.config.vara_hf_bandwidth = "BW2750"
+        assert operations.apply_vara_session_settings()
+        assert "BW2750" in operations.vara.commands
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_fm_is_never_sent_a_bandwidth_or_p2p_command(tmp_path) -> None:
+    # Both are HF/SAT only; VARA FM answers WRONG.
+    operations, workers, _ = _operations(tmp_path, vara_mode="FM")
+    operations.vara = _FakeVara()
+    try:
+        assert operations.apply_vara_session_settings()
+        assert not [c for c in operations.vara.commands if c.startswith("BW")]
+        assert "P2P SESSION" not in operations.vara.commands
+        assert "CHAT OFF" in operations.vara.commands
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_session_settings_are_not_pushed_into_a_live_link(tmp_path) -> None:
+    # Session-level commands mid-connection drop the link, per the reference.
+    operations, workers, _ = _operations(tmp_path, vara_mode="HF")
+    operations.vara = _FakeVara(link_state="CONNECTED")
+    try:
+        assert not operations.apply_vara_session_settings()
+        assert operations.vara.commands == []
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_endpoint_and_tuning_changes_are_told_apart(tmp_path) -> None:
+    # A bandwidth edit can be re-sent to a live VARA; a mode or port change
+    # means a different modem instance and needs a reconnect.
+    operations, workers, _ = _operations(tmp_path, vara_mode="HF")
+    try:
+        endpoint, tuning = operations.vara_endpoint(), operations.vara_tuning()
+
+        operations.config.vara_hf_bandwidth = "BW500"
+        assert operations.vara_endpoint() == endpoint
+        assert operations.vara_tuning() != tuning
+
+        operations.config.apply_vara_mode("FM")
+        assert operations.vara_endpoint() != endpoint
+    finally:
+        operations.close()
+        workers.close(wait=True)

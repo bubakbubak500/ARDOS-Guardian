@@ -96,6 +96,13 @@ fallback for when VARA reports no `BITRATE`; the real rate is parsed and used.
   models); curated radio ids validated against installed Hamlib.
 - UI builds/renders; tray + window icon; USB-serial detection.
 
+**Confirmed working on air 2026-07-29 (both bands):** VARA FM and VARA HF
+carry mail end-to-end; the MFSK-16 HF control channel closes the handshake on
+21 MHz USB; the presence beacon and per-station auto-QSY are verified in live
+operation. Tactical 2750 Hz HF bandwidth exposed one last defect — the setting
+never reached VARA unless it happened to be set before connecting — fixed in
+0.6.33.
+
 **Needs real hardware/peers to verify:**
 - **VARA HF control channel — WORKING as of 0.6.32, confirmed on air
   2026-07-29 evening** (21.189 MHz USB, IC-705 both ends). Five faults, all

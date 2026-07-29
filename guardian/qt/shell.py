@@ -618,10 +618,12 @@ class GuardianMainWindow(QMainWindow):
             )
 
     def _show_settings(self) -> None:
+        operations = self.runtime.operations
         applied_audio = [
             self.runtime.config.audio_input,
             self.runtime.config.audio_output,
         ]
+        applied_vara = [operations.vara_endpoint(), operations.vara_tuning()]
         dialog = SettingsDialog(
             self.runtime.config,
             self.theme_controller.preference,
@@ -659,6 +661,26 @@ class GuardianMainWindow(QMainWindow):
                         )
                     )
             applied_audio[:] = selected_audio
+
+            # VARA only knows what it has been told. A setting changed here
+            # never reached a already-connected modem before 0.6.33, so the
+            # HF bandwidth silently stayed on whatever connect-time sent.
+            endpoint, tuning = operations.vara_endpoint(), operations.vara_tuning()
+            if operations.vara.connected:
+                if endpoint != applied_vara[0]:
+                    self.runtime.events.publish(
+                        tr("vara.reconnecting_for_settings"), source="vara"
+                    )
+                    operations.disconnect_vara()
+                    operations.connect_vara()
+                elif tuning != applied_vara[1]:
+                    if operations.apply_vara_session_settings():
+                        self.runtime.events.publish(
+                            tr("vara.settings_applied", bandwidth=tuning[0]),
+                            source="vara",
+                        )
+            applied_vara[:] = [endpoint, tuning]
+
             self.runtime.operations.configure_vara_host_ptt()
             self.theme_controller.set_preference(dialog.selected_theme)
             self._rebuild_translated_ui()

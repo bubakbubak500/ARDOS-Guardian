@@ -117,6 +117,55 @@ class Operations:
         self._scale_session_timeouts(net, transport)
         return net
 
+    def apply_vara_session_settings(self) -> bool:
+        """Push the per-session tuning commands VARA cannot infer.
+
+        Sent when VARA connects *and* whenever the operator changes them --
+        VARA has no way to learn a setting that so far only existed in
+        Guardian's config, so before 0.6.33 changing the HF bandwidth left the
+        modem on whatever it was given at connect time.
+
+        `CHAT OFF` bounds VARA's idle loops. Compression stays on: Guardian
+        pads every envelope to MIN_WIRE_SIZE and that padding is otherwise
+        pure airtime. Bandwidth and `P2P SESSION` are HF/SAT only -- the
+        reference is explicit that P2P "must be used for P2P connections, not
+        for Gateways connections", and FM answers WRONG to a BW command.
+        """
+        if not self.vara.connected:
+            return False
+        if self.vara.state.link_state != "DISCONNECTED":
+            # These are session-level commands; the reference warns that
+            # changing session state mid-connection drops the link.
+            self._log(
+                dual(
+                    "VARA settings will apply after the current link closes.",
+                    "Nastavení VARA se projeví po ukončení stávajícího spojení.",
+                ),
+                LogLevel.WARNING,
+                source="vara",
+            )
+            return False
+        self.vara.send_command("PUBLIC ON")
+        self.vara.send_command("COMPRESSION TEXT")
+        self.vara.send_command("CHAT OFF")
+        if self.config.vara_mode.upper() == "HF":
+            self.vara.send_command(self.config.vara_hf_bandwidth)
+            self.vara.send_command("P2P SESSION")
+        return True
+
+    def vara_endpoint(self) -> tuple:
+        """Which VARA instance we talk to. A change here needs a reconnect."""
+        return (
+            self.config.vara_mode.upper(),
+            self.config.vara_host,
+            self.config.vara_cmd_port,
+            self.config.vara_data_port,
+        )
+
+    def vara_tuning(self) -> tuple:
+        """Settings VARA holds per session. A change here can be re-sent."""
+        return (self.config.vara_hf_bandwidth,)
+
     def _make_payload_backend(self):
         return make_backend(
             self.config.payload_backend,
@@ -239,23 +288,8 @@ class Operations:
             if self.vara.connected:
                 # "VARA Protocol Native TNC Commands" (EA5HVK, 2025-10-10)
                 # documents the initialization order as MYCALL, LISTEN ON,
-                # CONNECT -- and CHAT OFF as the setting that bounds VARA's
-                # idle loops so two stations cannot stay linked forever.
-                # Compression stays on: Guardian pads every envelope to
-                # MIN_WIRE_SIZE, and at 566 bps that padding is otherwise
-                # tens of seconds of airtime.
-                self.vara.send_command("PUBLIC ON")
-                self.vara.send_command("COMPRESSION TEXT")
-                self.vara.send_command("CHAT OFF")
-                if self.config.vara_mode.upper() == "HF":
-                    # Bandwidth is a VARA HF command; FM would answer WRONG.
-                    self.vara.send_command(self.config.vara_hf_bandwidth)
-                    # HF/SAT only, and the reference is explicit: "This command
-                    # must be used for P2P connections, not for Gateways
-                    # connections."  Without it VARA HF keeps the 4.0 s
-                    # Winlink-gateway retry cycle, which is not what Guardian's
-                    # station-to-station transfers need.
-                    self.vara.send_command("P2P SESSION")
+                # CONNECT.
+                self.apply_vara_session_settings()
                 if self.config.callsign != "NOCALL":
                     self.vara.set_mycall(self.config.callsign)
                 self.vara.listen(True)
