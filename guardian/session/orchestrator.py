@@ -162,6 +162,11 @@ class Orchestrator:
         self.payload = payload  # PayloadBackend | None
         self.heard = heard if heard is not None else HeardStations()
         self.auto_route = auto_route
+        # Scaled to the control modem once a real channel is up: a 34-byte
+        # HAVE_MSG is 0.9 s on AFSK but 5.2 s on MFSK-16, so a fixed 8 s ACK
+        # budget cannot survive one exchange on HF.
+        self.ack_timeout = ACK_TIMEOUT
+        self.start_timeout = START_TIMEOUT
         self.relay = relay
         self._clock = clock
         self.learned_paths: dict[str, str] = {}   # final_dest -> next_hop that worked
@@ -351,21 +356,21 @@ class Orchestrator:
             if msg.state.terminal:
                 continue
             elapsed = now - msg.t_state
-            if msg.state is SessionState.ANNOUNCING and elapsed > ACK_TIMEOUT:
+            if msg.state is SessionState.ANNOUNCING and elapsed > self.ack_timeout:
                 self._announce_timeout(msg)
             elif msg.state is SessionState.WAITING_BUSY and elapsed > BUSY_BACKOFF:
                 self._enter(msg, SessionState.ANNOUNCING)
                 msg.attempts = 1
                 self._send(FrameType.HAVE_MSG, msg)
                 self._emit(msg, "retrying after busy")
-            elif msg.state is SessionState.STARTING_VARA and elapsed > START_TIMEOUT:
+            elif msg.state is SessionState.STARTING_VARA and elapsed > self.start_timeout:
                 self._fail(msg, "VARA did not start in time")
             elif (
                 msg.state is SessionState.TRANSFERRING
                 and elapsed > session_transfer_timeout_for(msg)
             ):
                 self._fail(msg, "no RECEIVED before transfer timeout")
-            elif msg.state is SessionState.ACKED and elapsed > START_TIMEOUT:
+            elif msg.state is SessionState.ACKED and elapsed > self.start_timeout:
                 self._fail(msg, "initiator never sent START_VARA")
             elif msg.state is SessionState.RECEIVING and self.auto_complete:
                 # Simulation: pretend the VARA payload has now arrived.

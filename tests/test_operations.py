@@ -4,10 +4,12 @@ from types import SimpleNamespace
 from guardian.config import StationConfig
 from guardian.message import Folder, MailMessage, MessageStore, Status
 from guardian.operations import Operations
+from guardian.modem import make_modem
 from guardian.protocol import FrameType
 from guardian.routing import HeardStations, Route, RouteTable
 from guardian.services import EventBus, SnapshotStore, WorkerPool
 from guardian.session import SessionState
+from guardian.session.orchestrator import ACK_TIMEOUT, START_TIMEOUT
 
 
 def test_idle_operations_never_transmit_and_keep_mail_queued(tmp_path) -> None:
@@ -182,6 +184,39 @@ def test_auto_delivery_waits_for_the_next_hop_to_be_heard(tmp_path) -> None:
         assert attempts == [1]
     finally:
         operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_session_timeouts_follow_the_control_modem(tmp_path) -> None:
+    # An MFSK HAVE_MSG is ~5 s on air, so announce + ack cannot fit the fixed
+    # 8 s ACK budget that AFSK lives with comfortably.
+    operations, workers, _ = _operations(tmp_path)
+    try:
+        # No audio channel yet: the defaults stand.
+        assert operations.net.ack_timeout == ACK_TIMEOUT
+        assert operations.net.start_timeout == START_TIMEOUT
+
+        for name, expect_scaled in (("afsk1200", False), ("mfsk16", True)):
+            transport = SimpleNamespace(
+                modem=make_modem(name, sample_rate=48000), on_frame=None
+            )
+            net = SimpleNamespace(
+                ack_timeout=ACK_TIMEOUT, start_timeout=START_TIMEOUT
+            )
+            operations._scale_session_timeouts(net, transport)
+            if expect_scaled:
+                assert net.ack_timeout > 2 * ACK_TIMEOUT
+                assert net.ack_timeout > 2 * transport.modem.airtime(48)
+            else:
+                assert net.ack_timeout == ACK_TIMEOUT
+                assert net.start_timeout == START_TIMEOUT
+
+        # A transport with no modem (the idle NullTransport) is left alone.
+        net = SimpleNamespace(ack_timeout=ACK_TIMEOUT, start_timeout=START_TIMEOUT)
+        operations._scale_session_timeouts(net, SimpleNamespace())
+        assert net.ack_timeout == ACK_TIMEOUT
+    finally:
         operations.close()
         workers.close(wait=True)
 

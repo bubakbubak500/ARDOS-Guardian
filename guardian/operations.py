@@ -88,8 +88,23 @@ class Operations:
     ) -> None:
         self.events.publish(message, level=level, source=source)
 
+    # A HAVE_MSG is 0.9 s on AFSK 1200 but 5.2 s on MFSK-16, and an exchange is
+    # announce + ack back to back. Budget both legs plus PTT turnaround, or the
+    # HF handshake times out before the peer can finish answering.
+    _CONTROL_FRAME_BYTES = 48
+    _TURNAROUND = 3.0
+
+    def _scale_session_timeouts(self, net: Orchestrator, transport) -> None:
+        modem = getattr(transport, "modem", None)
+        airtime = getattr(modem, "airtime", None)
+        if airtime is None:
+            return
+        exchange = 2 * airtime(self._CONTROL_FRAME_BYTES) + self._TURNAROUND
+        net.ack_timeout = max(net.ack_timeout, exchange)
+        net.start_timeout = max(net.start_timeout, exchange)
+
     def _build_net(self, transport) -> Orchestrator:
-        return Orchestrator(
+        net = Orchestrator(
             self.config.callsign,
             transport,
             routes=self.routes,
@@ -99,6 +114,8 @@ class Operations:
             auto_route=self.config.auto_route,
             relay=self.config.auto_relay,
         )
+        self._scale_session_timeouts(net, transport)
+        return net
 
     def _make_payload_backend(self):
         return make_backend(

@@ -61,6 +61,15 @@ class AFSKModem:
         self.baud = baud
         self.sps = self.fs / self.baud  # samples per symbol (may be fractional)
 
+    def airtime(self, payload_bytes: int) -> float:
+        """Seconds on air for a frame of this payload size."""
+        frame_bytes = (
+            len(PREAMBLE)
+            + len(FEC_SYNC)
+            + (1 + payload_bytes) * FEC_REPETITIONS
+        )
+        return (frame_bytes * 8 + POSTAMBLE_BITS) / self.baud
+
     # ------------------------------------------------------------------ #
     #  Transmit                                                           #
     # ------------------------------------------------------------------ #

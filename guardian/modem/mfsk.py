@@ -20,12 +20,22 @@ from collections.abc import Callable
 import numpy as np
 
 from .afsk import SYNC, _bits_lsb_first, _bits_to_bytes_lsb_first
-from .fec import conv_encode, viterbi_decode
+from .fec import K, conv_encode, viterbi_decode
 
 M = 16
 BITS_PER_SYM = 4
 N_PRE = 8          # preamble symbols
 MARKER = (0, M - 1)  # 2-symbol sync marker after the preamble
+# Orthogonal MFSK ties tone spacing, symbol rate and window length together:
+# spacing = baud = sample_rate / n_per_symbol. The window must therefore be
+# derived from the device's sample rate, not fixed -- a 256-sample window is
+# 31.25 Hz at 8 kHz but 187.5 Hz at the 48 kHz the sound card actually runs at,
+# which spreads the 16 tones over 600-3412 Hz and pushes the top three outside
+# any SSB filter. Measured on air 2026-07-29: the tones arrived at 600/975/
+# 1162/2287 Hz and everything above 2900 Hz was gone, so the preamble (which
+# alternates tone 0 and tone 15) never survived and no frame ever decoded.
+DEFAULT_SPACING = 31.25   # Hz, and therefore also the baud rate
+FEC_FLUSH_BITS = K - 1    # conv_encode appends K-1 flush bits before rate 1/2
 
 
 def _gray(n: int) -> int:
@@ -47,10 +57,11 @@ _UNGRAY = {_GRAY[i]: i for i in range(M)}        # tone index -> symbol value
 class MFSKModem:
     name = "mfsk16"
 
-    def __init__(self, sample_rate: int = 8000, n_per_symbol: int = 256,
-                 base_freq: float = 600.0):
+    def __init__(self, sample_rate: int = 8000, n_per_symbol: int | None = None,
+                 base_freq: float = 600.0, spacing_hz: float = DEFAULT_SPACING):
         self.fs = int(sample_rate)
-        self.N = int(n_per_symbol)
+        # Keep the on-air geometry fixed and let the window follow the device.
+        self.N = int(n_per_symbol or round(self.fs / spacing_hz))
         self.base = base_freq
         self.spacing = self.fs / self.N            # orthogonal tone spacing
         self.tones = self.base + np.arange(M) * self.spacing
@@ -61,6 +72,13 @@ class MFSKModem:
     @property
     def baud(self) -> float:
         return self.fs / self.N
+
+    def airtime(self, payload_bytes: int) -> float:
+        """Seconds on air for a frame of this payload size."""
+        framing_bits = (len(SYNC) + 1 + payload_bytes) * 8
+        coded_bits = 2 * (framing_bits + FEC_FLUSH_BITS)
+        symbols = N_PRE + len(MARKER) + -(-coded_bits // BITS_PER_SYM)
+        return symbols / self.baud
 
     # ------------------------------------------------------------------ #
     #  Transmit                                                           #
