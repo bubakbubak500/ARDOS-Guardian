@@ -49,6 +49,51 @@ def conv_encode(bits) -> np.ndarray:
     return np.array(out, dtype=np.int8)
 
 
+def viterbi_decode_soft(soft) -> np.ndarray:
+    """Viterbi decode from per-bit confidences instead of hard 0/1 bits.
+
+    `soft` holds one value per coded bit: positive means "probably 1", negative
+    "probably 0", and the magnitude is how sure the demodulator was. Hard
+    slicing throws that away, which is exactly what cost us on air -- an MFSK
+    symbol decided 1.13:1 was handed to the decoder as a certainty, while its
+    neighbours were sure at 30:1 and could have resolved it.
+    """
+    soft = np.asarray(soft, dtype=np.float64)
+    n_steps = len(soft) // 2
+    if n_steps == 0:
+        return np.array([], dtype=np.int8)
+
+    metrics = np.full(NUM_STATES, np.inf)
+    metrics[0] = 0.0
+    back = np.zeros((n_steps, NUM_STATES), dtype=np.int8)
+    prev = np.zeros((n_steps, NUM_STATES), dtype=np.int16)
+
+    for t in range(n_steps):
+        r1, r2 = soft[2 * t], soft[2 * t + 1]
+        new_metrics = np.full(NUM_STATES, np.inf)
+        for s in range(NUM_STATES):
+            m = metrics[s]
+            if not np.isfinite(m):
+                continue
+            for b in (0, 1):
+                ns, o1, o2 = _TRANS[s][b]
+                # Cost = disagreement weighted by how sure the demodulator was.
+                cost = m - (r1 if o1 else -r1) - (r2 if o2 else -r2)
+                if cost < new_metrics[ns]:
+                    new_metrics[ns] = cost
+                    back[t, ns] = b
+                    prev[t, ns] = s
+        metrics = new_metrics
+
+    state = int(np.argmin(metrics))
+    bits_rev: list[int] = []
+    for t in range(n_steps - 1, -1, -1):
+        bits_rev.append(int(back[t, state]))
+        state = int(prev[t, state])
+    info = np.array(bits_rev[::-1], dtype=np.int8)
+    return info[: max(0, len(info) - (K - 1))]
+
+
 def viterbi_decode(coded) -> np.ndarray:
     """Hard-decision Viterbi decode; returns the recovered info bits (flush removed)."""
     coded = np.asarray(coded, dtype=np.int8)

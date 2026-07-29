@@ -189,28 +189,33 @@ def test_auto_delivery_waits_for_the_next_hop_to_be_heard(tmp_path) -> None:
 
 
 def test_session_timeouts_follow_the_control_modem(tmp_path) -> None:
-    # An MFSK HAVE_MSG is ~5 s on air, so announce + ack cannot fit the fixed
-    # 8 s ACK budget that AFSK lives with comfortably.
+    # The budget must cover announce + reply on whichever modem is running.
+    # MFSK was 5 s a frame at the original 31.25 baud and needed far more than
+    # the 8 s floor; at 125 baud it fits again -- the rule is what matters, not
+    # the number.
     operations, workers, _ = _operations(tmp_path)
     try:
-        # No audio channel yet: the defaults stand.
         assert operations.net.ack_timeout == ACK_TIMEOUT
         assert operations.net.start_timeout == START_TIMEOUT
 
-        for name, expect_scaled in (("afsk1200", False), ("mfsk16", True)):
-            transport = SimpleNamespace(
-                modem=make_modem(name, sample_rate=48000), on_frame=None
-            )
+        for name in ("afsk1200", "mfsk16"):
+            modem = make_modem(name, sample_rate=48000)
+            transport = SimpleNamespace(modem=modem, on_frame=None)
             net = SimpleNamespace(
                 ack_timeout=ACK_TIMEOUT, start_timeout=START_TIMEOUT
             )
             operations._scale_session_timeouts(net, transport)
-            if expect_scaled:
-                assert net.ack_timeout > 2 * ACK_TIMEOUT
-                assert net.ack_timeout > 2 * transport.modem.airtime(48)
-            else:
-                assert net.ack_timeout == ACK_TIMEOUT
-                assert net.start_timeout == START_TIMEOUT
+            exchange = 2 * modem.airtime(48)
+            assert net.ack_timeout >= exchange
+            assert net.ack_timeout >= ACK_TIMEOUT
+
+        # A slow modem does push the budget past the floor.
+        slow = SimpleNamespace(
+            modem=SimpleNamespace(airtime=lambda n: 12.0), on_frame=None
+        )
+        net = SimpleNamespace(ack_timeout=ACK_TIMEOUT, start_timeout=START_TIMEOUT)
+        operations._scale_session_timeouts(net, slow)
+        assert net.ack_timeout > 24.0
 
         # A transport with no modem (the idle NullTransport) is left alone.
         net = SimpleNamespace(ack_timeout=ACK_TIMEOUT, start_timeout=START_TIMEOUT)
