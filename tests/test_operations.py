@@ -3,9 +3,9 @@ from types import SimpleNamespace
 
 from guardian.config import StationConfig
 from guardian.message import Folder, MailMessage, MessageStore, Status
-from guardian.operations import Operations
+from guardian.operations import Operations, _ALERT_HISTORY
 from guardian.modem import make_modem
-from guardian.protocol import FrameType
+from guardian.protocol import ControlFrame, FrameType, Priority, encode_alert
 from guardian.routing import HeardStations, Route, RouteTable
 from guardian.services import EventBus, SnapshotStore, WorkerPool
 from guardian.session import SessionState
@@ -461,6 +461,76 @@ def test_endpoint_and_tuning_changes_are_told_apart(tmp_path) -> None:
 
         operations.config.apply_vara_mode("FM")
         assert operations.vara_endpoint() != endpoint
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_alert_is_not_broadcast_while_the_control_channel_is_down(tmp_path) -> None:
+    # An alert keys the radio the moment the operator confirms it. With no
+    # control channel there is nothing to key, and the refusal has to be
+    # visible rather than a silent no-op.
+    operations, workers, _ = _operations(tmp_path)
+    sent = _spy_transmissions(operations)
+    try:
+        assert operations.audio_transport is None
+        assert not operations.send_alert(0x01, "POZAR")
+        for _ in range(5):
+            operations.tick()
+        assert sent == []
+        assert operations.alerts == []
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_heard_alert_is_recorded_for_the_banner(tmp_path) -> None:
+    operations, workers, _ = _operations(tmp_path)
+    frame = ControlFrame(
+        type=FrameType.ALERT,
+        source="OK2IPW",
+        destination=encode_alert(0x02, "ZRANENI U MOSTU", "OK2IPW"),
+        next_hop="",
+        message_id=4242,
+        priority=Priority.EMERGENCY,
+        ttl=3,
+    )
+    try:
+        operations.net._on_frame(frame)
+        assert len(operations.alerts) == 1
+        record = operations.alerts[0]
+        assert (record.code, record.note, record.source) == (
+            0x02,
+            "ZRANENI U MOSTU",
+            "OK2IPW",
+        )
+        assert not record.mine
+        assert record.priority is Priority.EMERGENCY
+        # A repeat of the same alert must not stack up in the banner.
+        operations.net._on_frame(frame)
+        assert len(operations.alerts) == 1
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_alert_history_is_bounded(tmp_path) -> None:
+    operations, workers, _ = _operations(tmp_path)
+    try:
+        for msg_id in range(_ALERT_HISTORY + 5):
+            operations.net._on_frame(
+                ControlFrame(
+                    type=FrameType.ALERT,
+                    source="OK1AAA",
+                    destination=encode_alert(0x20, f"drill {msg_id}", "OK1AAA"),
+                    next_hop="",
+                    message_id=msg_id,
+                    priority=Priority.ROUTINE,
+                    ttl=1,
+                )
+            )
+        assert len(operations.alerts) == _ALERT_HISTORY
+        assert operations.alerts[0].note.endswith(str(_ALERT_HISTORY + 4))
     finally:
         operations.close()
         workers.close(wait=True)

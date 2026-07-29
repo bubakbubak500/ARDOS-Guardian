@@ -160,6 +160,23 @@ QFrame#SpectrumValueCard {{
     border: 1px solid {tokens.panel_border};
     border-radius: {tokens.radius_medium}px;
 }}
+/* Net alerts: the one panel that is allowed to shout. The border colour is
+   the whole point -- it has to read as an alarm across a dim shack. */
+QFrame#AlertBanner {{
+    background: {tokens.surface_1};
+    border: 2px solid {tokens.danger};
+    border-radius: {tokens.radius_medium}px;
+}}
+QFrame#AlertBanner[alertRole="routine"] {{ border-color: {tokens.warning}; }}
+QLabel#AlertHeadline {{
+    color: {tokens.danger};
+    font-size: {tokens.heading_font_px}px;
+    font-weight: 700;
+}}
+QFrame#AlertBanner[alertRole="routine"] QLabel#AlertHeadline {{
+    color: {tokens.warning};
+}}
+QLabel#AlertNote {{ font-weight: 600; }}
 QLabel#SectionLabel {{
     color: {tokens.text_secondary};
     font-size: {tokens.metadata_font_px}px;

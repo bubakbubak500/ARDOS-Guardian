@@ -40,6 +40,7 @@ from ..message import (
 from ..message.forms import FORMS
 from ..payload.vara_p2p import airtime_for
 from ..protocol import Priority
+from .alerts import AlertDialog
 from .inputs import RowTable, UppercaseLineEdit
 from .runtime import ShellRuntime
 
@@ -342,9 +343,14 @@ class MailWorkspace(QWidget):
         self.compose_button.clicked.connect(self.compose)
         self.refresh_button = QPushButton()
         self.refresh_button.clicked.connect(self.refresh)
+        # An alert is not mail, but this is where an operator goes to say
+        # something to the net, so this is where the control belongs.
+        self.alert_button = QPushButton()
+        self.alert_button.clicked.connect(self.send_alert)
         top.addWidget(self.title_label)
         top.addStretch()
         top.addWidget(self.refresh_button)
+        top.addWidget(self.alert_button)
         top.addWidget(self.compose_button)
         outer.addLayout(top)
 
@@ -417,6 +423,7 @@ class MailWorkspace(QWidget):
     def retranslate_ui(self) -> None:
         self.title_label.setText(tr("mail.title"))
         self.compose_button.setText(tr("mail.compose"))
+        self.alert_button.setText(tr("alert.send"))
         self.refresh_button.setText(tr("mail.refresh"))
         self.messages.setHorizontalHeaderLabels(
             [
@@ -662,6 +669,9 @@ class MailWorkspace(QWidget):
         dialog = ComposeDialog(self.runtime, self, reply_to=reply_to)
         dialog.queued.connect(lambda _message_id: self.refresh())
         dialog.exec()
+
+    def send_alert(self) -> None:
+        AlertDialog(self.runtime, self).exec()
 
     def reply(self) -> None:
         if self.selected_id is None:

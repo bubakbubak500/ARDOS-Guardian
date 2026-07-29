@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import StationConfig, config_dir
@@ -15,7 +16,13 @@ from .message import Folder, MessageStore, Status
 from .modem import make_modem
 from .modem.audio import AudioControlTransport, resolve_device
 from .payload import make_backend
-from .protocol import MAX_CONTROL_FRAME_BYTES, Priority
+from .protocol import (
+    MAX_CONTROL_FRAME_BYTES,
+    Priority,
+    alert_kind,
+    decode_alert,
+    max_note_length,
+)
 from .radio import make_driver
 from .radio.rigctld_launcher import RigctldProcess
 from .routing import HeardStations, RouteTable
@@ -32,6 +39,26 @@ from .services import (
 from .session import NullTransport, Orchestrator, SessionState
 from .vara import VaraClient
 
+
+@dataclass(frozen=True)
+class AlertRecord:
+    """A net alert as the operator should see it."""
+
+    code: int
+    note: str
+    source: str
+    received: float          # wall clock, for the banner timestamp
+    mine: bool               # this station originated it
+
+    @property
+    def priority(self) -> Priority:
+        kind = alert_kind(self.code)
+        return kind.priority if kind else Priority.ROUTINE
+
+
+# The banner shows the newest; the rest stay for the log and for the operator
+# scrolling back after a busy few minutes.
+_ALERT_HISTORY = 20
 
 
 class Operations:
@@ -77,6 +104,7 @@ class Operations:
         # Sent once per run so a peer that stays heard is not hammered.
         self._auto_delivered: set[int] = set()
         self._vara_process: subprocess.Popen | None = None
+        self.alerts: list[AlertRecord] = []      # newest first
         self.net = self._build_net(NullTransport())
 
     def _log(
@@ -114,8 +142,58 @@ class Operations:
             auto_route=self.config.auto_route,
             relay=self.config.auto_relay,
         )
+        net.on_alert = self._on_alert
         self._scale_session_timeouts(net, transport)
         return net
+
+    # ----- net-wide alerts ------------------------------------------------
+
+    def max_alert_note(self) -> int:
+        """Note characters that fit beside this station's callsign."""
+        return max_note_length(self.config.callsign)
+
+    def send_alert(self, code: int, note: str = "") -> bool:
+        """Broadcast an alert to everyone on the current frequency."""
+        if self.audio_transport is None:
+            self._log(
+                dual(
+                    "Alert not sent: the control channel is not running.",
+                    "Výstraha neodeslána: řídicí kanál neběží.",
+                ),
+                level=LogLevel.WARNING,
+            )
+            return False
+        self.net.send_alert(code, note)
+        return True
+
+    def _on_alert(self, frame, mine: bool) -> None:
+        code, note = decode_alert(frame.destination)
+        self.alerts.insert(
+            0,
+            AlertRecord(
+                code=code,
+                note=note,
+                source=frame.source,
+                received=time.time(),
+                mine=mine,
+            ),
+        )
+        del self.alerts[_ALERT_HISTORY:]
+        kind = alert_kind(code)
+        label = kind.key if kind else f"0x{code:02X}"
+        detail = f" \"{note}\"" if note else ""
+        self._log(
+            dual(
+                f"Alert {label} from {frame.source}{detail}",
+                f"Výstraha {label} od {frame.source}{detail}",
+            ),
+            level=(
+                LogLevel.WARNING
+                if not mine
+                else LogLevel.INFO
+            ),
+            source="alert",
+        )
 
     def apply_vara_session_settings(self) -> bool:
         """Push the per-session tuning commands VARA cannot infer.

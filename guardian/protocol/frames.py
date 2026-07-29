@@ -20,6 +20,11 @@ Binary layout (big-endian), all callsigns ASCII upper-case:
     ..      ..    destination  ascii   (final destination / group)
     ..      1     nh_len       uint8
     ..      ..    next_hop     ascii   (suggested next station; "" allowed)
+
+An ALERT has no addressee, so it reuses `destination` for its payload: one
+alert-code byte plus an optional short free-text note (see protocol/alerts.py).
+Nothing about the wire format changes -- it is still three length-prefixed
+fields -- so an older station simply sees an unknown frame type and ignores it.
     end-2   2     crc16        uint16  (CRC-16/CCITT-FALSE over all prior bytes)
 
 A frame is typically 30-45 bytes — small enough to send as a quick burst.
@@ -61,6 +66,7 @@ class FrameType(IntEnum):
     DELIVERED = 8     # final station confirms end-to-end delivery
     CANCEL = 9        # cancel/retract message
     BEACON = 10       # presence beacon ("I am here") — lets neighbours hear us
+    ALERT = 11        # net-wide broadcast, flooded hop to hop (see alerts.py)
 
     @property
     def label(self) -> str:

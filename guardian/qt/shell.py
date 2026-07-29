@@ -28,6 +28,7 @@ from ..i18n import dual, tr
 from ..routing import read_csv, write_csv
 from ..routing.csv_io import TEMPLATE_ROWS
 from ..services import ApplicationSnapshot
+from .alerts import AlertBanner
 from .diagnostics_dialog import DiagnosticsDialog
 from .help_dialog import HelpDialog
 from .log_workspace import LogWorkspace
@@ -225,6 +226,8 @@ class GuardianMainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         outer.addWidget(self._build_operational_header())
+        self.alert_banner = AlertBanner()
+        outer.addWidget(self.alert_banner)
         outer.addWidget(self._build_metric_strip())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -462,6 +465,7 @@ class GuardianMainWindow(QMainWindow):
             self.show_spectrum()
 
     def _apply_snapshot(self, snapshot: ApplicationSnapshot) -> None:
+        self.alert_banner.show_latest(self.runtime.operations.alerts)
         config = self.runtime.config
         payload = (
             "VARA P2P"

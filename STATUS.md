@@ -408,6 +408,22 @@ and polish.
   (can't tune). Caveat: assumes the peer is on its home freq and control bursts
   share the current channel — a full calling/working-frequency split is future.
 
+## Net alerts (0.6.34, not yet tried on air)
+- **One byte, whole net.** `FrameType.ALERT` carries an alert code plus a
+  short ASCII note in the *existing* control frame (`protocol/alerts.py`), so
+  no station configuration changes and older builds ignore the unknown type.
+  25 note bytes fit beside a 5-character callsign, 21 beside a 7-character one.
+- **Code, not text** — the byte expands to a translated sentence at display
+  time, so each operator reads the alert in their own language. Codes are
+  permanent once used on air: add, never renumber.
+- **Flood**: originator repeats 3× at 10 s; receivers display once (dedup by
+  message id, remembered an hour), then relay TTL−1 after a 1–5 s jitter
+  derived from the callsign, keeping the originator in `source` and their own
+  call in `next_hop`.
+- **UI**: red-bordered banner under the station context bar (amber for routine
+  codes), and an *Alert* button beside Compose with a code picker, per-code
+  note hint, character counter and a confirmation step.
+
 ## 8. Known issues / watch-list
 - Taskbar/tray icon required an AppUserModelID + forced re-apply to override the
   pythonw default — verify it sticks after CustomTkinter theme changes.

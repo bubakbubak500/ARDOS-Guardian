@@ -32,7 +32,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
-from ..protocol import ControlFrame, Flags, FrameType, Priority
+from ..protocol import (
+    ControlFrame,
+    Flags,
+    FrameType,
+    Priority,
+    alert_kind,
+    crc16,
+    encode_alert,
+)
 from ..routing import HeardStations
 from .transport import ControlTransport
 
@@ -47,6 +55,15 @@ BUSY_BACKOFF = 20.0
 # from the far end. That frame can be lost on RF, and CONFIRMED is not terminal,
 # so without this bound the session would stay "active" forever.
 CONFIRM_TIMEOUT = 120.0
+# Alerts are broadcast with no acknowledgement, so repetition is the only
+# reliability available. Relays are jittered because every station in earshot
+# hears the same alert at the same instant and would otherwise key together.
+ALERT_TTL = 3
+ALERT_REPEATS = 3
+ALERT_REPEAT_GAP = 10.0
+ALERT_RELAY_MIN = 1.0
+ALERT_RELAY_MAX = 5.0
+ALERT_MEMORY = 3600.0
 MAX_ANNOUNCE = 3
 _PAYLOAD_TRANSFER_TIMEOUT = 120.0
 _PAYLOAD_WIRE_OVERHEAD = 14
@@ -57,6 +74,12 @@ _PAYLOAD_MIN_WIRE_SIZE = 256
 _SLOW_LINK_BPS = 300.0
 _TRANSFER_MARGIN = 3.0
 _SESSION_MARGIN = 60.0
+
+
+def alert_priority(code: int) -> Priority:
+    """Priority carried by an alert code; unknown codes stay routine."""
+    kind = alert_kind(code)
+    return kind.priority if kind else Priority.ROUTINE
 
 
 def session_transfer_timeout_for(msg: "Message") -> float:
@@ -171,6 +194,12 @@ class Orchestrator:
         self._clock = clock
         self.learned_paths: dict[str, str] = {}   # final_dest -> next_hop that worked
         self.busy = False
+        # Broadcast alerts: what we have already seen (so a flood converges)
+        # and what is waiting to go out (repeats and jittered relays).
+        self.on_alert: Callable[[ControlFrame, bool], None] | None = None
+        self._seen_alerts: dict[int, float] = {}
+        self._alert_queue: list[tuple[float, ControlFrame]] = []
+        self._alert_counter = 0
         self.sessions: dict[int, Message] = {}
         self._now = 0.0  # last tick time, used when reacting to frames
 
@@ -352,6 +381,7 @@ class Orchestrator:
     def tick(self, now: float) -> None:
         """Drive timeouts/retransmits. Call periodically."""
         self._now = now
+        self._tick_alerts(now)
         for msg in list(self.sessions.values()):
             if msg.state.terminal:
                 continue
@@ -429,9 +459,96 @@ class Orchestrator:
             FrameType.RECEIVED: self._rx_received,
             FrameType.DELIVERED: self._rx_delivered,
             FrameType.CANCEL: self._rx_cancel,
+            FrameType.ALERT: self._rx_alert,
         }.get(frame.type)
         if handler:
             handler(frame)
+
+    # ------------------------------------------------------------------ #
+    #  Alerts (net-wide broadcast, flooded)                               #
+    # ------------------------------------------------------------------ #
+    def send_alert(self, code: int, note: str = "", ttl: int = ALERT_TTL) -> ControlFrame:
+        """Broadcast an alert to everyone on the channel and flood it onward.
+
+        Nobody acknowledges an alert, so repetition is the only reliability
+        there is: the frame is queued ALERT_REPEATS times and `tick` spaces the
+        copies out. Our own id goes straight into the seen set so a neighbour's
+        relay of our own alert never comes back at us.
+        """
+        payload = encode_alert(code, note, self.callsign)
+        frame = ControlFrame(
+            type=FrameType.ALERT,
+            source=self.callsign,
+            destination=payload,
+            next_hop="",
+            message_id=self._next_alert_id(),
+            priority=alert_priority(code),
+            ttl=max(1, int(ttl)),
+        )
+        self._seen_alerts[frame.message_id] = self._now
+        self._alert_queue.extend(
+            (self._now + n * ALERT_REPEAT_GAP, frame) for n in range(ALERT_REPEATS)
+        )
+        if self.on_alert is not None:
+            self._safe_alert(frame, mine=True)
+        return frame
+
+    def _next_alert_id(self) -> int:
+        self._alert_counter = (self._alert_counter + 1) & 0xFFFF
+        return (crc16(self.callsign.encode("ascii", "replace")) << 16 |
+                self._alert_counter) & 0xFFFFFFFF
+
+    def _rx_alert(self, f: ControlFrame) -> None:
+        """Show a heard alert once, then pass it on."""
+        if f.source == self.callsign or f.message_id in self._seen_alerts:
+            return                      # ours, or already flooded by someone
+        self._seen_alerts[f.message_id] = self._now
+        self._safe_alert(f, mine=False)
+        if f.ttl > 1:
+            onward = ControlFrame(
+                type=FrameType.ALERT,
+                source=f.source,        # always the originator, never the relay
+                destination=f.destination,
+                next_hop=self.callsign,  # who passed it on, for diagnostics
+                message_id=f.message_id,
+                priority=f.priority,
+                ttl=f.ttl - 1,
+            )
+            # Everyone in earshot heard the same alert at the same moment, so
+            # relaying immediately would collide. Spread the repeats out.
+            delay = ALERT_RELAY_MIN + self._jitter() * (
+                ALERT_RELAY_MAX - ALERT_RELAY_MIN
+            )
+            self._alert_queue.append((self._now + delay, onward))
+
+    def _jitter(self) -> float:
+        """Deterministic 0..1 spread, distinct per station, no RNG state."""
+        self._alert_counter = (self._alert_counter + 1) & 0xFFFF
+        seed = crc16(f"{self.callsign}{self._alert_counter}".encode("ascii", "replace"))
+        return seed / 0xFFFF
+
+    def _safe_alert(self, frame: ControlFrame, *, mine: bool) -> None:
+        if self.on_alert is None:
+            return
+        try:
+            self.on_alert(frame, mine)
+        except Exception:       # noqa: BLE001 - a UI fault must not stop the net
+            pass
+
+    def _tick_alerts(self, now: float) -> None:
+        # Forget alerts long enough after the last copy that a late relay is
+        # still recognised, but not so long that a repeat exercise is ignored.
+        if self._seen_alerts:
+            self._seen_alerts = {
+                msg_id: seen for msg_id, seen in self._seen_alerts.items()
+                if now - seen < ALERT_MEMORY
+            }
+        due = [item for item in self._alert_queue if item[0] <= now]
+        if not due:
+            return
+        self._alert_queue = [item for item in self._alert_queue if item[0] > now]
+        for _when, frame in due:
+            self.transport.send(frame)
 
     def _rx_route_query(self, f: ControlFrame) -> None:
         """Someone is asking who can reach f.destination. Offer if we can."""

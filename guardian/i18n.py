@@ -392,6 +392,57 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "settings.language": ("Language", "Jazyk"),
     "language.english": ("English", "Angličtina"),
     "language.czech": ("Czech", "Čeština"),
+    # Net alerts. The sentences are what a one-byte code expands to, so each
+    # station reads the alert in its own language -- keep them short and
+    # unambiguous, they are read under pressure.
+    "alert.mayday": ("MAYDAY — life in danger", "MAYDAY — ohrožení života"),
+    "alert.medical": ("Medical emergency", "Zdravotní nouze"),
+    "alert.evacuation": ("Evacuation under way", "Probíhá evakuace"),
+    "alert.qrt": ("Station going off air (QRT)", "Stanice končí provoz (QRT)"),
+    "alert.qsy": ("Changing frequency (QSY)", "Změna kmitočtu (QSY)"),
+    "alert.qrv": ("Station ready (QRV)", "Stanice připravena (QRV)"),
+    "alert.net_test": ("Net test — exercise only", "Test sítě — pouze cvičení"),
+    "alert.power_outage": ("Mains power outage", "Výpadek napájení ze sítě"),
+    "alert.battery_only": ("Running on battery", "Provoz na baterii"),
+    "alert.hint_detail": ("What happened, where", "Co se stalo a kde"),
+    "alert.hint_what_where": ("Injury and location", "Zranění a místo"),
+    "alert.hint_area": ("Area concerned", "Kterých míst se týká"),
+    "alert.hint_reason": ("Reason, when back", "Důvod, kdy zpět"),
+    "alert.hint_frequency": ("New frequency", "Nový kmitočet"),
+    "alert.hint_none": ("Optional note", "Volitelná poznámka"),
+    "alert.hint_exercise": ("Exercise name", "Název cvičení"),
+    "alert.hint_endurance": ("Endurance left", "Zbývající výdrž"),
+    "alert.banner_from": ("from {source}", "od {source}"),
+    "alert.banner_mine": ("sent by this station", "odesláno touto stanicí"),
+    "alert.banner_unknown": (
+        "Unknown alert 0x{code:02X}",
+        "Neznámá výstraha 0x{code:02X}",
+    ),
+    "alert.dismiss": ("Dismiss", "Skrýt"),
+    "alert.send": ("Alert", "Výstraha"),
+    "alert.dialog_title": ("Send net alert", "Odeslat výstrahu do sítě"),
+    "alert.dialog_intro": (
+        "Broadcast to every station on this frequency. Receiving stations "
+        "show it and pass it on.",
+        "Vysílá se všem stanicím na tomto kmitočtu. Přijímající stanice ji "
+        "zobrazí a předají dál.",
+    ),
+    "alert.dialog_kind": ("Alert", "Výstraha"),
+    "alert.dialog_note": ("Note", "Poznámka"),
+    "alert.dialog_room": (
+        "{used}/{total} characters",
+        "{used}/{total} znaků",
+    ),
+    "alert.dialog_send": ("Broadcast", "Odvysílat"),
+    "alert.confirm_title": ("Confirm alert", "Potvrdit výstrahu"),
+    "alert.confirm_body": (
+        "Broadcast \"{text}\" to the whole net?",
+        "Odvysílat „{text}“ celé síti?",
+    ),
+    "alert.no_control": (
+        "Start the control channel before sending an alert.",
+        "Před odesláním výstrahy spusťte řídicí kanál.",
+    ),
     # Dialogs/help
     "help.title": ("Guardian help", "Nápověda Guardianu"),
     "help.search": ("Filter topics", "Filtrovat témata"),
