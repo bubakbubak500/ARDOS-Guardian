@@ -1,5 +1,11 @@
 # Guardian 0.6.32
 
+> **Confirmed on air, 2026-07-29 evening:** with 0.6.32 on both stations the
+> HF control channel works — frames decode and the handshake completes on
+> 21 MHz USB. The guard silence below was the last of the five HF faults
+> (tone geometry, RX window, preamble search, missing AFC, clipped tail).
+
+
 **Every transmission was losing its last ~130 ms of audio.** Found by
 demodulating three consecutive OK7PS captures of known frames, symbol by
 symbol: symbols 0–130 of 147 decoded error-free in all three, and the last

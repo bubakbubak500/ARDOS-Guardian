@@ -97,7 +97,29 @@ fallback for when VARA reports no `BITRATE`; the real rate is parsed and used.
 - UI builds/renders; tray + window icon; USB-serial detection.
 
 **Needs real hardware/peers to verify:**
-- **VARA HF — control channel does not close.** Flown 2026-07-29 on 21.189 MHz
+- **VARA HF control channel — WORKING as of 0.6.32, confirmed on air
+  2026-07-29 evening** (21.189 MHz USB, IC-705 both ends). Five faults, all
+  found from operator captures against known frame contents:
+
+  1. Tone geometry followed the sample rate instead of staying fixed (0.6.29).
+  2. The RX window was smaller than one frame, so nothing was attempted (0.6.30).
+  3. The timing search only probed the head of the window; the preamble is now
+     found anywhere in it (0.6.31).
+  4. No AFC — two in-spec IC-705s differ by ~21 Hz at 21 MHz; measured
+     −8.5 Hz, now corrected by fitting the tone grid (0.6.31). The grid was
+     also widened to 400–2275 Hz / 125 Hz spacing on operating advice, which
+     cut a HAVE_MSG from 6.3 s to 1.6 s and quartered offset sensitivity.
+  5. **Stream teardown discarded ~130 ms of buffered TX audio** — the tail of
+     every burst, i.e. the CRC. At 32 ms/symbol the FEC hid it as one bad bit;
+     at 8 ms/symbol it was 4 bad bytes. Fixed with 400 ms of trailing guard
+     silence (0.6.32). This was the decisive one.
+
+  The lesson that found #5: demodulate operator captures **symbol by symbol
+  against ground truth** (frame contents known from the peer's log). Envelope
+  and CRC analysis pointed everywhere; the per-symbol margin profile said
+  "signal absent after symbol 131" unambiguously.
+
+  Previously (superseded): flown 2026-07-29 on 21.189 MHz
   USB. Three modem faults were found and fixed (tone geometry at the device
   sample rate, 0.6.29; RX window too small for a slow frame, 0.6.30), and one
   frame did decode: `RX Route Query src=OK2IPW`. The rest fail CRC as *near
