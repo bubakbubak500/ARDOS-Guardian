@@ -34,6 +34,14 @@ _PSEUDO_DEVICE_PREFIXES = (
 
 PTT_LEAD_SECONDS = 0.15
 PTT_TAIL_SECONDS = 0.25
+# Silence appended after every transmitted frame. Stopping the output stream
+# discards whatever is still buffered in the host API / USB device, and on air
+# that cost a constant ~130 ms off the end of every burst: measured 2026-07-29
+# as the last ~16 symbols of three consecutive captures demodulating as pure
+# noise while symbols 0-130 were error-free. (The same clip at the previous
+# 32 ms/symbol rate damaged only the final byte -- both days fit one cause.)
+# With the guard, what gets discarded is silence instead of the CRC.
+TX_GUARD_SECONDS = 0.4
 
 
 def is_real_audio_device_name(name: str) -> bool:
@@ -391,6 +399,8 @@ class AudioControlTransport(ControlTransport):
             self.on_log("Audio TX skipped — control channel not started")
             return
         samples = self.modem.modulate(frame.encode())
+        guard = np.zeros(int(TX_GUARD_SECONDS * self.fs), dtype=samples.dtype)
+        samples = np.concatenate([samples, guard])
         with self._tx_lock:
             try:
                 # Never splice samples from before and after our own half-duplex

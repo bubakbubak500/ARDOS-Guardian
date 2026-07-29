@@ -210,3 +210,53 @@ def test_soft_decisions_beat_hard_ones_on_a_marginal_symbol() -> None:
 
     assert np.array_equal(viterbi_decode_soft(soft)[:len(bits)], bits)
     assert np.array_equal(viterbi_decode(hard)[:len(bits)], bits) or True
+
+
+def test_a_truncated_tail_is_what_broke_hf_and_the_guard_absorbs_it() -> None:
+    # Measured on air 2026-07-29: stopping the output stream discarded a
+    # constant ~130 ms from the end of every burst. The last ~16 symbols of
+    # three consecutive captures demodulated as pure noise while symbols
+    # 0-130 were error-free, and the same clip at the previous 32 ms/symbol
+    # rate corrupted exactly the final byte. One cause fits both days.
+    from guardian.modem.audio import TX_GUARD_SECONDS
+
+    modem = make_modem("mfsk16", sample_rate=48000)
+    payload = _frame()
+    audio = modem.modulate(payload)
+    clip = int(0.130 * 48000)
+
+    # Without the guard the clip eats the CRC and the frame is lost.
+    assert modem.demodulate(audio[:-clip]) != [payload]
+
+    # With the guard appended, the same clip only eats silence.
+    guard = np.zeros(int(TX_GUARD_SECONDS * 48000), dtype=audio.dtype)
+    guarded = np.concatenate([audio, guard])
+    assert payload in modem.demodulate(guarded[:-clip])
+    # And the guard is comfortably larger than the measured loss.
+    assert TX_GUARD_SECONDS >= 3 * 0.130
+
+
+def test_transmit_appends_the_guard_silence(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from guardian.modem.audio import TX_GUARD_SECONDS, AudioControlTransport
+
+    modem = make_modem("mfsk16", sample_rate=48000)
+    transport = AudioControlTransport(modem=modem, sample_rate=48000)
+    played = []
+    transport._sd = SimpleNamespace(
+        play=lambda samples, samplerate, device: played.append(samples),
+        wait=lambda: None,
+    )
+    monkeypatch.setattr("guardian.modem.audio.time.sleep", lambda s: None)
+
+    frame = ControlFrame(type=FrameType.BEACON, source="OK7PS")
+    transport._tx(frame)
+
+    assert len(played) == 1
+    sent = played[0]
+    bare = modem.modulate(frame.encode())
+    guard = sent[len(bare):]
+    assert len(guard) == int(TX_GUARD_SECONDS * 48000)
+    assert not np.any(guard)          # pure silence
+    assert np.array_equal(sent[:len(bare)], bare)
