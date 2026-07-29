@@ -2,6 +2,7 @@
 
 from .frames import (
     MAGIC,
+    MAX_CONTROL_FRAME_BYTES,
     VERSION,
     FrameType,
     Priority,
@@ -13,6 +14,7 @@ from .frames import (
 
 __all__ = [
     "MAGIC",
+    "MAX_CONTROL_FRAME_BYTES",
     "VERSION",
     "FrameType",
     "Priority",

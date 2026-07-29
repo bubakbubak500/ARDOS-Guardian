@@ -43,6 +43,13 @@ class FrameError(Exception):
     """Raised when a buffer cannot be parsed as a valid control frame."""
 
 
+# Upper bound on an encoded control frame. The largest Guardian emits is 43
+# bytes (HAVE_MSG with three 9-character callsigns); the headroom covers a
+# field being widened. The audio transport sizes its RX window from this and
+# the session layer sizes its timeouts, so a frame that exceeded it would stop
+# being received at all -- test_frames asserts every type stays under.
+MAX_CONTROL_FRAME_BYTES = 48
+
 class FrameType(IntEnum):
     HAVE_MSG = 1      # "I have a message available"
     ACK_HAVE = 2      # next station heard it and is ready

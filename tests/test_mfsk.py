@@ -1,8 +1,13 @@
 import numpy as np
 
 from guardian.modem import make_modem
+from guardian.modem.audio import (
+    MIN_POLL_INTERVAL,
+    MIN_RX_WINDOW,
+    AudioControlTransport,
+)
 from guardian.modem.mfsk import DEFAULT_SPACING, M, MFSKModem
-from guardian.protocol import ControlFrame, FrameType
+from guardian.protocol import MAX_CONTROL_FRAME_BYTES, ControlFrame, FrameType
 
 # A conservative SSB passband. An IC-705 on USB passes roughly this; anything
 # outside it never leaves the transmitter or never reaches the demodulator.
@@ -87,6 +92,49 @@ def test_afsk_airtime_matches_too() -> None:
     for size in (8, 34, 48):
         measured = len(modem.modulate(b"\x5a" * size)) / modem.fs
         assert abs(modem.airtime(size) - measured) < 0.01
+
+
+def test_every_control_frame_fits_the_declared_bound() -> None:
+    # The audio RX window and the session timeouts are both sized from this
+    # bound. A frame that outgrew it would stop being received at all.
+    largest = 0
+    for kind in FrameType:
+        encoded = ControlFrame(
+            type=kind,
+            source="OK7PS-15",
+            destination="OK2IPW-15",
+            next_hop="OK2IPW-15",
+            message_id=0xFFFFFFFF,
+            ttl=15,
+        ).encode()
+        largest = max(largest, len(encoded))
+    assert largest <= MAX_CONTROL_FRAME_BYTES
+
+
+def test_the_rx_window_can_hold_a_whole_frame_on_either_modem() -> None:
+    # A fixed 4 s window was ample for AFSK but silently swallowed MFSK once
+    # its frames grew to ~7 s: nothing was attempted, so not even a bad-frame
+    # line appeared in the log.
+    for name in ("afsk1200", "mfsk16"):
+        modem = make_modem(name, sample_rate=48000)
+        transport = AudioControlTransport(modem=modem, sample_rate=48000)
+        frame = modem.airtime(MAX_CONTROL_FRAME_BYTES)
+
+        assert transport.rx_window > frame + transport.poll_interval
+        assert transport._rx_buf.maxlen >= int(48000 * frame)
+        # Polling faster than frames can arrive only burns CPU.
+        assert transport.poll_interval <= frame
+
+
+def test_afsk_keeps_the_window_and_poll_it_has_always_had() -> None:
+    # FM is the one path proven on air; the scaling must not disturb it.
+    transport = AudioControlTransport(
+        modem=make_modem("afsk1200", sample_rate=48000), sample_rate=48000
+    )
+
+    assert transport.rx_window == MIN_RX_WINDOW
+    assert transport.poll_interval == MIN_POLL_INTERVAL
+    assert transport._rx_buf.maxlen == 48000 * 4
 
 
 def test_hf_control_frames_are_slow_enough_to_need_longer_timeouts() -> None:

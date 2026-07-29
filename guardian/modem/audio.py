@@ -21,7 +21,7 @@ import wave
 
 import numpy as np
 
-from ..protocol import ControlFrame, FrameError
+from ..protocol import MAX_CONTROL_FRAME_BYTES, ControlFrame, FrameError
 from ..session.transport import ControlTransport
 from .afsk import AFSKModem
 
@@ -225,7 +225,16 @@ def match_device_name(names: list[str], saved_name: str) -> str | None:
     return names[index] if index is not None else None
 
 
+MIN_RX_WINDOW = 4.0      # seconds; what AFSK has always used
+MIN_POLL_INTERVAL = 0.25  # seconds; likewise
+
+
 class AudioControlTransport(ControlTransport):
+    def _modem_airtime(self, payload_bytes: int) -> float:
+        """Longest frame this modem puts on air, or 0 for a modem without one."""
+        airtime = getattr(self.modem, "airtime", None)
+        return float(airtime(payload_bytes)) if airtime else 0.0
+
     def __init__(
         self,
         modem: AFSKModem | None = None,
@@ -256,7 +265,15 @@ class AudioControlTransport(ControlTransport):
         self._tx_lock = threading.Lock()
         self._tx_condition = threading.Condition()
         self._pending_tx = 0
-        self._rx_buf = deque(maxlen=int(sample_rate * 4))  # ~4 s rolling window
+        # The rolling window must hold one whole frame however slow the modem
+        # is. A fixed 4 s was ample for AFSK's 1.2 s frames but silently swallowed
+        # MFSK-16 once its geometry was corrected: a 6.9 s frame never fitted, so
+        # nothing was ever attempted and not even a bad-frame line appeared.
+        # Polling faster than a frame arrives only burns CPU, so that scales too.
+        frame = self._modem_airtime(MAX_CONTROL_FRAME_BYTES)
+        self.poll_interval = max(MIN_POLL_INTERVAL, frame / 8.0)
+        self.rx_window = max(MIN_RX_WINDOW, frame + self.poll_interval + 1.0)
+        self._rx_buf = deque(maxlen=int(sample_rate * self.rx_window))
         self._recent: dict[bytes, float] = {}              # payload -> last seen
         self._rx_frames: deque = deque()                   # decoded, awaiting pump()
         self._running = False
@@ -427,7 +444,7 @@ class AudioControlTransport(ControlTransport):
 
     def _rx_loop(self) -> None:
         while self._running:
-            time.sleep(0.25)
+            time.sleep(self.poll_interval)
             if len(self._rx_buf) < self.fs * 0.4:
                 continue
             window = np.fromiter(self._rx_buf, dtype=np.float32)

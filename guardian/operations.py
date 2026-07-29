@@ -15,7 +15,7 @@ from .message import Folder, MessageStore, Status
 from .modem import make_modem
 from .modem.audio import AudioControlTransport, resolve_device
 from .payload import make_backend
-from .protocol import Priority
+from .protocol import MAX_CONTROL_FRAME_BYTES, Priority
 from .radio import make_driver
 from .radio.rigctld_launcher import RigctldProcess
 from .routing import HeardStations, RouteTable
@@ -91,7 +91,7 @@ class Operations:
     # A HAVE_MSG is 0.9 s on AFSK 1200 but 5.2 s on MFSK-16, and an exchange is
     # announce + ack back to back. Budget both legs plus PTT turnaround, or the
     # HF handshake times out before the peer can finish answering.
-    _CONTROL_FRAME_BYTES = 48
+    _CONTROL_FRAME_BYTES = MAX_CONTROL_FRAME_BYTES
     _TURNAROUND = 3.0
 
     def _scale_session_timeouts(self, net: Orchestrator, transport) -> None:

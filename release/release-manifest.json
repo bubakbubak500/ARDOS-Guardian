@@ -1,6 +1,6 @@
 {
-    "version":  "0.6.29",
-    "installer_url":  "https://github.com/bubakbubak500/ARDOS-Guardian/releases/latest/download/Guardian-0.6.29-setup-win-x64.exe",
-    "sha256":  "f8f8e3dc4b68f507937afdee650317093d746c1ff4ce586abb9130005bfb0fac",
-    "notes_url":  "https://github.com/bubakbubak500/ARDOS-Guardian/releases/tag/v0.6.29"
+    "version":  "0.6.30",
+    "installer_url":  "https://github.com/bubakbubak500/ARDOS-Guardian/releases/latest/download/Guardian-0.6.30-setup-win-x64.exe",
+    "sha256":  "50b36b507faa25e3cb5e60ef634e1620390354b6fa9c0ac6e2a006eb7b2b0f3e",
+    "notes_url":  "https://github.com/bubakbubak500/ARDOS-Guardian/releases/tag/v0.6.30"
 }
