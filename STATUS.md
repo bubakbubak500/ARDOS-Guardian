@@ -97,7 +97,45 @@ fallback for when VARA reports no `BITRATE`; the real rate is parsed and used.
 - UI builds/renders; tray + window icon; USB-serial detection.
 
 **Needs real hardware/peers to verify:**
-- **VARA HF.** Never run on air. The path is the same as FM, and 0.6.24 adds
+- **VARA HF — control channel does not close.** Flown 2026-07-29 on 21.189 MHz
+  USB. Three modem faults were found and fixed (tone geometry at the device
+  sample rate, 0.6.29; RX window too small for a slow frame, 0.6.30), and one
+  frame did decode: `RX Route Query src=OK2IPW`. The rest fail CRC as *near
+  misses* — 32 of 33 bytes correct with a single bit wrong in the last byte.
+
+  Measured from OK7PS's `last-bad-control.wav` (frame contents known from
+  OK2IPW's log, so every figure below is against ground truth):
+
+  | | |
+  |---|---|
+  | preamble located (full-window search) | 3.492 s, match 0.972 |
+  | frequency offset | **-8.50 Hz** |
+  | symbols wrong after correcting it | 4 of 157 |
+  | decision margin, best/second tone | median 30.3, min 1.13 |
+
+  Three things follow, none of them yet implemented:
+
+  1. **The timing search only probes the first two symbols of the RX window.**
+     The window is 8.8 s and a burst can start anywhere in it — this one was at
+     3.5 s. It has been finding frames by luck. A full-window preamble search
+     scores 0.972 and is cheap if it correlates only tones 0 and M-1.
+  2. **There is no AFC.** Two IC-705s each inside a +-0.5 ppm TCXO spec differ
+     by ~21 Hz at 21 MHz, against 31.25 Hz tone spacing. This is a design gap,
+     not a tuning error: it cannot be fixed by aligning dials. Correcting the
+     measured -8.50 Hz cuts the errors but leaves 4 symbols wrong.
+  3. **Demodulation is hard-decision.** The margin profile is the giveaway:
+     almost every symbol is decided 30:1, and two are near coin flips at 1.13.
+     `argmax` throws that confidence away before the Viterbi ever sees it.
+     Soft-decision input is the standard answer to exactly this profile and is
+     the change most likely to close the gap.
+
+  Four fixes were attempted on 2026-07-29 and **all reverted**: none made the
+  capture decode, because the frame could not be located in the window and the
+  offset was being measured in noise. The full-window preamble search above is
+  what makes the next attempt verifiable against real audio rather than
+  simulation.
+
+- **VARA HF payload transfer.** Never run on air. The path is the same as FM, and 0.6.24 adds
   the one command the reference marks as required for peer-to-peer work
   (`P2P SESSION`, HF/SAT only — without it VARA HF keeps the 4.0 s Winlink
   gateway retry cycle). Note both HF and FM ports default to 8300/8301, so the
