@@ -2,8 +2,13 @@
 
 **Net-wide alerts.** A station can now broadcast a short warning to everyone
 on the current frequency. Receiving stations show it and pass it on, so it
-reaches beyond the originator's own footprint. First build of the feature —
-to be tried on air and iterated.
+reaches beyond the originator's own footprint.
+
+**Verified on air 2026-07-30 with OK2IPW on both control modems** — MFSK-16
+on HF and AFSK-1200 on FM. Broadcast, display and relay all work as designed.
+One cosmetic observation is on the watch-list in `STATUS.md`: an occasional
+`RX bad frame: bad magic` in the log alongside an alert, with the alert itself
+arriving correctly. Logs to follow.
 
 ## What travels
 

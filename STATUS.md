@@ -103,6 +103,10 @@ operation. Tactical 2750 Hz HF bandwidth exposed one last defect — the setting
 never reached VARA unless it happened to be set before connecting — fixed in
 0.6.33.
 
+**Confirmed working on air 2026-07-30:** net alerts (0.6.34) on both control
+modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
+watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
+
 **Needs real hardware/peers to verify:**
 - **VARA HF control channel — WORKING as of 0.6.32, confirmed on air
   2026-07-29 evening** (21.189 MHz USB, IC-705 both ends). Five faults, all
@@ -408,7 +412,10 @@ and polish.
   (can't tune). Caveat: assumes the peer is on its home freq and control bursts
   share the current channel — a full calling/working-frequency split is future.
 
-## Net alerts (0.6.34, not yet tried on air)
+## Net alerts (0.6.34 — confirmed on air 2026-07-30, HF and FM)
+Tested end to end with OK2IPW on **both** control modems: MFSK-16 on HF and
+AFSK-1200 on FM. Broadcast, display and relay all behave as designed.
+
 - **One byte, whole net.** `FrameType.ALERT` carries an alert code plus a
   short ASCII note in the *existing* control frame (`protocol/alerts.py`), so
   no station configuration changes and older builds ignore the unknown type.
@@ -425,6 +432,18 @@ and polish.
   note hint, character counter and a confirmation step.
 
 ## 8. Known issues / watch-list
+- **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,
+  reported from the air 2026-07-30, HF and FM; the alert itself arrived and
+  displayed correctly every time). Logs pending from OK7PS. Cosmetic so far,
+  but worth chasing because the message means the demodulator handed
+  `_handle_payload` (`modem/audio.py`) bytes that its own
+  `_is_valid_control_payload` validator should already have rejected. Two
+  leads: (a) alerts are the longest frames we transmit (48 B vs 34 B for a
+  HAVE_MSG) and there are simply more of them on air — 3 repeats plus relays —
+  so a demod window is more likely to catch a truncated burst; (b) a relay and
+  a source repeat can overlap despite the jitter, and a collided burst
+  decodes to garbage. Check whether the offending payload is a prefix of a
+  good frame before assuming a decoder bug.
 - Taskbar/tray icon required an AppUserModelID + forced re-apply to override the
   pythonw default — verify it sticks after CustomTkinter theme changes.
 - `rigctl -l` model ids change between Hamlib versions — the live "Browse all"
