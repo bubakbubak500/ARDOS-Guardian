@@ -107,11 +107,12 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
-**Built but not yet flown (0.6.35–0.6.38):** the alert frequency sweep (an
+**Built but not yet flown (0.6.35–0.6.39):** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
-goes back), the heard-stations S/N estimate + channel column, the Test PTT
-button in radio settings, and no-CAT keying via Hamlib dummy + serial PTT
-(AIOC).
+goes back), the heard-stations S/N estimate + channel column, and the
+negotiated VARA FM slow-keying gap. **Confirmed working in the field
+2026-07-30:** Test PTT and no-CAT keying via Hamlib dummy + serial PTT (AIOC,
+0.6.38) — "uz to funguje".
 
 **Needs real hardware/peers to verify:**
 - **VARA HF control channel — WORKING as of 0.6.32, confirmed on air
@@ -473,6 +474,29 @@ returned flag: 0.6.36 read `VoxRadio.get_state().ptt`, which is the RTS/DTR
 line Guardian had just asserted, and reported a dead cable as "the radio
 reported TX". Hamlib (`t`) confirms; VOX/serial says it cannot. The
 still-asserted check applies to both.
+
+## Handshake polish + negotiated slow keying (0.6.39)
+From the first multi-hop field reports:
+
+- **Re-ACK on repeated HAVE_MSG** — a responder in ACKED answers a repeated
+  announcement again instead of ignoring it; a lost ACK_HAVE used to strand
+  both sides (initiator burns 3 announces, responder waits in ACKED).
+- **Blind announce budget** — discovery with no offers falls back to the
+  destination directly with `Message.blind=True`: 1× ROUTE_QUERY + 2×
+  HAVE_MSG total. Vouched hops keep MAX_ANNOUNCE=3.
+- **Slow-keying negotiation (VARA FM only)** — `config.vara_ptt_delay_ms`
+  (0–700, default 0) rides in spare flags bits (bits 3–5, 100 ms steps;
+  `encode/decode_ptt_delay` in frames.py; wire format unchanged, old builds
+  echo unknown bits). HAVE_MSG carries the request, ACK_HAVE the negotiated
+  max; both sides sleep that long before each VARA PTT ON for that session
+  (`Operations._vara_ptt`, value captured from `_session_event` at
+  STARTING_VARA/RECEIVING, cleared at terminal). Requires vara_host_ptt.
+  Relay legs re-negotiate from their own setting. **To verify on air:** how
+  much hold-off the VARA FM leader tolerates before burst starts clip —
+  advice is start at 100–200 ms.
+- "Wrong message sent" report: selection/send path is id-keyed and clean;
+  the observed behaviour is auto_deliver announcing another waiting message
+  when its hop is heard (logged, by design, can be switched off).
 
 ## No-CAT radio via Hamlib dummy + serial PTT (0.6.38)
 Root cause of "AIOC handheld with Hamlib Dummy never keys": the dummy model

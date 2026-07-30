@@ -39,7 +39,9 @@ from ..protocol import (
     Priority,
     alert_kind,
     crc16,
+    decode_ptt_delay,
     encode_alert,
+    encode_ptt_delay,
 )
 from ..routing import HeardStations
 from .transport import ControlTransport
@@ -143,6 +145,13 @@ class Message:
     error: str = ""
     offers: list = field(default_factory=list)   # ROUTE_OFFER sources during discovery
     relayed: bool = False          # this station has already relayed this msg
+    # The hop is a blind guess: discovery ran and nobody offered, so we are
+    # trying the destination directly. Blind announces get one repeat fewer —
+    # the channel already carried a query nobody answered.
+    blind: bool = False
+    # Slow-keying hold-off (ms) negotiated for the VARA payload phase: the
+    # larger of what we and the peer asked for in HAVE_MSG/ACK_HAVE.
+    ptt_delay_ms: int = 0
 
 
 class Orchestrator:
@@ -198,6 +207,10 @@ class Orchestrator:
         # channel it was actually heard on. Set by the owner; the session layer
         # never talks to a rig itself.
         self.channel_frequency: Callable[[], int | None] | None = None
+        # This station's slow-keying request (ms) for the VARA payload phase,
+        # asked at call time so a mode change needs no rebuild. The owner sets
+        # it only when it applies (VARA FM, operator configured a delay).
+        self.ptt_delay_request: Callable[[], int] | None = None
         # Broadcast alerts: what we have already seen (so a flood converges)
         # and what is waiting to go out (repeats and jittered relays).
         self.on_alert: Callable[[ControlFrame, bool], None] | None = None
@@ -223,11 +236,14 @@ class Orchestrator:
     ) -> Message:
         """Originate (or relay) a message toward final_dest."""
         final_dest = final_dest.strip().upper()
+        own_delay = self._own_ptt_delay()
         msg = Message(
             msg_id=msg_id, source=self.callsign, final_dest=final_dest,
-            next_hop="", priority=priority, ttl=ttl, flags=flags,
+            next_hop="", priority=priority, ttl=ttl,
+            flags=encode_ptt_delay(flags, own_delay),
             body=body, payload_bytes=payload_bytes, direction="out",
         )
+        msg.ptt_delay_ms = own_delay
         self.sessions[msg_id] = msg
 
         hop, how = self._resolve_next_hop(final_dest, explicit=next_hop)
@@ -245,6 +261,15 @@ class Orchestrator:
             self._begin_announce(msg)
             self._emit(msg, f"announcing directly to {final_dest}")
         return msg
+
+    def _own_ptt_delay(self) -> int:
+        """What this station asks the peer to slow down by, in ms."""
+        if self.ptt_delay_request is None:
+            return 0
+        try:
+            return max(0, int(self.ptt_delay_request()))
+        except Exception:       # noqa: BLE001 - a config fault must not stop mail
+            return 0
 
     def _resolve_next_hop(self, final_dest: str, explicit: str | None = None) -> tuple[str | None, str]:
         """Pick a next hop: explicit > manual route > learned > directly heard."""
@@ -351,13 +376,18 @@ class Orchestrator:
             self._emit(inbound, "TTL expired — not relaying")
             return
         inbound.relayed = True
+        own_delay = self._own_ptt_delay()
         relay = Message(
             msg_id=inbound.msg_id, source=self.callsign,
             final_dest=inbound.final_dest, next_hop="",
             priority=inbound.priority, ttl=inbound.ttl - 1,
-            flags=inbound.flags, body=inbound.body,
+            # The delay negotiated on the previous hop belongs to that pair of
+            # radios; the next leg starts over from our own request.
+            flags=encode_ptt_delay(inbound.flags, own_delay),
+            body=inbound.body,
             payload_bytes=inbound.payload_bytes, direction="out",
         )
+        relay.ptt_delay_ms = own_delay
         self.sessions[inbound.msg_id] = relay  # the outbound leg takes over
         hop, how = self._resolve_next_hop(relay.final_dest)
         if hop:
@@ -430,7 +460,10 @@ class Orchestrator:
             self._emit(msg, f"discovered route via {hop} (offers: {','.join(msg.offers)})")
         else:
             # Nobody offered — try the destination directly as a last resort.
+            # The query already went unanswered, so this is a blind guess and
+            # gets one announce fewer than a hop somebody vouched for.
             msg.next_hop = msg.final_dest
+            msg.blind = True
             self._begin_announce(msg)
             self._emit(msg, f"no offers — trying {msg.final_dest} directly")
 
@@ -624,12 +657,25 @@ class Orchestrator:
             return  # someone else's announcement; just ignore (could log "heard")
         existing = self.sessions.get(f.message_id)
         if existing and not existing.state.terminal:
-            return  # duplicate announcement, already handling
+            # A repeated announcement means the initiator did not hear our
+            # answer. Staying silent used to strand both sides: they burn
+            # every re-announce against a peer that acked once into a lost
+            # frame and then said nothing more.
+            if existing.direction == "in" and existing.state is SessionState.ACKED:
+                self._send(FrameType.ACK_HAVE, existing)
+                self._emit(existing, f"re-acked repeated HAVE_MSG from {f.source}")
+            return
+        # Slow-keying negotiation: the payload phase runs at the larger of the
+        # two requests, and our ACK carries the result back so both stations
+        # key with the same hold-off.
+        negotiated = max(decode_ptt_delay(f.flags), self._own_ptt_delay())
         msg = Message(
             msg_id=f.message_id, source=f.source, final_dest=f.destination,
-            next_hop=self.callsign, priority=f.priority, ttl=f.ttl, flags=f.flags,
+            next_hop=self.callsign, priority=f.priority, ttl=f.ttl,
+            flags=encode_ptt_delay(f.flags, negotiated),
             direction="in",
         )
+        msg.ptt_delay_ms = negotiated
         self.sessions[f.message_id] = msg
         self._enter(msg, SessionState.HEARD)
         if self.busy:
@@ -643,6 +689,9 @@ class Orchestrator:
     def _rx_ack(self, f: ControlFrame) -> None:
         msg = self._mine(f, "out")
         if msg and msg.state is SessionState.ANNOUNCING and f.source == msg.next_hop:
+            # The responder answered with the negotiated hold-off (the larger
+            # of the two requests); adopt it for our own keying too.
+            msg.ptt_delay_ms = max(msg.ptt_delay_ms, decode_ptt_delay(f.flags))
             self._enter(msg, SessionState.STARTING_VARA)
             self._send(FrameType.START_VARA, msg)
             self._emit(msg, f"{f.source} ready — starting VARA")
@@ -700,7 +749,11 @@ class Orchestrator:
     #  Helpers                                                            #
     # ------------------------------------------------------------------ #
     def _announce_timeout(self, msg: Message) -> None:
-        if msg.attempts < MAX_ANNOUNCE:
+        # A blind hop (discovery ran, nobody answered) is announced twice in
+        # total, not three times: one ROUTE_QUERY plus two HAVE_MSG is already
+        # three unanswered transmissions on a shared channel.
+        limit = MAX_ANNOUNCE - 1 if msg.blind else MAX_ANNOUNCE
+        if msg.attempts < limit:
             msg.attempts += 1
             msg.t_state = self._now
             self._send(FrameType.HAVE_MSG, msg)

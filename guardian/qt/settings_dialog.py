@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from ..config import StationConfig
 from ..i18n import Language, dual, language, set_language, tr
 from ..modem.audio import list_audio_devices, match_device_name
+from ..protocol import MAX_PTT_DELAY_MS, PTT_DELAY_STEP_MS
 from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.usb_serial import list_serial_ports, port_device
 from .theme import ThemePreference
@@ -279,6 +280,39 @@ class SettingsDialog(QDialog):
         form.addRow(dual("rigctld executable", "Program rigctld"), self.rigctld_path)
         form.addRow(dual("Hamlib PTT via", "PTT přes (Hamlib)"), self.ptt_type)
         form.addRow(dual("VOX PTT line", "Linka PTT pro VOX"), self.ptt_line)
+
+        # Slow-keying gap for cheap handhelds (AIOC-class cables): negotiated
+        # with the peer during the handshake, applied before each VARA key-up.
+        self.vara_ptt_delay = QSpinBox()
+        self.vara_ptt_delay.setRange(0, MAX_PTT_DELAY_MS)
+        self.vara_ptt_delay.setSingleStep(PTT_DELAY_STEP_MS)
+        self.vara_ptt_delay.setSuffix(" ms")
+        self.vara_ptt_delay.setSpecialValueText(
+            dual("Off (default)", "Vypnuto (výchozí)")
+        )
+        self.vara_ptt_delay.setValue(
+            max(0, min(int(self.config.vara_ptt_delay_ms or 0), MAX_PTT_DELAY_MS))
+        )
+        self.vara_ptt_delay.setToolTip(
+            dual(
+                "VARA FM only. If this radio unkeys slowly (typical for cheap "
+                "handhelds on an AIOC cable), both stations agree during the "
+                "handshake to wait this long before every VARA key-up, so the "
+                "other transmitter has died down first. Needs 'Let Guardian "
+                "key the radio for VARA'. VARA's speed is not affected; 0 "
+                "keeps today's behaviour.",
+                "Pouze VARA FM. Pokud se toto rádio pomalu odklíčovává "
+                "(typické pro levné ruční stanice přes kabel AIOC), obě "
+                "stanice si při handshaku dohodnou, že před každým "
+                "zaklíčováním VARA počkají tuto dobu, aby protější vysílač "
+                "stihl doznít. Vyžaduje „Guardian klíčuje rádio pro VARA“. "
+                "Rychlost VARA se nemění; 0 ponechá dnešní chování.",
+            )
+        )
+        form.addRow(
+            dual("VARA FM keying delay", "Zpoždění klíčování VARA FM"),
+            self.vara_ptt_delay,
+        )
 
         # Proving that keying works is the one thing this page cannot tell you
         # from its own fields: the wiring is only ever confirmed on air.
@@ -736,6 +770,7 @@ class SettingsDialog(QDialog):
         cfg.rigctld_path = self.rigctld_path.text() or "rigctld"
         cfg.ptt_line = self.ptt_line.currentText()
         cfg.ptt_type = self.ptt_type.currentData()
+        cfg.vara_ptt_delay_ms = self.vara_ptt_delay.value()
         cfg.audio_input = self.audio_input.currentText().strip()
         cfg.audio_output = self.audio_output.currentText().strip()
         cfg.vara_host = self.vara_host.text().strip()

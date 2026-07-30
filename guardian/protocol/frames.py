@@ -87,6 +87,33 @@ class Flags(IntFlag):
     ACK_REQUIRED = 0x04
 
 
+# Bits 3-5 of the flags byte: a slow-keying request for the VARA FM payload
+# phase, in 100 ms steps (0 = none, up to 700 ms). A cheap handheld unkeys
+# slowly, so during the long back-and-forth of a VARA transfer its peer must
+# hold off keying briefly or the first syllable of every burst is lost. The
+# value rides inside the existing flags byte of HAVE_MSG/ACK_HAVE: the wire
+# format is untouched, and a build that predates this keeps unknown flag bits
+# intact (IntFlag KEEP) and simply echoes them back.
+PTT_DELAY_STEP_MS = 100
+_PTT_DELAY_SHIFT = 3
+_PTT_DELAY_BITS = 0x07
+MAX_PTT_DELAY_MS = _PTT_DELAY_BITS * PTT_DELAY_STEP_MS
+
+
+def encode_ptt_delay(flags: Flags | int, delay_ms: int) -> Flags:
+    """Overwrite the slow-keying field of `flags` with `delay_ms` (rounded
+    down to the step, capped). Overwriting matters: a relay must replace the
+    previous hop's negotiated value with its own, never forward it."""
+    steps = max(0, min(int(delay_ms) // PTT_DELAY_STEP_MS, _PTT_DELAY_BITS))
+    cleared = int(flags) & ~(_PTT_DELAY_BITS << _PTT_DELAY_SHIFT)
+    return Flags(cleared | (steps << _PTT_DELAY_SHIFT))
+
+
+def decode_ptt_delay(flags: Flags | int) -> int:
+    """The slow-keying request carried in `flags`, in milliseconds."""
+    return ((int(flags) >> _PTT_DELAY_SHIFT) & _PTT_DELAY_BITS) * PTT_DELAY_STEP_MS
+
+
 def crc16(data: bytes) -> int:
     """CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, no reflection, xorout 0."""
     crc = 0xFFFF

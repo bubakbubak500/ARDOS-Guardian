@@ -18,6 +18,7 @@ from .modem.audio import AudioControlTransport, resolve_device
 from .payload import make_backend
 from .protocol import (
     MAX_CONTROL_FRAME_BYTES,
+    MAX_PTT_DELAY_MS,
     Priority,
     alert_kind,
     decode_alert,
@@ -128,6 +129,8 @@ class Operations:
         # Sent once per run so a peer that stays heard is not hammered.
         self._auto_delivered: set[int] = set()
         self._vara_process: subprocess.Popen | None = None
+        # Negotiated slow-keying hold-off for the payload session in flight.
+        self._payload_ptt_delay_ms = 0
         self.alerts: list[AlertRecord] = []      # newest first
         self.net = self._build_net(NullTransport())
 
@@ -168,8 +171,20 @@ class Operations:
         )
         net.on_alert = self._on_alert
         net.channel_frequency = self.current_frequency
+        net.ptt_delay_request = self._vara_keying_delay_request
         self._scale_session_timeouts(net, transport)
         return net
+
+    def _vara_keying_delay_request(self) -> int:
+        """Slow-keying hold-off this station asks its peer for, in ms.
+
+        Zero unless the operator configured one *and* the band is FM: HF
+        stations run better radios and the extra dead air would only slow the
+        net down, so the request never leaves an HF configuration.
+        """
+        if self.config.vara_mode.upper() != "FM":
+            return 0
+        return max(0, min(int(self.config.vara_ptt_delay_ms or 0), MAX_PTT_DELAY_MS))
 
     # ----- net-wide alerts ------------------------------------------------
 
@@ -1169,6 +1184,29 @@ class Operations:
             f"[{message.source}#{message.msg_id}] {event}",
             source="session",
         )
+        # Adopt the session's negotiated slow-keying gap for the VARA phase.
+        # STARTING_VARA/RECEIVING are emitted before the payload backend takes
+        # the codec, so the value is in place before VARA's first PTT ON.
+        delay = int(getattr(message, "ptt_delay_ms", 0) or 0)
+        if message.state in (
+            SessionState.STARTING_VARA,
+            SessionState.TRANSFERRING,
+            SessionState.RECEIVING,
+        ):
+            if delay != self._payload_ptt_delay_ms:
+                self._payload_ptt_delay_ms = delay
+                if delay:
+                    self._log(
+                        dual(
+                            f"Slow keying negotiated: {delay} ms before each "
+                            "VARA key-up.",
+                            f"Vyjednáno pomalé klíčování: {delay} ms před "
+                            "každým zaklíčováním VARA.",
+                        ),
+                        source="session",
+                    )
+        elif message.state.terminal:
+            self._payload_ptt_delay_ms = 0
         if message.direction == "out" and self.mailstore.get(message.msg_id):
             if message.state in (SessionState.DELIVERED, SessionState.CONFIRMED):
                 self.mailstore.set_status(
@@ -1233,8 +1271,21 @@ class Operations:
     def configure_vara_host_ptt(self) -> None:
         """Apply the saved VARA host-PTT preference to the live client."""
         self.vara.on_ptt = (
-            self._radio_ptt if self.config.vara_host_ptt else None
+            self._vara_ptt if self.config.vara_host_ptt else None
         )
+
+    def _vara_ptt(self, enabled: bool) -> None:
+        """Key the radio for VARA, honouring the negotiated slow-keying gap.
+
+        The hold-off applies to key-up only: the point is to give the peer's
+        slowly-decaying transmitter time to reach receive before our burst
+        starts. Holding our own release longer would do the opposite. Control
+        bursts keep their normal timing — they are short and rare; it is the
+        long VARA back-and-forth where a slow radio starts eating syllables.
+        """
+        if enabled and self._payload_ptt_delay_ms > 0:
+            time.sleep(self._payload_ptt_delay_ms / 1000.0)
+        self._radio_ptt(enabled)
 
     def _suspend_control(self) -> None:
         self._payload_active.set()

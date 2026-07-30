@@ -77,6 +77,16 @@ class StationConfig:
     # COM port. Generic across CI-V / RTS / DTR rigs — set VARA's own PTT to None.
     vara_host_ptt: bool = False
 
+    # Slow-keying hold-off (ms, 0 = off) requested for the VARA FM payload
+    # phase. For AIOC-class cables on cheap handhelds whose transmitters unkey
+    # slowly: both stations negotiate the larger of their requests in the
+    # HAVE_MSG/ACK_HAVE handshake and hold PTT off by it before keying, so the
+    # peer's carrier has decayed before the reply starts. FM only — HF radios
+    # do not need it — and it requires vara_host_ptt (Guardian must be the one
+    # keying, or there is nothing to slow down). VARA's own timing/speed is
+    # untouched.
+    vara_ptt_delay_ms: int = 0
+
     # Experimental (Winlink mode): release the COM port + rigctld during the
     # operator hand-off so Winlink's VARA can own the COM for PTT (older rigs
     # without VOX). Reclaimed when the operator confirms the transfer.

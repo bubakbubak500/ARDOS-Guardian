@@ -1043,3 +1043,78 @@ def test_changed_radio_settings_rebuild_the_driver(tmp_path) -> None:
     finally:
         operations.close()
         workers.close(wait=True)
+
+
+def test_slow_keying_is_only_requested_on_fm_and_stays_capped(tmp_path) -> None:
+    # HF radios do not need the crutch; the request must never leave an HF
+    # configuration however the operator set the spinner.
+    operations, workers, _ = _operations(
+        tmp_path, vara_mode="FM", vara_ptt_delay_ms=400
+    )
+    try:
+        assert operations._vara_keying_delay_request() == 400
+        assert operations.net.ptt_delay_request() == 400
+
+        operations.config.vara_ptt_delay_ms = 9_999
+        assert operations._vara_keying_delay_request() == 700   # wire cap
+
+        operations.config.apply_vara_mode("HF")
+        assert operations._vara_keying_delay_request() == 0
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_vara_keyups_wait_out_the_negotiated_gap_but_releases_do_not(
+    tmp_path, monkeypatch
+) -> None:
+    # The gap exists so the peer's slowly-dying transmitter is quiet before
+    # our burst starts; holding our own release longer would do the opposite.
+    slept: list[float] = []
+    monkeypatch.setattr("guardian.operations.time.sleep", slept.append)
+    operations, workers, _ = _operations(tmp_path, vara_host_ptt=True)
+    keyed: list[bool] = []
+    operations._radio_ptt = keyed.append
+    operations.configure_vara_host_ptt()
+    try:
+        assert operations.vara.on_ptt == operations._vara_ptt
+
+        operations.vara.on_ptt(True)
+        operations.vara.on_ptt(False)
+        assert keyed == [True, False]
+        assert slept == [], "no negotiation, no delay: today's behaviour"
+
+        operations._payload_ptt_delay_ms = 400
+        operations.vara.on_ptt(True)
+        operations.vara.on_ptt(False)
+        assert keyed == [True, False, True, False]
+        assert slept == [0.4], "key-up waits; release never does"
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_the_negotiated_gap_follows_the_session_and_dies_with_it(tmp_path) -> None:
+    operations, workers, _ = _operations(tmp_path)
+    try:
+        message = SimpleNamespace(
+            source="OK7PS", msg_id=9, direction="out",
+            state=SessionState.STARTING_VARA, ptt_delay_ms=300,
+        )
+        operations._session_event(message, "starting VARA")
+        assert operations._payload_ptt_delay_ms == 300
+
+        # The receiving side adopts it the same way.
+        inbound = SimpleNamespace(
+            source="OK2IPW", msg_id=10, direction="in", payload_bytes=None,
+            state=SessionState.RECEIVING, ptt_delay_ms=500,
+        )
+        operations._session_event(inbound, "receiving payload over VARA")
+        assert operations._payload_ptt_delay_ms == 500
+
+        inbound.state = SessionState.FAILED
+        operations._session_event(inbound, "failed")
+        assert operations._payload_ptt_delay_ms == 0, "never leaks to the next session"
+    finally:
+        operations.close()
+        workers.close(wait=True)

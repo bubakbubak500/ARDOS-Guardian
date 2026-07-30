@@ -319,3 +319,17 @@ def test_hamlib_ptt_wiring_is_a_setting_and_participates_in_the_unsaved_check() 
         assert not dialog._radio_settings_changed()
     finally:
         dialog.close()
+
+
+def test_vara_keying_delay_is_a_radio_setting_with_a_safe_default() -> None:
+    _application()
+    config = StationConfig(radio_backend="hamlib", rig_model=1)
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        assert dialog.vara_ptt_delay.value() == 0, "default keeps today's timing"
+
+        dialog.vara_ptt_delay.setValue(300)
+        assert dialog.apply()
+        assert config.vara_ptt_delay_ms == 300
+    finally:
+        dialog.close()

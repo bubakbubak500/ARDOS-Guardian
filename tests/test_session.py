@@ -1,4 +1,4 @@
-from guardian.protocol import ControlFrame, FrameType
+from guardian.protocol import ControlFrame, Flags, FrameType
 from guardian.session import LoopbackBus, Message, Orchestrator, SessionState
 from guardian.routing import Route, RouteTable
 from guardian.session.orchestrator import (
@@ -210,3 +210,174 @@ def test_an_unmeasurable_channel_leaves_the_last_known_values_alone() -> None:
     heard = station.heard.get("OK2IPW")
     assert (heard.last_snr, heard.last_freq_hz) == (9.0, 7_100_000)
     assert heard.last_heard == 100.0
+
+
+def _spy(station: Orchestrator) -> list[ControlFrame]:
+    sent: list[ControlFrame] = []
+    original = station.transport.send
+
+    def record(frame):
+        sent.append(frame)
+        return original(frame)
+
+    station.transport.send = record        # type: ignore[method-assign]
+    return sent
+
+
+def test_a_blind_hop_gets_one_query_and_two_announces_not_four_frames() -> None:
+    # Discovery already put an unanswered ROUTE_QUERY on the air; three blind
+    # HAVE_MSG on top of it is one transmission too many for a shared channel.
+    bus = LoopbackBus()
+    station = Orchestrator("OK7PS", bus.endpoint("a"), auto_route=True)
+    sent = _spy(station)
+    station.tick(0.0)
+    message = station.send_message("OK9ZZZ", "hello", msg_id=300)
+
+    now = 0.0
+    while not message.state.terminal and now < 300.0:
+        now += 1.0
+        station.tick(now)
+        bus.pump()
+
+    assert message.state is SessionState.FAILED
+    queries = [f for f in sent if f.type is FrameType.ROUTE_QUERY]
+    announces = [f for f in sent if f.type is FrameType.HAVE_MSG]
+    assert len(queries) == 1
+    assert len(announces) == 2, "blind: initial announce plus a single retry"
+
+
+def test_a_vouched_hop_keeps_all_three_announces() -> None:
+    # The tighter budget is only for guesses; a configured route still gets
+    # the full retry schedule.
+    bus = LoopbackBus()
+    routes = RouteTable([Route("OK9ZZZ", "OK2IPW")])
+    station = Orchestrator("OK7PS", bus.endpoint("a"), routes=routes)
+    sent = _spy(station)
+    station.tick(0.0)
+    message = station.send_message("OK9ZZZ", "hello", msg_id=301)
+
+    now = 0.0
+    while not message.state.terminal and now < 300.0:
+        now += 1.0
+        station.tick(now)
+        bus.pump()
+
+    announces = [f for f in sent if f.type is FrameType.HAVE_MSG]
+    assert len(announces) == 3
+
+
+def test_a_repeated_announce_is_answered_again_instead_of_ignored() -> None:
+    # The initiator re-announces because it did not hear the ACK. Silence
+    # from the responder stranded both sides: every retry burned against a
+    # peer that had answered once into a lost frame.
+    bus = LoopbackBus()
+    responder = Orchestrator("OK2IPW", bus.endpoint("b"), auto_route=False)
+    sent = _spy(responder)
+    responder.tick(0.0)
+
+    announce = ControlFrame(
+        type=FrameType.HAVE_MSG, source="OK7PS", destination="OK2IPW",
+        next_hop="OK2IPW", message_id=400,
+    )
+    responder._on_frame(announce)
+    assert [f.type for f in sent] == [FrameType.ACK_HAVE]
+
+    responder._on_frame(announce)          # retry: our ACK was lost on RF
+    assert [f.type for f in sent] == [FrameType.ACK_HAVE, FrameType.ACK_HAVE]
+
+    # A duplicate while already receiving must not restart anything.
+    responder.sessions[400].state = SessionState.RECEIVING
+    responder._on_frame(announce)
+    assert len(sent) == 2
+
+
+def test_slow_keying_is_negotiated_to_the_larger_request_on_both_sides() -> None:
+    from guardian.protocol import decode_ptt_delay
+
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("a"), auto_route=False)
+    receiver = Orchestrator(
+        "OK2IPW", bus.endpoint("b"), auto_complete=True, auto_route=False
+    )
+    sender.ptt_delay_request = lambda: 300
+    receiver.ptt_delay_request = lambda: 500
+
+    message = sender.send_message("OK2IPW", "hi", msg_id=500, next_hop="OK2IPW")
+    _drain(bus, sender, receiver)
+
+    assert message.state is SessionState.DELIVERED
+    assert message.ptt_delay_ms == 500, "initiator adopts the peer's larger ask"
+    assert receiver.sessions[500].ptt_delay_ms == 500
+
+
+def test_stations_without_the_setting_keep_todays_timing() -> None:
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("a"), auto_route=False)
+    receiver = Orchestrator(
+        "OK2IPW", bus.endpoint("b"), auto_complete=True, auto_route=False
+    )
+
+    message = sender.send_message("OK2IPW", "hi", msg_id=501, next_hop="OK2IPW")
+    _drain(bus, sender, receiver)
+
+    assert message.ptt_delay_ms == 0
+    assert receiver.sessions[501].ptt_delay_ms == 0
+
+
+def test_a_relay_negotiates_its_own_keying_not_the_previous_hops() -> None:
+    # The gap agreed between A and B belongs to those two radios; when B
+    # relays onward to C the next leg starts from B's own request.
+    from guardian.protocol import decode_ptt_delay, encode_ptt_delay
+
+    bus = LoopbackBus()
+    relay = Orchestrator("OK2IPW", bus.endpoint("b"), auto_route=False, relay=True)
+    sent = _spy(relay)
+    relay.ptt_delay_request = lambda: 200
+    relay.tick(0.0)
+    relay.heard.record("OK1AAA", 0.0)      # so the relay resolves the hop
+
+    inbound = ControlFrame(
+        type=FrameType.HAVE_MSG, source="OK7PS", destination="OK1AAA",
+        next_hop="OK2IPW", message_id=600,
+        flags=encode_ptt_delay(Flags.NONE, 700),   # A asked for a huge gap
+    )
+    relay._on_frame(inbound)
+    assert relay.sessions[600].ptt_delay_ms == 700
+
+    relay.sessions[600].payload_bytes = b"x" * 32
+    relay.notify_payload_delivered(600, ok=True)
+
+    onward = [f for f in sent if f.type is FrameType.HAVE_MSG]
+    assert len(onward) == 1
+    assert decode_ptt_delay(onward[0].flags) == 200, "own ask, not A's 700"
+    assert relay.sessions[600].ptt_delay_ms == 200
+
+
+def test_the_slow_keying_field_survives_the_wire_and_old_builds() -> None:
+    # The request rides in spare flag bits of the existing byte: encode,
+    # transmit, decode -- and a build that never heard of it must still parse
+    # the frame and echo the bits back unchanged.
+    from guardian.protocol import (
+        MAX_PTT_DELAY_MS,
+        decode_ptt_delay,
+        encode_ptt_delay,
+    )
+
+    flags = encode_ptt_delay(Flags.COMPRESSED, 300)
+    assert decode_ptt_delay(flags) == 300
+    assert flags & Flags.COMPRESSED, "existing flag bits are untouched"
+
+    frame = ControlFrame(
+        type=FrameType.HAVE_MSG, source="OK7PS", destination="OK1AAA",
+        next_hop="OK2IPW", message_id=7, flags=flags,
+    )
+    decoded = ControlFrame.decode(frame.encode())
+    assert decode_ptt_delay(decoded.flags) == 300
+    assert decoded.flags & Flags.COMPRESSED
+
+    # Overwrite semantics: a relay replaces the previous value, never ors it.
+    assert decode_ptt_delay(encode_ptt_delay(flags, 100)) == 100
+    assert decode_ptt_delay(encode_ptt_delay(flags, 0)) == 0
+    # Rounding and cap.
+    assert decode_ptt_delay(encode_ptt_delay(Flags.NONE, 250)) == 200
+    assert decode_ptt_delay(encode_ptt_delay(Flags.NONE, 5_000)) == MAX_PTT_DELAY_MS
