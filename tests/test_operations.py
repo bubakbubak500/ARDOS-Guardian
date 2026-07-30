@@ -3,11 +3,17 @@ from types import SimpleNamespace
 
 from guardian.config import StationConfig
 from guardian.message import Folder, MailMessage, MessageStore, Status
-from guardian.operations import Operations, _ALERT_HISTORY
+from guardian.operations import (
+    ALERT_SWEEP_BURSTS,
+    ALERT_SWEEP_MAX_CHANNELS,
+    Operations,
+    _ALERT_HISTORY,
+)
 from guardian.modem import make_modem
 from guardian.protocol import ControlFrame, FrameType, Priority, encode_alert
+from guardian.radio.base import RadioState
 from guardian.routing import HeardStations, Route, RouteTable
-from guardian.services import EventBus, SnapshotStore, WorkerPool
+from guardian.services import EventBus, RadioSnapshot, SnapshotStore, WorkerPool
 from guardian.session import SessionState
 from guardian.session.orchestrator import ACK_TIMEOUT, START_TIMEOUT
 
@@ -532,5 +538,284 @@ def test_alert_history_is_bounded(tmp_path) -> None:
         assert len(operations.alerts) == _ALERT_HISTORY
         assert operations.alerts[0].note.endswith(str(_ALERT_HISTORY + 4))
     finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+class _SweepRadio:
+    """A rig that records what it was told, and can fail on chosen channels."""
+
+    def __init__(
+        self,
+        frequency_hz: int = 145_500_000,
+        mode: str = "FM",
+        failing=(),
+    ) -> None:
+        self.frequency_hz = frequency_hz
+        self.mode = mode
+        self.failing = set(failing)
+        self.commands: list[tuple[str, object]] = []
+
+    def get_state(self):
+        return RadioState(
+            connected=True, frequency_hz=self.frequency_hz, mode=self.mode
+        )
+
+    def set_frequency(self, value: int) -> None:
+        if value in self.failing:
+            raise OSError(f"rig refused {value}")
+        self.frequency_hz = value
+        self.commands.append(("frequency", value))
+
+    def set_mode(self, value: str) -> None:
+        self.mode = value
+        self.commands.append(("mode", value))
+
+    def set_ptt(self, on: bool) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class _SweepTransport:
+    """Enough of AudioControlTransport for the sweep to run against."""
+
+    def __init__(self) -> None:
+        self.sent: list = []
+        self.on_frame = None
+        self.last_frame_snr = None
+
+    def send(self, frame) -> None:
+        self.sent.append(frame)
+
+    def wait_tx_idle(self, timeout: float = 5.0) -> bool:
+        return True
+
+    def pump(self) -> int:
+        return 0
+
+    def stop(self) -> None:
+        pass
+
+
+def _sweeping_operations(tmp_path, routes, radio=None):
+    config = StationConfig(callsign="OK7PS", radio_backend="none")
+    workers = WorkerPool(max_workers=1)
+    operations = Operations(
+        config,
+        EventBus(),
+        SnapshotStore(),
+        workers,
+        MessageStore(tmp_path / "mail"),
+        routes,
+        HeardStations(),
+    )
+    transport = _SweepTransport()
+    operations.radio = radio or _SweepRadio()
+    operations.audio_transport = transport
+    operations.net.transport = transport
+    return operations, workers, transport
+
+
+def _alert(code: int = 0x01, note: str = "POZAR") -> ControlFrame:
+    return ControlFrame(
+        type=FrameType.ALERT,
+        source="OK7PS",
+        destination=encode_alert(code, note, "OK7PS"),
+        next_hop="",
+        message_id=0xA11E,
+        priority=Priority.EMERGENCY,
+        ttl=3,
+    )
+
+
+def test_alert_sweep_repeats_the_same_alert_on_every_known_frequency(
+    tmp_path, monkeypatch
+) -> None:
+    # An alert only reaches whoever is listening where we are tuned. The route
+    # table is the only record of where the rest of the net is.
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda _seconds: None)
+    routes = RouteTable(
+        [
+            Route("OK1AAA", "", "", 145_500_000, "FM"),
+            Route("OK1BBB", "", "", 7_100_000, "USB"),
+            Route("OK1CCC", "", "", 14_105_000, "USB"),
+        ]
+    )
+    operations, workers, transport = _sweeping_operations(tmp_path, routes)
+    frame = _alert()
+    try:
+        reached = operations._alert_sweep(
+            frame,
+            [(7_100_000, "USB"), (14_105_000, "USB")],
+            operations.net,
+            transport,
+        )
+
+        assert reached == 2
+        # Back where the operator left it, on the mode they left it in: a rig
+        # returned to an FM channel still set to USB would be deaf there.
+        assert operations.radio.commands == [
+            ("frequency", 7_100_000),
+            ("mode", "USB"),
+            ("frequency", 14_105_000),
+            ("mode", "USB"),
+            ("frequency", 145_500_000),
+            ("mode", "FM"),
+        ]
+        assert len(transport.sent) == 2 * ALERT_SWEEP_BURSTS
+        # One alert, not several: the id is what makes receivers dedupe it.
+        assert {copy.message_id for copy in transport.sent} == {frame.message_id}
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_a_channel_that_will_not_tune_costs_only_that_channel(
+    tmp_path, monkeypatch
+) -> None:
+    # The whole point of the sweep is reach; losing the remaining frequencies
+    # because one QSY failed would defeat it.
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda _seconds: None)
+    radio = _SweepRadio(failing={7_100_000})
+    operations, workers, transport = _sweeping_operations(
+        tmp_path, RouteTable(), radio=radio
+    )
+    try:
+        reached = operations._alert_sweep(
+            _alert(),
+            [(7_100_000, "USB"), (14_105_000, "USB")],
+            operations.net,
+            transport,
+        )
+
+        assert reached == 1
+        assert len(transport.sent) == ALERT_SWEEP_BURSTS
+        assert radio.commands[-2:] == [("frequency", 145_500_000), ("mode", "FM")]
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_the_sweep_stops_when_the_control_channel_goes_away(
+    tmp_path, monkeypatch
+) -> None:
+    # VARA takes the codec mid-sweep, or the operator stops the channel: there
+    # is nothing to transmit with any more, and the radio must still come home.
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda _seconds: None)
+    operations, workers, transport = _sweeping_operations(tmp_path, RouteTable())
+    try:
+        operations._payload_active.set()
+        reached = operations._alert_sweep(
+            _alert(),
+            [(7_100_000, "USB"), (14_105_000, "USB")],
+            operations.net,
+            transport,
+        )
+
+        assert reached == 0
+        assert transport.sent == []
+        assert operations.radio.commands == [
+            ("frequency", 145_500_000),
+            ("mode", "FM"),
+        ]
+    finally:
+        operations._payload_active.clear()
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_the_sweep_skips_the_current_frequency_and_stays_bounded(tmp_path) -> None:
+    routes = RouteTable(
+        [
+            Route(f"OK1A{index:02d}", "", "", 7_000_000 + index * 1_000, "USB")
+            for index in range(ALERT_SWEEP_MAX_CHANNELS + 5)
+        ]
+    )
+    operations, workers, transport = _sweeping_operations(tmp_path, routes)
+    try:
+        operations.snapshots.update(
+            radio=RadioSnapshot(connected=True, frequency_hz=7_001_000)
+        )
+        channels = operations.alert_sweep_channels()
+
+        assert len(channels) == ALERT_SWEEP_MAX_CHANNELS
+        assert 7_001_000 not in [freq for freq, _mode in channels]
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_an_alert_without_a_sweep_never_touches_the_radio(tmp_path) -> None:
+    routes = RouteTable([Route("OK1AAA", "", "", 7_100_000, "USB")])
+    operations, workers, transport = _sweeping_operations(tmp_path, routes)
+    try:
+        assert operations.send_alert(0x12, "QRV", sweep=False)
+        assert not workers.is_active("alert-sweep")
+        assert operations.radio.commands == []
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_the_sweep_waits_for_the_home_repeats_before_tuning_away(
+    tmp_path, monkeypatch
+) -> None:
+    # The home copies are spaced by the tick loop. Tuning away while they are
+    # still queued would put them on a channel the radio has already left.
+    monkeypatch.setattr("guardian.operations.ALERT_SWEEP_HOME_WAIT", 0.3)
+    operations, workers, transport = _sweeping_operations(tmp_path, RouteTable())
+    net = operations.net
+    try:
+        net.tick(1_000.0)
+        net.send_alert(0x01, "POZAR")
+        assert net.alerts_pending() > 0
+
+        started = time.monotonic()
+        operations._wait_for_queued_alerts(net, transport)
+        waited = time.monotonic() - started
+
+        # Nothing drained the queue, so the sweep waited out its bound rather
+        # than tuning away immediately -- and rather than waiting forever.
+        assert waited >= 0.3
+        assert net.alerts_pending() > 0
+
+        net.tick(1_100.0)                    # copies are on the air now
+        started = time.monotonic()
+        operations._wait_for_queued_alerts(net, transport)
+        assert time.monotonic() - started < 0.3
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_sending_an_alert_hands_the_sweep_to_a_worker(tmp_path) -> None:
+    # The operator's dialog must not block on ten QSYs and twenty bursts.
+    routes = RouteTable([Route("OK1AAA", "", "", 7_100_000, "USB")])
+    operations, workers, transport = _sweeping_operations(tmp_path, routes)
+    swept: list[tuple] = []
+    operations._alert_sweep = (
+        lambda frame, channels, net, tport: swept.append((frame, channels)) or 1
+    )
+    try:
+        assert operations.send_alert(0x01, "POZAR")
+        while workers.is_active("alert-sweep"):
+            time.sleep(0.001)
+        workers.drain()
+
+        assert len(swept) == 1
+        frame, channels = swept[0]
+        assert channels == [(7_100_000, "USB")]
+        assert frame.type is FrameType.ALERT
+        assert operations.alerts[0].note == "POZAR"
+    finally:
+        operations.audio_transport = None
         operations.close()
         workers.close(wait=True)

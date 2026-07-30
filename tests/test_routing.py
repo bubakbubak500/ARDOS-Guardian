@@ -28,6 +28,22 @@ def test_route_table_round_trip_and_remove(tmp_path: Path) -> None:
     assert restored.lookup("OK1AAA") is None
 
 
+def test_working_frequencies_are_listed_once_in_table_order() -> None:
+    # The alert sweep tunes to these, so a frequency shared by three
+    # destinations must not be keyed three times.
+    table = RouteTable(
+        [
+            Route("OK1AAA", "", "", 145_500_000, "fm"),
+            Route("OK1BBB", "", "", 7_100_000, "usb"),
+            Route("OK1CCC", "", "", 145_500_000, "fm"),
+            Route("OK1DDD", "OK1AAA"),          # no frequency of its own
+        ]
+    )
+
+    assert table.frequencies() == [(145_500_000, "FM"), (7_100_000, "USB")]
+    assert RouteTable().frequencies() == []
+
+
 def test_empty_preferred_hop_represents_a_direct_route() -> None:
     table = RouteTable([Route("OK1AAA", "")])
 

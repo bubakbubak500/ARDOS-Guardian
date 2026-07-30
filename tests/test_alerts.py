@@ -180,3 +180,48 @@ def test_a_failing_display_callback_does_not_stop_the_flood() -> None:
     station.tick(ALERT_RELAY_MAX + 1.0)
 
     assert len(sent) == 1
+
+
+def test_the_same_alert_on_another_frequency_keeps_its_identity() -> None:
+    # The frequency sweep re-sends one frame on each channel. Reusing the id is
+    # the point: a station in earshot of two of them shows the alert once and
+    # relays it once, exactly as if it had heard a repeat.
+    sent: list[ControlFrame] = []
+    bus = LoopbackBus()
+    station = Orchestrator("OK7PS", bus.endpoint("a"), auto_route=False)
+    station.transport.send = sent.append           # type: ignore[method-assign]
+    station.tick(0.0)
+    frame = station.send_alert(0x01, "POZAR SKLAD B")
+    station.tick(ALERT_REPEATS * ALERT_REPEAT_GAP)
+    home_copies = len(sent)
+
+    station.retransmit_alert(frame)
+
+    assert len(sent) == home_copies + 1
+    assert sent[-1] is frame
+    assert {copy.message_id for copy in sent} == {frame.message_id}
+    # A neighbour's relay of the swept copy still must not come back at us.
+    relayed = ControlFrame(
+        type=FrameType.ALERT,
+        source="OK7PS",
+        destination=frame.destination,
+        next_hop="OK2IPW",
+        message_id=frame.message_id,
+        priority=frame.priority,
+        ttl=frame.ttl - 1,
+    )
+    station._on_frame(relayed)
+    station.tick(ALERT_RELAY_MAX + 1.0)
+    assert len(sent) == home_copies + 1
+
+
+def test_pending_alert_count_is_what_the_sweep_waits_for() -> None:
+    # The sweep must not tune away while copies are still queued for the air.
+    bus = LoopbackBus()
+    station = Orchestrator("OK7PS", bus.endpoint("a"), auto_route=False)
+    station.tick(0.0)
+    station.send_alert(0x02, "ZRANENI")
+
+    assert station.alerts_pending() == ALERT_REPEATS
+    station.tick(ALERT_REPEATS * ALERT_REPEAT_GAP)
+    assert station.alerts_pending() == 0

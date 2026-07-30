@@ -76,6 +76,22 @@ class RouteTable:
                 return r.freq_hz, r.mode
         return None
 
+    def frequencies(self) -> list[tuple[int, str]]:
+        """Every distinct working frequency the table knows, in table order.
+
+        The operator enters these per destination, but they are also the only
+        record Guardian has of *where the net lives*: an alert sweep repeats a
+        broadcast on each of them so it reaches the stations that are not
+        listening where we happen to be tuned.
+        """
+        seen: set[int] = set()
+        out: list[tuple[int, str]] = []
+        for r in self._routes:
+            if r.freq_hz and r.freq_hz not in seen:
+                seen.add(r.freq_hz)
+                out.append((r.freq_hz, r.mode))
+        return out
+
     def lookup(self, destination: str) -> Route | None:
         """Find the configured route for a destination/group."""
         dest = destination.strip().upper()

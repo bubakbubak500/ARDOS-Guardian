@@ -1,4 +1,5 @@
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
 )
 
+from guardian.i18n import tr
 from guardian.message import (
     Attachment,
     Folder,
@@ -404,6 +406,48 @@ def test_network_workspace_allows_direct_route_and_formats_operator_inputs() -> 
         assert workspace.destination.text() == "OK1AAA"
         assert workspace.frequency.text() == "144.5200 MHz"
         assert workspace.routes_table.item(0, 3).text() == "144.5200 MHz"
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_heard_stations_show_the_signal_and_the_channel_they_arrived_on() -> None:
+    # Both were invisible before 0.6.35: the SNR column existed but nothing
+    # ever filled it, and the frequency was not recorded at all.
+    _application()
+    runtime = ShellRuntime()
+    runtime.routes = RouteTable()
+    workspace = NetworkWorkspace(runtime)
+    try:
+        now = time.monotonic()
+        runtime.heard.record(
+            "OK2IPW", now, snr=12.5, freq_hz=145_237_500, frame="BEACON"
+        )
+        runtime.heard.record("OK1AAA", now, frame="BEACON")
+        workspace.refresh()
+
+        headers = [
+            workspace.heard_table.horizontalHeaderItem(column).text()
+            for column in range(workspace.heard_table.columnCount())
+        ]
+        assert headers == [
+            tr("network.callsign"),
+            tr("network.age"),
+            tr("network.frames"),
+            tr("network.snr"),
+            tr("network.heard_on"),
+            tr("network.last_frame"),
+        ]
+        rows = {
+            workspace.heard_table.item(row, 0).text(): (
+                workspace.heard_table.item(row, 3).text(),
+                workspace.heard_table.item(row, 4).text(),
+            )
+            for row in range(workspace.heard_table.rowCount())
+        }
+        assert rows["OK2IPW"] == ("12.5 dB", "145.2375 MHz")
+        # A station heard with no measurement says so instead of inventing one.
+        assert rows["OK1AAA"] == ("-", "-")
     finally:
         workspace.close()
         runtime.close()

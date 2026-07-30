@@ -194,6 +194,10 @@ class Orchestrator:
         self._clock = clock
         self.learned_paths: dict[str, str] = {}   # final_dest -> next_hop that worked
         self.busy = False
+        # Where the radio is tuned, so a heard station can be filed against the
+        # channel it was actually heard on. Set by the owner; the session layer
+        # never talks to a rig itself.
+        self.channel_frequency: Callable[[], int | None] | None = None
         # Broadcast alerts: what we have already seen (so a flood converges)
         # and what is waiting to go out (repeats and jittered relays).
         self.on_alert: Callable[[ControlFrame, bool], None] | None = None
@@ -448,7 +452,25 @@ class Orchestrator:
     def _on_frame(self, frame: ControlFrame) -> None:
         # Every frame we hear means its sender is reachable right now.
         if frame.source and frame.source != self.callsign:
-            self.heard.record(frame.source, self._now, frame=frame.type.name)
+            self.heard.record(
+                frame.source,
+                self._now,
+                snr=getattr(self.transport, "last_frame_snr", None),
+                freq_hz=self._current_frequency(),
+                frame=frame.type.name,
+            )
+        self._dispatch(frame)
+
+    def _current_frequency(self) -> int | None:
+        """The tuned frequency, or None when nobody is telling us / CAT is out."""
+        if self.channel_frequency is None:
+            return None
+        try:
+            return self.channel_frequency()
+        except Exception:       # noqa: BLE001 - a stale rig must not drop frames
+            return None
+
+    def _dispatch(self, frame: ControlFrame) -> None:
         handler = {
             FrameType.HAVE_MSG: self._rx_have_msg,
             FrameType.ACK_HAVE: self._rx_ack,
@@ -492,6 +514,20 @@ class Orchestrator:
         if self.on_alert is not None:
             self._safe_alert(frame, mine=True)
         return frame
+
+    def retransmit_alert(self, frame: ControlFrame) -> None:
+        """Put an alert we already originated on the air again, unchanged.
+
+        The frequency sweep uses this: keeping the *same* message id on every
+        channel is the whole point, so a station that hears the alert on two of
+        them still shows it once and still relays it once.
+        """
+        self._seen_alerts[frame.message_id] = self._now
+        self.transport.send(frame)
+
+    def alerts_pending(self) -> int:
+        """Alert copies still queued for the air (own repeats plus relays)."""
+        return len(self._alert_queue)
 
     def _next_alert_id(self) -> int:
         self._alert_counter = (self._alert_counter + 1) & 0xFFFF

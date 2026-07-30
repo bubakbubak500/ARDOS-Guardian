@@ -363,7 +363,8 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.callsign": ("Callsign", "Volací značka"),
     "network.age": ("Age", "Stáří"),
     "network.frames": ("Frames", "Rámce"),
-    "network.snr": ("Last SNR", "Poslední SNR"),
+    "network.snr": ("Last S/N (est.)", "Poslední S/N (odhad)"),
+    "network.heard_on": ("Heard on", "Slyšeno na"),
     "network.last_frame": ("Last frame", "Poslední rámec"),
     "network.route_required": (
         "Enter a destination. The preferred hop may stay empty for a direct route.",
@@ -434,10 +435,30 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "{used}/{total} znaků",
     ),
     "alert.dialog_send": ("Broadcast", "Odvysílat"),
+    "alert.dialog_sweep": (
+        "Repeat on {count} other known frequencies",
+        "Zopakovat na {count} dalších známých kmitočtech",
+    ),
+    "alert.dialog_sweep_none": (
+        "No other frequency is set in the route table",
+        "V tabulce tras není nastaven jiný kmitočet",
+    ),
+    "alert.dialog_sweep_hint": (
+        "The radio is tuned to each of them in turn, the alert is repeated "
+        "there, and the radio returns to this frequency.",
+        "Rádio se postupně přeladí na každý z nich, výstraha se tam zopakuje "
+        "a rádio se vrátí na tento kmitočet.",
+    ),
     "alert.confirm_title": ("Confirm alert", "Potvrdit výstrahu"),
     "alert.confirm_body": (
         "Broadcast \"{text}\" to the whole net?",
         "Odvysílat „{text}“ celé síti?",
+    ),
+    "alert.confirm_sweep": (
+        "The radio will also be tuned to {count} other known frequencies to "
+        "repeat it there.",
+        "Rádio se navíc přeladí na {count} dalších známých kmitočtů, aby ji "
+        "tam zopakovalo.",
     ),
     "alert.no_control": (
         "Start the control channel before sending an alert.",

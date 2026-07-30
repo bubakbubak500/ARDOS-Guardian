@@ -11,6 +11,7 @@ from guardian.operations import AlertRecord
 from guardian.protocol import ALERTS, Priority
 from guardian.qt.alerts import AlertBanner, AlertDialog
 from guardian.qt.runtime import ShellRuntime
+from guardian.routing import Route, RouteTable
 from guardian.qt.shell import GuardianMainWindow
 
 
@@ -140,10 +141,10 @@ def test_alert_dialog_needs_confirmation_and_a_control_channel(monkeypatch) -> N
         QMessageBox, "question",
         staticmethod(lambda *a, **k: QMessageBox.StandardButton.No),
     )
-    sent: list[tuple[int, str]] = []
+    sent: list[tuple[int, str, bool]] = []
     monkeypatch.setattr(
         runtime.operations, "send_alert",
-        lambda code, note="": sent.append((code, note)) or True,
+        lambda code, note="", *, sweep=True: sent.append((code, note, sweep)) or True,
     )
     dialog._broadcast()
     assert sent == [], "declining the confirmation must not key the radio"
@@ -153,12 +154,13 @@ def test_alert_dialog_needs_confirmation_and_a_control_channel(monkeypatch) -> N
         staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
     )
     dialog._broadcast()
-    assert sent == [(0x01, "POZAR")]
+    # No frequency in the route table, so there is nothing to sweep.
+    assert sent == [(0x01, "POZAR", False)]
 
     # A refused send (no control channel) keeps the dialog open to say so.
     warned: list[str] = []
     monkeypatch.setattr(
-        runtime.operations, "send_alert", lambda code, note="": False
+        runtime.operations, "send_alert", lambda code, note="", *, sweep=True: False
     )
     monkeypatch.setattr(
         QMessageBox, "warning",
@@ -204,3 +206,77 @@ def test_every_alert_code_has_a_sentence_and_a_hint_in_both_languages() -> None:
             english, czech = TRANSLATIONS[key]
             assert english and czech and english != czech
         assert isinstance(kind.priority, Priority)
+
+
+def test_the_sweep_offer_follows_the_route_table_and_the_urgency() -> None:
+    # Reach is the point for an emergency; spraying a routine QRT across every
+    # channel in the table is just noise, so the default differs by code.
+    _application()
+    runtime = ShellRuntime()
+    # The dialog asks Operations, which holds its own reference to the table
+    # this station was started with.
+    runtime.operations.routes = RouteTable(
+        [
+            Route("OK1AAA", "", "", 7_100_000, "USB"),
+            Route("OK1BBB", "", "", 14_105_000, "USB"),
+        ]
+    )
+    dialog = AlertDialog(runtime)
+    codes = [
+        dialog.kind_picker.itemData(index)
+        for index in range(dialog.kind_picker.count())
+    ]
+
+    assert len(dialog.channels) == 2
+    assert dialog.sweep_check.isEnabled()
+    assert dialog.sweep_check.isChecked(), "0x01 MAYDAY sweeps by default"
+
+    dialog.kind_picker.setCurrentIndex(codes.index(0x10))     # QRT, routine
+    assert not dialog.sweep_check.isChecked()
+    dialog.kind_picker.setCurrentIndex(codes.index(0x03))     # evacuation
+    assert dialog.sweep_check.isChecked()
+
+
+def test_without_other_frequencies_there_is_nothing_to_sweep() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.operations.routes = RouteTable()
+    dialog = AlertDialog(runtime)
+
+    assert dialog.channels == []
+    assert not dialog.sweep_check.isEnabled()
+    assert not dialog.sweep_check.isChecked()
+    assert dialog.sweep_check.text() == tr("alert.dialog_sweep_none")
+
+
+def test_the_confirmation_says_the_radio_will_be_retuned(monkeypatch) -> None:
+    # Nothing else warns the operator that confirming moves the VFO.
+    _application()
+    runtime = ShellRuntime()
+    runtime.operations.routes = RouteTable(
+        [Route("OK1AAA", "", "", 7_100_000, "USB")]
+    )
+    dialog = AlertDialog(runtime)
+    asked: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(
+            lambda _p, _t, text, *a, **k: asked.append(text)
+            or QMessageBox.StandardButton.Yes
+        ),
+    )
+    sent: list[bool] = []
+    monkeypatch.setattr(
+        runtime.operations, "send_alert",
+        lambda code, note="", *, sweep=True: sent.append(sweep) or True,
+    )
+
+    dialog.sweep_check.setChecked(True)
+    dialog._broadcast()
+    assert sent == [True]
+    assert tr("alert.confirm_sweep", count=1) in asked[0]
+
+    dialog.sweep_check.setChecked(False)
+    dialog._broadcast()
+    assert sent == [True, False]
+    assert tr("alert.confirm_sweep", count=1) not in asked[1]

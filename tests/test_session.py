@@ -163,3 +163,50 @@ def test_session_timeout_stays_above_scaled_payload_timeout() -> None:
 
     assert session_transfer_timeout_for(small) == TRANSFER_TIMEOUT
     assert session_transfer_timeout_for(large) > TRANSFER_TIMEOUT
+
+
+def test_a_heard_station_is_filed_with_its_signal_and_channel() -> None:
+    # Both columns were dead in the Network workspace: nothing ever passed an
+    # SNR to the registry, and the channel was not recorded at all.
+    bus = LoopbackBus()
+    station = Orchestrator("OK7PS", bus.endpoint("a"), auto_route=False)
+    station.transport.last_frame_snr = 14.5
+    station.channel_frequency = lambda: 145_237_500
+    station.tick(100.0)
+
+    station._on_frame(
+        ControlFrame(
+            type=FrameType.BEACON,
+            source="OK2IPW",
+            destination="",
+            next_hop="",
+            message_id=7,
+        )
+    )
+
+    heard = station.heard.get("OK2IPW")
+    assert (heard.last_snr, heard.last_freq_hz) == (14.5, 145_237_500)
+
+
+def test_an_unmeasurable_channel_leaves_the_last_known_values_alone() -> None:
+    # A simulated transport reports no SNR and a rig with no CAT no frequency.
+    # Overwriting yesterday's reading with None would be worse than silence.
+    bus = LoopbackBus()
+    station = Orchestrator("OK7PS", bus.endpoint("a"), auto_route=False)
+    station.heard.record("OK2IPW", 90.0, snr=9.0, freq_hz=7_100_000)
+    station.channel_frequency = lambda: (_ for _ in ()).throw(OSError("no CAT"))
+    station.tick(100.0)
+
+    station._on_frame(
+        ControlFrame(
+            type=FrameType.BEACON,
+            source="OK2IPW",
+            destination="",
+            next_hop="",
+            message_id=8,
+        )
+    )
+
+    heard = station.heard.get("OK2IPW")
+    assert (heard.last_snr, heard.last_freq_hz) == (9.0, 7_100_000)
+    assert heard.last_heard == 100.0

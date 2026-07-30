@@ -224,3 +224,40 @@ def test_control_transport_saves_failed_receive_audio(tmp_path) -> None:
         assert recording.getsampwidth() == 2
         assert recording.getframerate() == 48_000
         assert recording.getnframes() == 48_000
+
+
+def test_signal_to_noise_is_estimated_from_the_burst_against_the_idle_floor() -> None:
+    # The heard-stations table had an SNR column that nothing ever filled: no
+    # modem reports one, so it has to come from the receive audio itself.
+    transport = AudioControlTransport(sample_rate=48_000)
+    quiet = 0.01
+    window = np.full(48_000, quiet, dtype=np.float32)
+    window[:12_000] = 0.1                      # a burst in the first quarter
+
+    assert transport.window_snr(window) is None, "no floor yet, no number"
+
+    transport._floor = quiet
+    snr = transport.window_snr(window)
+    assert snr is not None
+    assert 19.0 < snr < 21.0, snr               # 0.1 over 0.01 is 20 dB
+
+    # Nothing but noise reads as no margin, never as a negative signal report.
+    assert transport.window_snr(np.full(48_000, quiet, dtype=np.float32)) == 0.0
+    # Too little audio to judge.
+    assert transport.window_snr(np.zeros(100, dtype=np.float32)) is None
+
+
+def test_the_frame_snr_travels_with_the_frame_to_the_orchestrator() -> None:
+    # pump() runs on the owner's thread, so the estimate has to be attached to
+    # the frame being delivered -- not to whatever the meter reads later.
+    transport = AudioControlTransport(sample_rate=48_000)
+    seen: list[tuple[str, float | None]] = []
+    transport.on_frame = lambda frame: seen.append(
+        (frame.source, transport.last_frame_snr)
+    )
+    transport._rx_frames.append((ControlFrame(FrameType.BEACON, source="OK7PS"), 8.5))
+    transport._rx_frames.append((ControlFrame(FrameType.BEACON, source="OK2IPW"), None))
+
+    assert transport.pump() == 2
+    assert seen == [("OK7PS", 8.5), ("OK2IPW", None)]
+    assert transport.last_frame_snr is None, "a stale reading must not stick"

@@ -17,6 +17,10 @@ class HeardStation:
     last_heard: float           # monotonic timestamp
     count: int = 0
     last_snr: float | None = None
+    # Where our own radio was tuned when this station was last heard. It is our
+    # frequency, not a measurement of theirs -- on a simplex net they are the
+    # same thing, and after a QSY it says which channel the contact was on.
+    last_freq_hz: int | None = None
     last_frame: str = ""
     # Destinations this station has offered to reach (from ROUTE_OFFER), so we
     # can prefer it as a relay toward those.
@@ -32,7 +36,8 @@ class HeardStations:
         self._stations: dict[str, HeardStation] = {}
 
     def record(self, callsign: str, now: float, *, snr: float | None = None,
-               frame: str = "", reaches: str | None = None) -> None:
+               freq_hz: int | None = None, frame: str = "",
+               reaches: str | None = None) -> None:
         call = callsign.strip().upper()
         if not call:
             return
@@ -44,6 +49,8 @@ class HeardStations:
         st.count += 1
         if snr is not None:
             st.last_snr = snr
+        if freq_hz:
+            st.last_freq_hz = int(freq_hz)
         if frame:
             st.last_frame = frame
         if reaches:

@@ -98,18 +98,19 @@ class NetworkWorkspace(QWidget):
         )
         detail.setObjectName("Metadata")
         layout.addWidget(detail)
-        self.heard_table = RowTable(0, 5)
+        self.heard_table = RowTable(0, 6)
         self.heard_table.setHorizontalHeaderLabels(
             [
                 tr("network.callsign"),
                 tr("network.age"),
                 tr("network.frames"),
                 tr("network.snr"),
+                tr("network.heard_on"),
                 tr("network.last_frame"),
             ]
         )
         self.heard_table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeMode.Stretch
+            5, QHeaderView.ResizeMode.Stretch
         )
         layout.addWidget(self.heard_table, 1)
         return page
@@ -217,6 +218,11 @@ class NetworkWorkspace(QWidget):
                 f"{station.age(now):.0f} s",
                 str(station.count),
                 "-" if station.last_snr is None else f"{station.last_snr:.1f} dB",
+                (
+                    self.frequency.textFromValue(station.last_freq_hz)
+                    if station.last_freq_hz
+                    else "-"
+                ),
                 station.last_frame,
             )
             for column, value in enumerate(values):

@@ -10,6 +10,7 @@ import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -138,6 +139,18 @@ class AlertDialog(QDialog):
         self.room_label = QLabel()
         self.room_label.setObjectName("Metadata")
         form.addRow("", self.room_label)
+
+        # Reach beyond this channel: the route table is the only record
+        # Guardian has of where the rest of the net listens.
+        self.channels = runtime.operations.alert_sweep_channels()
+        self.sweep_check = QCheckBox(
+            tr("alert.dialog_sweep", count=len(self.channels))
+            if self.channels
+            else tr("alert.dialog_sweep_none")
+        )
+        self.sweep_check.setEnabled(bool(self.channels))
+        self.sweep_check.setToolTip(tr("alert.dialog_sweep_hint"))
+        form.addRow("", self.sweep_check)
         outer.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
@@ -159,6 +172,12 @@ class AlertDialog(QDialog):
         kind = alert_kind(self._selected_code())
         if kind is not None:
             self.note_edit.setPlaceholderText(tr(kind.hint_key))
+            # Spraying a routine QRT across every channel in the table is
+            # noise; an emergency is exactly what the sweep exists for. The
+            # operator can still decide otherwise on either.
+            self.sweep_check.setChecked(
+                bool(self.channels) and kind.priority is not Priority.ROUTINE
+            )
         self._update_room()
 
     def _update_room(self) -> None:
@@ -173,14 +192,20 @@ class AlertDialog(QDialog):
         kind = alert_kind(code)
         headline = tr(kind.key) if kind else f"0x{code:02X}"
         text = f"{headline} — {note}" if note else headline
+        sweep = self.sweep_check.isChecked() and bool(self.channels)
+        question = tr("alert.confirm_body", text=text)
+        if sweep:
+            question += "\n\n" + tr(
+                "alert.confirm_sweep", count=len(self.channels)
+            )
         confirm = QMessageBox.question(
             self,
             tr("alert.confirm_title"),
-            tr("alert.confirm_body", text=text),
+            question,
         )
         if confirm is not QMessageBox.StandardButton.Yes:
             return
-        if not self.runtime.operations.send_alert(code, note):
+        if not self.runtime.operations.send_alert(code, note, sweep=sweep):
             QMessageBox.warning(
                 self,
                 tr("alert.dialog_title"),

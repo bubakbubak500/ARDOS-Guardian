@@ -1,6 +1,6 @@
 # Guardian (ARDOS) — Project Status & Plan
 
-_Last updated: 2026-07-28_
+_Last updated: 2026-07-30_
 
 A resumable snapshot: what Guardian is, what's built, what's verified, the key
 decisions and why, and what comes next. Read this first when picking the project
@@ -106,6 +106,10 @@ never reached VARA unless it happened to be set before connecting — fixed in
 **Confirmed working on air 2026-07-30:** net alerts (0.6.34) on both control
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
+
+**Built but not yet flown (0.6.35):** the alert frequency sweep (an alert is
+repeated on every other frequency in the route table, then the radio goes back)
+and the heard-stations S/N estimate + channel column.
 
 **Needs real hardware/peers to verify:**
 - **VARA HF control channel — WORKING as of 0.6.32, confirmed on air
@@ -430,6 +434,37 @@ AFSK-1200 on FM. Broadcast, display and relay all behave as designed.
 - **UI**: red-bordered banner under the station context bar (amber for routine
   codes), and an *Alert* button beside Compose with a code picker, per-code
   note hint, character counter and a confirmation step.
+
+## Alert frequency sweep (0.6.35 — not yet flown)
+An alert only reaches whoever is listening where we are tuned, so the route
+table's `freq_hz` entries are reused as an alert channel list.
+
+- Home frequency first (the usual 3 copies at 10 s). The sweep **waits for that
+  queue to drain** (bounded at 45 s), then visits each other frequency: QSY +
+  mode, 0.6 s settle, **2 copies 3 s apart**, next channel. Frequency *and*
+  mode are restored at the end, including when the sweep is cut short.
+- **Same message id on every channel**, so a station hearing two of them still
+  displays once and relays once. The wire format is untouched.
+- Bounded: **10 extra channels**, duplicates collapsed, current frequency
+  skipped. Each channel is attempted independently — a failed QSY costs that
+  channel and is logged with its frequency. Stops early (and still restores) if
+  the control channel is stopped or VARA takes the codec.
+- Runs on a worker (`alert-sweep`), so the UI never blocks. In the send dialog
+  a checkbox is ticked by default for EMERGENCY/PRIORITY codes only, and the
+  confirmation says the radio will be retuned.
+- **To verify on air:** whether 2 copies per channel is enough on HF, and
+  whether the 45 s home wait feels too long before the first QSY.
+
+## Heard stations: S/N estimate and channel (0.6.35)
+The `Last SNR` column was dead — nothing ever passed a measurement to the
+registry. Neither modem reports one, so `AudioControlTransport.window_snr()`
+estimates it from the RX audio (loudest quarter of the demod window against the
+tracked idle floor) and it rides with the frame through `pump()` as
+`last_frame_snr`. It is **(S+N)/N of the receive audio**, not a VARA/S-meter
+figure — the column says *(est.)*, and shows `-` until the floor has settled.
+A `Heard on` column records the CAT frequency at reception
+(`Orchestrator.channel_frequency`), which after a QSY or a sweep says which
+channel the contact was on.
 
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,

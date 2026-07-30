@@ -236,6 +236,14 @@ def match_device_name(names: list[str], saved_name: str) -> str | None:
 MIN_RX_WINDOW = 4.0      # seconds; what AFSK has always used
 MIN_POLL_INTERVAL = 0.25  # seconds; likewise
 
+# Neither modem reports a channel measurement, so the figure shown beside a
+# heard station is estimated from the receive audio itself: the loudest quarter
+# of the demodulated window is the burst, the slow-tracking idle level is the
+# noise. It is therefore an (S+N)/N estimate of the audio the rig delivers --
+# not a VARA or S-meter reading -- which is why the UI labels it an estimate.
+SNR_BLOCK_SECONDS = 0.1
+SNR_MIN_BLOCKS = 4
+
 
 class AudioControlTransport(ControlTransport):
     def _modem_airtime(self, payload_bytes: int) -> float:
@@ -283,7 +291,10 @@ class AudioControlTransport(ControlTransport):
         self.rx_window = max(MIN_RX_WINDOW, frame + self.poll_interval + 1.0)
         self._rx_buf = deque(maxlen=int(sample_rate * self.rx_window))
         self._recent: dict[bytes, float] = {}              # payload -> last seen
-        self._rx_frames: deque = deque()                   # decoded, awaiting pump()
+        self._rx_frames: deque = deque()                   # (frame, snr), awaiting pump()
+        # S/N estimate for the frame currently being handed to on_frame, so the
+        # orchestrator can file it against the station it just heard.
+        self.last_frame_snr: float | None = None
         self._running = False
         self._rx_thread: threading.Thread | None = None
         # Live RX metering (linear RMS in 0..1).
@@ -452,17 +463,39 @@ class AudioControlTransport(ControlTransport):
             "running": self._stream is not None,
         }
 
+    def window_snr(self, window: np.ndarray) -> float | None:
+        """Estimated S/N in dB for a demodulated window, or None if unknowable.
+
+        The burst does not fill the window, so the loudest quarter of it is the
+        signal estimate; the noise is the idle floor the RX callback tracks.
+        Before the floor has settled (or with too short a window) there is no
+        honest number to give, and None keeps the UI from inventing one.
+        """
+        floor = self._floor
+        samples = np.asarray(window, dtype=np.float64)
+        block = max(1, int(self.fs * SNR_BLOCK_SECONDS))
+        blocks = samples.size // block
+        if floor <= 0.0 or blocks < SNR_MIN_BLOCKS:
+            return None
+        rms = np.sqrt((samples[: blocks * block].reshape(blocks, block) ** 2).mean(axis=1))
+        loudest = np.sort(rms)[-max(1, blocks // 4):]
+        signal = float(loudest.mean())
+        if signal <= floor:
+            return 0.0
+        return round(self.to_db(signal) - self.to_db(floor), 1)
+
     def _rx_loop(self) -> None:
         while self._running:
             time.sleep(self.poll_interval)
             if len(self._rx_buf) < self.fs * 0.4:
                 continue
             window = np.fromiter(self._rx_buf, dtype=np.float32)
+            snr = self.window_snr(window)
             for payload in self.modem.demodulate(
                 window,
                 validator=self._is_valid_control_payload,
             ):
-                if not self._handle_payload(payload):
+                if not self._handle_payload(payload, snr):
                     self._save_bad_audio(window)
 
     @staticmethod
@@ -473,7 +506,7 @@ class AudioControlTransport(ControlTransport):
             return False
         return True
 
-    def _handle_payload(self, payload: bytes) -> bool:
+    def _handle_payload(self, payload: bytes, snr: float | None = None) -> bool:
         now = time.monotonic()
         # Drop duplicates seen recently (overlapping demod windows / repeats).
         self._recent = {k: t for k, t in self._recent.items() if now - t < 8.0}
@@ -486,10 +519,13 @@ class AudioControlTransport(ControlTransport):
         except FrameError as exc:
             self.on_log(f"RX bad frame: {exc}")
             return False
-        self.on_log(f"RX {frame.summary()}")
+        self.on_log(
+            f"RX {frame.summary()}"
+            + (f"  S/N ~{snr:.1f} dB" if snr is not None else "")
+        )
         # Queue for delivery on the owner's thread via pump() (avoids races with
         # the orchestrator's tick loop).
-        self._rx_frames.append(frame)
+        self._rx_frames.append((frame, snr))
         return True
 
     def _save_bad_audio(self, samples: np.ndarray) -> None:
@@ -516,8 +552,9 @@ class AudioControlTransport(ControlTransport):
         """Deliver queued RX frames to on_frame. Call from the main/net thread."""
         delivered = 0
         while self._rx_frames:
-            frame = self._rx_frames.popleft()
+            frame, self.last_frame_snr = self._rx_frames.popleft()
             if self.on_frame is not None:
                 self.on_frame(frame)
             delivered += 1
+        self.last_frame_snr = None
         return delivered

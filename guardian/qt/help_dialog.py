@@ -290,6 +290,14 @@ def help_topics() -> list[HelpTopic]:
             and forward traffic for another destination. Auto QSY uses the
             route frequency before VARA P2P and restores the prior frequency
             afterwards when supported by the radio driver.</p>
+            <p>Last S/N is estimated from the received audio against the idle
+            noise floor, not reported by the modem, and stays empty until that
+            floor has settled. Heard on is the frequency this radio was tuned
+            to when the frame arrived.</p>
+            <p>The route frequencies are also the channel list for a net alert:
+            when the sweep is confirmed in the alert dialog, the radio visits
+            each of them, repeats the same alert, and returns to the frequency
+            and mode it started on.</p>
             """,
             """
             <h2>Trasy a stav sítě</h2>
@@ -304,6 +312,14 @@ def help_topics() -> list[HelpTopic]:
             <p>TTL omezuje hloubku předávání. Automatický relay dovolí stanici
             podržet a předat provoz jinému cíli. Auto QSY před VARA P2P použije
             frekvenci z trasy a po skončení podle možností rádia obnoví původní.</p>
+            <p>Poslední S/N je odhad z přijatého zvuku proti klidové úrovni
+            šumu, nikoli údaj z modemu, a zůstává prázdné, dokud se úroveň
+            neustálí. Slyšeno na je kmitočet, na kterém bylo rádio naladěno při
+            příjmu rámce.</p>
+            <p>Kmitočty z tras slouží také jako seznam kanálů pro výstrahu do
+            sítě: pokud přeladění v dialogu výstrahy potvrdíte, rádio postupně
+            navštíví každý z nich, zopakuje tam stejnou výstrahu a vrátí se na
+            původní kmitočet i režim.</p>
             """,
             "route heard sessions ttl relay qsy trasa slyšené relace",
         ),

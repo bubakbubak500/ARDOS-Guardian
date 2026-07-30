@@ -23,6 +23,9 @@ class ControlTransport:
     """Interface: send a frame, and receive frames via the on_frame callback."""
 
     on_frame: Callable[[ControlFrame], None] | None = None
+    # Estimated S/N in dB of the frame being delivered right now, for transports
+    # that can measure one. A simulated channel has nothing to report.
+    last_frame_snr: float | None = None
 
     def send(self, frame: ControlFrame) -> None:  # pragma: no cover - interface
         raise NotImplementedError

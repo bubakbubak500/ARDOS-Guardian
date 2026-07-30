@@ -60,6 +60,23 @@ class AlertRecord:
 # scrolling back after a busy few minutes.
 _ALERT_HISTORY = 20
 
+# An alert only reaches the stations that are listening where we are tuned. If
+# the route table names other working frequencies, the same alert is repeated
+# on each of them and the radio is put back where it started. The cap is a
+# safety rail, not an expectation: a real net has a handful of channels, and a
+# route table with a hundred must not key the radio for half an hour.
+ALERT_SWEEP_MAX_CHANNELS = 10
+# Per channel: how many copies, how far apart, and how long to let the rig
+# settle after a QSY before keying it.
+ALERT_SWEEP_BURSTS = 2
+ALERT_SWEEP_GAP = 3.0
+ALERT_SWEEP_SETTLE = 0.6
+# The home-frequency repeats are spaced by the orchestrator's tick loop. The
+# sweep waits for them rather than tuning away mid-flood, but never forever --
+# a stalled queue must not strand the alert on one channel.
+ALERT_SWEEP_HOME_WAIT = 45.0
+ALERT_SWEEP_TX_WAIT = 30.0
+
 
 class Operations:
     """Own hardware objects while exposing only non-blocking UI commands."""
@@ -143,6 +160,7 @@ class Operations:
             relay=self.config.auto_relay,
         )
         net.on_alert = self._on_alert
+        net.channel_frequency = self.current_frequency
         self._scale_session_timeouts(net, transport)
         return net
 
@@ -152,8 +170,12 @@ class Operations:
         """Note characters that fit beside this station's callsign."""
         return max_note_length(self.config.callsign)
 
-    def send_alert(self, code: int, note: str = "") -> bool:
-        """Broadcast an alert to everyone on the current frequency."""
+    def send_alert(self, code: int, note: str = "", *, sweep: bool = True) -> bool:
+        """Broadcast an alert to everyone on the current frequency.
+
+        With `sweep`, the same alert is then repeated on every other frequency
+        the route table knows -- see `_alert_sweep`.
+        """
         if self.audio_transport is None:
             self._log(
                 dual(
@@ -163,8 +185,190 @@ class Operations:
                 level=LogLevel.WARNING,
             )
             return False
-        self.net.send_alert(code, note)
+        frame = self.net.send_alert(code, note)
+        if sweep:
+            self._start_alert_sweep(frame)
         return True
+
+    def current_frequency(self) -> int | None:
+        """Where the radio is tuned according to the last CAT poll."""
+        return self.snapshots.read().radio.frequency_hz
+
+    def alert_sweep_channels(self) -> list[tuple[int, str]]:
+        """Other frequencies from the route table an alert should also reach."""
+        here = self.current_frequency()
+        channels = [
+            (freq, mode)
+            for freq, mode in self.routes.frequencies()
+            if freq != here
+        ]
+        return channels[:ALERT_SWEEP_MAX_CHANNELS]
+
+    def _start_alert_sweep(self, frame) -> None:
+        channels = self.alert_sweep_channels()
+        if not channels:
+            return
+        net, transport = self.net, self.audio_transport
+        submitted = self.workers.submit(
+            "alert-sweep",
+            lambda: self._alert_sweep(frame, channels, net, transport),
+            self._alert_sweep_finished,
+        )
+        if not submitted:
+            self._log(
+                dual(
+                    "A frequency sweep is already running; this alert stays on "
+                    "the current frequency.",
+                    "Přeladění už probíhá; tato výstraha zůstane na současném "
+                    "kmitočtu.",
+                ),
+                LogLevel.WARNING,
+                source="alert",
+            )
+            return
+        self._log(
+            dual(
+                f"Alert will also be repeated on {len(channels)} other known "
+                "frequencies.",
+                f"Výstraha bude zopakována i na {len(channels)} dalších známých "
+                "kmitočtech.",
+            ),
+            source="alert",
+        )
+
+    def _alert_sweep(self, frame, channels, net, transport) -> int:
+        """Repeat one alert on every other frequency the route table knows.
+
+        Runs on a worker thread, and every channel is attempted independently:
+        a rig that will not tune, a QSY that times out or a channel that fails
+        mid-burst costs that one channel and nothing more, because the point of
+        the sweep is reach. The radio goes back to where it started afterwards,
+        including when the sweep is cut short.
+        """
+        home = self._read_channel()
+        reached = 0
+        try:
+            # Tuning away mid-flood would strand the queued home repeats.
+            self._wait_for_queued_alerts(net, transport)
+            for freq, mode in channels:
+                if not self._sweep_may_continue(net, transport):
+                    self._log(
+                        dual(
+                            "Alert sweep stopped: the control channel changed.",
+                            "Přeladění zastaveno: řídicí kanál se změnil.",
+                        ),
+                        LogLevel.WARNING,
+                        source="alert",
+                    )
+                    break
+                if self._alert_on_channel(frame, freq, mode, net, transport):
+                    reached += 1
+        finally:
+            self._return_to_channel(home)
+        return reached
+
+    def _alert_on_channel(self, frame, freq: int, mode: str, net, transport) -> bool:
+        megahertz = freq / 1_000_000
+        try:
+            with self._radio_lock:
+                self.radio.set_frequency(freq)
+                if mode:
+                    self.radio.set_mode(mode)
+            self.request_radio_poll(force=True)
+            time.sleep(ALERT_SWEEP_SETTLE)
+            for burst in range(ALERT_SWEEP_BURSTS):
+                net.retransmit_alert(frame)
+                transport.wait_tx_idle(timeout=ALERT_SWEEP_TX_WAIT)
+                if burst + 1 < ALERT_SWEEP_BURSTS:
+                    time.sleep(ALERT_SWEEP_GAP)
+        except Exception as exc:  # noqa: BLE001 - one channel must not end the sweep
+            self._log(
+                dual(
+                    f"Alert not repeated on {megahertz:.4f} MHz: {exc}",
+                    f"Výstraha nezopakována na {megahertz:.4f} MHz: {exc}",
+                ),
+                LogLevel.WARNING,
+                source="alert",
+            )
+            return False
+        self._log(
+            dual(
+                f"Alert repeated on {megahertz:.4f} MHz"
+                + (f" {mode}." if mode else "."),
+                f"Výstraha zopakována na {megahertz:.4f} MHz"
+                + (f" {mode}." if mode else "."),
+            ),
+            source="alert",
+        )
+        return True
+
+    def _sweep_may_continue(self, net, transport) -> bool:
+        """Stop if the channel we started on is no longer the live one."""
+        return (
+            self.net is net
+            and self.audio_transport is transport
+            and not self._payload_active.is_set()
+        )
+
+    def _wait_for_queued_alerts(self, net, transport) -> None:
+        deadline = time.monotonic() + ALERT_SWEEP_HOME_WAIT
+        while time.monotonic() < deadline:
+            if not net.alerts_pending() and transport.wait_tx_idle(timeout=1.0):
+                return
+            time.sleep(0.25)
+
+    def _read_channel(self) -> tuple[int, str] | None:
+        """Where the operator had the radio, so the sweep can hand it back."""
+        try:
+            with self._radio_lock:
+                state = self.radio.get_state()
+        except Exception:  # noqa: BLE001 - no CAT, nothing to restore
+            return None
+        if not state.frequency_hz:
+            return None
+        return int(state.frequency_hz), (state.mode or "")
+
+    def _return_to_channel(self, home: tuple[int, str] | None) -> None:
+        if home is None:
+            return
+        frequency, mode = home
+        try:
+            with self._radio_lock:
+                self.radio.set_frequency(frequency)
+                # The sweep may have crossed a band: a rig left on USB after an
+                # HF hop would be deaf on the FM channel the operator was on.
+                if mode:
+                    self.radio.set_mode(mode)
+        except Exception as exc:  # noqa: BLE001
+            self._log(
+                dual(
+                    f"Radio was left off its original frequency: {exc}",
+                    f"Rádio zůstalo mimo původní kmitočet: {exc}",
+                ),
+                LogLevel.ERROR,
+                source="alert",
+            )
+            return
+        self.request_radio_poll(force=True)
+
+    def _alert_sweep_finished(self, result: TaskResult) -> None:
+        if result.error:
+            self._log(
+                dual(
+                    f"Alert frequency sweep failed: {result.error}",
+                    f"Přeladění výstrahy selhalo: {result.error}",
+                ),
+                LogLevel.ERROR,
+                source="alert",
+            )
+            return
+        self._log(
+            dual(
+                f"Alert sweep finished on {result.value} extra frequencies.",
+                f"Přeladění výstrahy dokončeno na {result.value} dalších kmitočtech.",
+            ),
+            source="alert",
+        )
 
     def _on_alert(self, frame, mine: bool) -> None:
         code, note = decode_alert(frame.destination)
