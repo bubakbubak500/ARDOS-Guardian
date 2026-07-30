@@ -6,6 +6,7 @@ from guardian.message import Folder, MailMessage, MessageStore, Status
 from guardian.operations import (
     ALERT_SWEEP_BURSTS,
     ALERT_SWEEP_MAX_CHANNELS,
+    PTT_TEST_MAX_SECONDS,
     Operations,
     _ALERT_HISTORY,
 )
@@ -817,5 +818,186 @@ def test_sending_an_alert_hands_the_sweep_to_a_worker(tmp_path) -> None:
         assert operations.alerts[0].note == "POZAR"
     finally:
         operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+class _PttRadio:
+    """A rig that logs keying and can misbehave the way real ones do."""
+
+    name = "fake-rig"
+
+    def __init__(self, *, reports_tx=True, sticks_keyed=False, fail_on=None) -> None:
+        self.reports_tx = reports_tx
+        self.sticks_keyed = sticks_keyed
+        self.fail_on = fail_on          # True/False: raise when keyed/unkeyed
+        self.keyings: list[bool] = []
+        self.ptt = False
+        self.opened = False
+
+    @property
+    def is_open(self) -> bool:
+        return self.opened
+
+    def open(self) -> None:
+        self.opened = True
+
+    def set_ptt(self, on: bool) -> None:
+        self.keyings.append(on)
+        if self.fail_on is on:
+            raise OSError("PTT command failed")
+        self.ptt = on or self.sticks_keyed
+
+    def get_state(self):
+        return RadioState(
+            connected=True, ptt=self.ptt and self.reports_tx, frequency_hz=145_500_000
+        )
+
+    def close(self) -> None:
+        self.opened = False
+
+
+def _ptt_operations(tmp_path, radio, backend="hamlib"):
+    config = StationConfig(callsign="OK7PS", radio_backend=backend)
+    workers = WorkerPool(max_workers=1)
+    operations = Operations(
+        config,
+        EventBus(),
+        SnapshotStore(),
+        workers,
+        MessageStore(tmp_path / "mail"),
+        RouteTable(),
+        HeardStations(),
+    )
+    operations.radio = radio
+    operations.rigctld = SimpleNamespace(ensure=lambda *a: "", stop=lambda: None)
+    return operations, workers
+
+
+def _await_worker(workers, name="radio-control") -> None:
+    while workers.is_active(name):
+        time.sleep(0.001)
+    workers.drain()
+
+
+def test_ptt_test_keys_the_radio_and_confirms_it_transmitted(
+    tmp_path, monkeypatch
+) -> None:
+    # "No exception" is not proof: the rig is asked whether it is actually in
+    # TX while it is keyed.
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda _seconds: None)
+    radio = _PttRadio()
+    operations, workers = _ptt_operations(tmp_path, radio)
+    results: list[tuple[bool, str]] = []
+    try:
+        assert operations.run_ptt_test(on_result=lambda ok, msg: results.append((ok, msg)))
+        _await_worker(workers)
+
+        assert radio.keyings == [True, False]
+        assert radio.opened, "the test brings the radio up if it is not open"
+        assert results[0][0]
+        assert "passed" in results[0][1]
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_a_radio_left_keyed_is_reported_as_a_fault(tmp_path, monkeypatch) -> None:
+    # An interface that keys but never releases is the fault this test exists
+    # to catch, and it must not read as a pass.
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda _seconds: None)
+    radio = _PttRadio(sticks_keyed=True)
+    operations, workers = _ptt_operations(tmp_path, radio)
+    results: list[tuple[bool, str]] = []
+    try:
+        operations.run_ptt_test(on_result=lambda ok, msg: results.append((ok, msg)))
+        _await_worker(workers)
+
+        assert "still reports TX" in results[0][1]
+        assert "passed" not in results[0][1]
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_a_backend_that_cannot_read_back_says_so_instead_of_passing(
+    tmp_path, monkeypatch
+) -> None:
+    # A VOX/serial line has no telemetry; claiming a verified pass would be a
+    # lie the operator might rely on.
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda _seconds: None)
+    operations, workers = _ptt_operations(
+        tmp_path, _PttRadio(reports_tx=False), backend="vox"
+    )
+    results: list[tuple[bool, str]] = []
+    try:
+        operations.run_ptt_test(on_result=lambda ok, msg: results.append((ok, msg)))
+        _await_worker(workers)
+
+        assert results[0][0], "the command itself succeeded"
+        assert "cannot confirm TX" in results[0][1]
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_the_radio_is_unkeyed_even_when_the_test_itself_fails(
+    tmp_path, monkeypatch
+) -> None:
+    # If reading the state mid-test throws, the carrier must still stop.
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda _seconds: None)
+    radio = _PttRadio()
+    radio.get_state = lambda: (_ for _ in ()).throw(OSError("CAT dropped"))
+    operations, workers = _ptt_operations(tmp_path, radio)
+    results: list[tuple[bool, str]] = []
+    try:
+        operations.run_ptt_test(on_result=lambda ok, msg: results.append((ok, msg)))
+        _await_worker(workers)
+
+        assert radio.keyings == [True, False], "unkeyed despite the failure"
+        assert not results[0][0]
+        assert "CAT dropped" in results[0][1]
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_ptt_test_refuses_without_radio_control_or_during_a_transfer(
+    tmp_path,
+) -> None:
+    radio = _PttRadio()
+    operations, workers = _ptt_operations(tmp_path, radio, backend="none")
+    results: list[tuple[bool, str]] = []
+    try:
+        assert not operations.run_ptt_test(
+            on_result=lambda ok, msg: results.append((ok, msg))
+        )
+        assert radio.keyings == []
+        assert not results[0][0]
+
+        operations.config.radio_backend = "hamlib"
+        operations._payload_active.set()
+        assert not operations.run_ptt_test(
+            on_result=lambda ok, msg: results.append((ok, msg))
+        )
+        assert radio.keyings == [], "a payload transfer owns the radio"
+        assert not results[1][0]
+    finally:
+        operations._payload_active.clear()
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_the_keying_time_is_capped_however_it_is_called(tmp_path, monkeypatch) -> None:
+    # A carrier is only ever as long as the guard allows.
+    slept: list[float] = []
+    monkeypatch.setattr("guardian.operations.time.sleep", slept.append)
+    operations, workers = _ptt_operations(tmp_path, _PttRadio())
+    try:
+        operations.run_ptt_test(seconds=600.0)
+        _await_worker(workers)
+
+        assert sum(slept) == PTT_TEST_MAX_SECONDS
+    finally:
         operations.close()
         workers.close(wait=True)

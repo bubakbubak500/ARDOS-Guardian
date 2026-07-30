@@ -107,9 +107,10 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
-**Built but not yet flown (0.6.35):** the alert frequency sweep (an alert is
-repeated on every other frequency in the route table, then the radio goes back)
-and the heard-stations S/N estimate + channel column.
+**Built but not yet flown (0.6.35–0.6.36):** the alert frequency sweep (an
+alert is repeated on every other frequency in the route table, then the radio
+goes back), the heard-stations S/N estimate + channel column, and the Test PTT
+button in radio settings.
 
 **Needs real hardware/peers to verify:**
 - **VARA HF control channel — WORKING as of 0.6.32, confirmed on air
@@ -454,6 +455,18 @@ table's `freq_hz` entries are reused as an alert channel list.
   confirmation says the radio will be retuned.
 - **To verify on air:** whether 2 copies per channel is enough on HF, and
   whether the 45 s home wait feels too long before the first QSY.
+
+## Test PTT (0.6.36)
+`Settings → Radio control` ends with a **Test PTT** button:
+`Operations.run_ptt_test()` waits for control TX to idle, opens the radio if
+needed (same rigctld path as *Connect*), keys for 2 s and **reads `get_state()`
+back while keyed**, so a driver that accepts `T 1` and transmits nothing is
+distinguishable from a real key. Three reported outcomes — passed, "cannot
+confirm TX" (VOX/serial has no telemetry), and "still reports TX after
+unkeying". Unkey is in a `finally`; hold time capped at 5 s; refused with no
+radio backend, during a payload transfer, or when `radio-control` is busy. The
+button refuses to key unapplied dialog values — the live driver still holds the
+old ones.
 
 ## Heard stations: S/N estimate and channel (0.6.35)
 The `Last SNR` column was dead — nothing ever passed a measurement to the

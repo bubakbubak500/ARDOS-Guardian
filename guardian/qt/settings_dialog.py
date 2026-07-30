@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from ..config import StationConfig
 from ..i18n import Language, dual, language, set_language, tr
+from ..operations import PTT_TEST_SECONDS
 from ..modem.audio import list_audio_devices, match_device_name
 from ..radio.presets import CURATED, load_hamlib_models
 from .theme import ThemePreference
@@ -83,10 +84,15 @@ class SettingsDialog(QDialog):
         parent=None,
         *,
         settings: QSettings | None = None,
+        operations=None,
     ) -> None:
         super().__init__(parent)
         self.config = config
         self.settings = settings or QSettings()
+        # Only the live station can key a radio. Without it (tests, previews)
+        # the PTT test is offered but disabled rather than hidden, so the
+        # dialog looks the same wherever it is opened.
+        self.operations = operations
         self.setWindowTitle(tr("settings.title"))
         self.setMinimumSize(960, 650)
 
@@ -225,6 +231,70 @@ class SettingsDialog(QDialog):
         form.addRow(dual("rigctld port", "Port rigctld"), self.rigctld_port)
         form.addRow(dual("rigctld executable", "Program rigctld"), self.rigctld_path)
         form.addRow(dual("VOX PTT line", "Linka PTT pro VOX"), self.ptt_line)
+
+        # Proving that keying works is the one thing this page cannot tell you
+        # from its own fields: the wiring is only ever confirmed on air.
+        self.ptt_test_button = QPushButton(tr("settings.ptt_test"))
+        self.ptt_test_button.setToolTip(tr("settings.ptt_test_hint"))
+        self.ptt_test_button.clicked.connect(self._run_ptt_test)
+        self.ptt_test_button.setEnabled(self.operations is not None)
+        self.ptt_status = QLabel(tr("settings.ptt_test_hint"))
+        self.ptt_status.setObjectName("Metadata")
+        self.ptt_status.setWordWrap(True)
+        test_row = QWidget()
+        test_layout = QHBoxLayout(test_row)
+        test_layout.setContentsMargins(0, 0, 0, 0)
+        test_layout.setSpacing(6)
+        test_layout.addWidget(self.ptt_test_button)
+        test_layout.addStretch(1)
+        form.addRow("", test_row)
+        form.addRow("", self.ptt_status)
+
+    def _run_ptt_test(self) -> None:
+        if self.operations is None:
+            return
+        # Saved settings are what the live radio driver is using; testing the
+        # values still sitting in these fields would prove nothing about it.
+        if self._radio_settings_changed():
+            QMessageBox.information(
+                self,
+                tr("settings.ptt_test"),
+                tr("settings.ptt_test_unsaved"),
+            )
+            return
+        confirm = QMessageBox.question(
+            self,
+            tr("settings.ptt_test"),
+            tr("settings.ptt_test_confirm", seconds=int(PTT_TEST_SECONDS)),
+        )
+        if confirm is not QMessageBox.StandardButton.Yes:
+            return
+        self.ptt_test_button.setEnabled(False)
+        self.ptt_status.setText(tr("settings.ptt_test_running"))
+        if not self.operations.run_ptt_test(on_result=self._ptt_test_finished):
+            # A refusal is reported synchronously through the same callback.
+            return
+
+    def _ptt_test_finished(self, _ok: bool, message: str) -> None:
+        try:
+            self.ptt_status.setText(message)
+            self.ptt_test_button.setEnabled(True)
+        except RuntimeError:
+            # The operator closed the dialog while the radio was keyed; the
+            # result is in the log either way.
+            pass
+
+    def _radio_settings_changed(self) -> bool:
+        return (
+            self.radio_backend.currentData() != self.config.radio_backend
+            or int(self.radio_model.currentData() or 0) != self.config.rig_model
+            or self.cat_port.text().strip() != self.config.cat_port
+            or self.cat_baud.value() != self.config.cat_baud
+            or self.rigctld_host.text().strip() != self.config.rigctld_host
+            or self.rigctld_port.value() != self.config.rigctld_port
+            or self.rigctld_path.text() != self.config.rigctld_path
+            or self.ptt_line.currentText() != self.config.ptt_line
+        )
 
     def _browse_radios(self) -> None:
         models = load_hamlib_models(self.rigctld_path.text())

@@ -5,10 +5,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from types import SimpleNamespace
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QSpinBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+)
 
 from guardian.config import StationConfig
+from guardian.i18n import tr
 from guardian.install.dependencies import DependencyKind, DependencyStatus
+from guardian.operations import PTT_TEST_SECONDS
 from guardian.qt.diagnostics_dialog import DiagnosticsDialog
 from guardian.qt.readiness_dialog import ReadinessDialog
 from guardian.qt.runtime import ShellRuntime
@@ -188,3 +196,90 @@ def test_readiness_offers_direct_vara_downloads(tmp_path) -> None:
     finally:
         readiness.close()
         runtime.close()
+
+
+class _FakeOperations:
+    """Stands in for the live station: records what the button asked for."""
+
+    def __init__(self, refuse: bool = False) -> None:
+        self.calls: list[float] = []
+        self.refuse = refuse
+
+    def run_ptt_test(self, seconds=PTT_TEST_SECONDS, on_result=None) -> bool:
+        self.calls.append(seconds)
+        if self.refuse:
+            if on_result is not None:
+                on_result(False, "no radio control")
+            return False
+        if on_result is not None:
+            on_result(True, "PTT test passed")
+        return True
+
+
+def test_ptt_test_button_keys_only_after_the_operator_confirms(monkeypatch) -> None:
+    # The button puts a real carrier on air, so a stray click must not do it.
+    _application()
+    config = StationConfig(radio_backend="hamlib", rig_model=3073)
+    operations = _FakeOperations()
+    dialog = SettingsDialog(
+        config, ThemePreference.SYSTEM, operations=operations
+    )
+    try:
+        assert dialog.ptt_test_button.isEnabled()
+
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.No),
+        )
+        dialog.ptt_test_button.click()
+        assert operations.calls == []
+
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+        )
+        dialog.ptt_test_button.click()
+        assert len(operations.calls) == 1
+        assert dialog.ptt_status.text() == "PTT test passed"
+        # The button comes back for a second attempt once the result is in.
+        assert dialog.ptt_test_button.isEnabled()
+    finally:
+        dialog.close()
+
+
+def test_ptt_test_will_not_key_settings_that_were_never_applied(monkeypatch) -> None:
+    # The live driver still holds the old port; keying it would prove nothing
+    # about what is on screen.
+    _application()
+    config = StationConfig(radio_backend="hamlib", rig_model=3073, cat_port="COM7")
+    operations = _FakeOperations()
+    dialog = SettingsDialog(
+        config, ThemePreference.SYSTEM, operations=operations
+    )
+    asked: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        staticmethod(lambda _p, _t, text, *a, **k: asked.append(text)),
+    )
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+    try:
+        dialog.cat_port.setText("COM9")
+        dialog.ptt_test_button.click()
+
+        assert operations.calls == []
+        assert asked == [tr("settings.ptt_test_unsaved")]
+    finally:
+        dialog.close()
+
+
+def test_ptt_test_is_offered_but_disabled_without_a_live_station() -> None:
+    _application()
+    dialog = SettingsDialog(StationConfig(), ThemePreference.SYSTEM)
+    try:
+        assert dialog.ptt_test_button.text() == tr("settings.ptt_test")
+        assert not dialog.ptt_test_button.isEnabled()
+    finally:
+        dialog.close()

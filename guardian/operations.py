@@ -77,6 +77,12 @@ ALERT_SWEEP_SETTLE = 0.6
 ALERT_SWEEP_HOME_WAIT = 45.0
 ALERT_SWEEP_TX_WAIT = 30.0
 
+# The PTT test is a deliberate carrier: long enough for the operator to see the
+# rig switch and the SWR needle move, short enough that a forgotten click on a
+# live antenna is harmless. The ceiling is a guard, not a setting.
+PTT_TEST_SECONDS = 2.0
+PTT_TEST_MAX_SECONDS = 5.0
+
 
 class Operations:
     """Own hardware objects while exposing only non-blocking UI commands."""
@@ -461,24 +467,32 @@ class Operations:
             on_release=self._resume_control,
         )
 
+    def _open_radio(self) -> list[str]:
+        """Bring the configured radio up, starting rigctld when Hamlib needs it.
+
+        Returns whatever the launcher had to say. Callers hold no lock; this
+        takes the radio lock itself and is safe to call on a worker.
+        """
+        messages: list[str] = []
+        config = self.config
+        with self._radio_lock:
+            if config.radio_backend == "hamlib":
+                messages.append(
+                    self.rigctld.ensure(
+                        config.rig_model,
+                        config.cat_port,
+                        config.rigctld_port,
+                        config.cat_baud,
+                    )
+                )
+            self.radio.open()
+        return messages
+
     def connect_radio(self) -> bool:
         radio = self.radio
-        config = self.config
 
         def operation() -> list[str]:
-            messages: list[str] = []
-            with self._radio_lock:
-                if config.radio_backend == "hamlib":
-                    messages.append(
-                        self.rigctld.ensure(
-                            config.rig_model,
-                            config.cat_port,
-                            config.rigctld_port,
-                            config.cat_baud,
-                        )
-                    )
-                radio.open()
-            return messages
+            return self._open_radio()
 
         def completed(result: TaskResult) -> None:
             if result.error:
@@ -503,6 +517,136 @@ class Operations:
         if submitted:
             self._log(dual("Connecting radio…", "Připojuji rádio…"), source="radio")
         return submitted
+
+    def run_ptt_test(
+        self,
+        seconds: float = PTT_TEST_SECONDS,
+        on_result: Callable[[bool, str], None] | None = None,
+    ) -> bool:
+        """Key the transmitter briefly so the operator can prove PTT works.
+
+        This is the one deliberate carrier Guardian ever puts on air, so it is
+        short, it is announced in the log, and the unkey is in a `finally`: an
+        interface that keys but never releases is exactly the fault this test
+        exists to catch, and it must not be left keyed by our own error.
+
+        `on_result(ok, message)` is delivered on the UI thread by the worker
+        pool's completion drain.
+        """
+        if self.config.radio_backend == "none":
+            message = dual(
+                "No radio control is configured, so there is no PTT to test.",
+                "Řízení rádia není nastaveno, není tedy co testovat.",
+            )
+            self._log(message, LogLevel.WARNING, source="radio")
+            if on_result is not None:
+                on_result(False, message)
+            return False
+        if self._payload_active.is_set():
+            message = dual(
+                "A payload transfer holds the radio; try again when it ends.",
+                "Rádio je obsazeno datovým přenosem; zkuste to po jeho skončení.",
+            )
+            self._log(message, LogLevel.WARNING, source="radio")
+            if on_result is not None:
+                on_result(False, message)
+            return False
+
+        hold = max(0.2, min(float(seconds), PTT_TEST_MAX_SECONDS))
+
+        def operation() -> str:
+            transport = self.audio_transport
+            if transport is not None and not transport.wait_tx_idle(timeout=10.0):
+                raise TimeoutError(
+                    dual(
+                        "a control burst is still on the air",
+                        "řídicí rámec je stále ve vysílání",
+                    )
+                )
+            opened: list[str] = []
+            if not self.radio.is_open:
+                opened = self._open_radio()
+            with self._radio_lock:
+                keyed_reported = False
+                self.radio.set_ptt(True)
+                try:
+                    # Ask the rig what it thinks it is doing while it is keyed:
+                    # a driver that accepts T 1 and transmits nothing is the
+                    # interesting failure, and only the readback shows it.
+                    time.sleep(hold / 2)
+                    keyed_reported = bool(self.radio.get_state().ptt)
+                    time.sleep(hold - hold / 2)
+                finally:
+                    self.radio.set_ptt(False)
+                released = not self.radio.get_state().ptt
+            detail = " ".join(message for message in opened if message)
+            return self._ptt_test_report(hold, keyed_reported, released, detail)
+
+        def completed(result: TaskResult) -> None:
+            if result.error:
+                message = dual(
+                    f"PTT test failed: {result.error}",
+                    f"Test PTT selhal: {result.error}",
+                )
+                self._log(message, LogLevel.ERROR, source="radio")
+            else:
+                message = result.value
+                self._log(message, source="radio")
+            self.request_radio_poll(force=True)
+            if on_result is not None:
+                on_result(result.error is None, message)
+
+        submitted = self.workers.submit("radio-control", operation, completed)
+        if not submitted:
+            message = dual(
+                "The radio is busy with another command.",
+                "Rádio právě zpracovává jiný příkaz.",
+            )
+            self._log(message, LogLevel.WARNING, source="radio")
+            if on_result is not None:
+                on_result(False, message)
+            return False
+        self._log(
+            dual(
+                f"PTT test: keying {self.radio.name} for {hold:.1f} s.",
+                f"Test PTT: klíčuji {self.radio.name} na {hold:.1f} s.",
+            ),
+            source="radio",
+        )
+        return True
+
+    def _ptt_test_report(
+        self,
+        hold: float,
+        keyed_reported: bool,
+        released: bool,
+        detail: str = "",
+    ) -> str:
+        """Say what the rig actually did, not merely that nothing raised."""
+        if not released:
+            # Worth shouting about: the radio is transmitting after we asked it
+            # to stop, and the operator should pull the interface.
+            return dual(
+                f"PTT test: the radio still reports TX after unkeying — "
+                f"check the interface now. {detail}".strip(),
+                f"Test PTT: rádio i po odklíčování hlásí vysílání — "
+                f"ihned zkontrolujte rozhraní. {detail}".strip(),
+            )
+        if keyed_reported:
+            return dual(
+                f"PTT test passed: keyed for {hold:.1f} s and the radio "
+                f"reported TX. {detail}".strip(),
+                f"Test PTT prošel: klíčováno {hold:.1f} s a rádio hlásilo "
+                f"vysílání. {detail}".strip(),
+            )
+        return dual(
+            f"PTT test: the command was accepted and released after "
+            f"{hold:.1f} s, but this backend cannot confirm TX — watch the "
+            f"radio itself. {detail}".strip(),
+            f"Test PTT: příkaz byl přijat a po {hold:.1f} s uvolněn, ale toto "
+            f"rozhraní neumí vysílání potvrdit — sledujte samotné rádio. "
+            f"{detail}".strip(),
+        )
 
     def disconnect_radio(self) -> bool:
         def operation() -> None:

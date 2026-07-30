@@ -387,6 +387,29 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     ),
     "settings.station": ("Station", "Stanice"),
     "settings.radio": ("Radio control", "Řízení rádia"),
+    "settings.ptt_test": ("Test PTT", "Test PTT"),
+    "settings.ptt_test_hint": (
+        "Keys the transmitter briefly to prove the interface really switches "
+        "the radio. Nothing is modulated — it is a bare carrier.",
+        "Krátce zaklíčuje vysílač, aby se ověřilo, že rozhraní rádio opravdu "
+        "přepne. Nic se nemoduluje — jde o holou nosnou.",
+    ),
+    "settings.ptt_test_confirm": (
+        "The radio will transmit for {seconds} seconds on its current "
+        "frequency. Make sure an antenna or dummy load is connected. Continue?",
+        "Rádio bude {seconds} sekundy vysílat na svém současném kmitočtu. "
+        "Ujistěte se, že je připojena anténa nebo umělá zátěž. Pokračovat?",
+    ),
+    "settings.ptt_test_running": (
+        "Keying the radio…",
+        "Klíčuji rádio…",
+    ),
+    "settings.ptt_test_unsaved": (
+        "Save or apply the radio settings first — the test keys the radio "
+        "Guardian is actually using, not the values shown here.",
+        "Nejprve nastavení rádia uložte nebo použijte — test klíčuje rádio, "
+        "které Guardian skutečně používá, ne hodnoty zobrazené zde.",
+    ),
     "settings.vara": ("VARA & payload", "VARA a přenos"),
     "settings.network": ("Network behavior", "Chování sítě"),
     "settings.appearance": ("Appearance", "Vzhled"),

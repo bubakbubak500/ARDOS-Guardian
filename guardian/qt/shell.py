@@ -633,6 +633,7 @@ class GuardianMainWindow(QMainWindow):
             self.theme_controller.preference,
             self,
             settings=self.settings,
+            operations=operations,
         )
 
         def apply_changes() -> None:
