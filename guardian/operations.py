@@ -24,6 +24,7 @@ from .protocol import (
     max_note_length,
 )
 from .radio import make_driver
+from .radio.presets import find_executable
 from .radio.rigctld_launcher import RigctldProcess
 from .routing import HeardStations, RouteTable
 from .services import (
@@ -441,6 +442,47 @@ class Operations:
             self.vara.send_command("P2P SESSION")
         return True
 
+    def radio_settings(self) -> tuple:
+        """Everything the radio driver and rigctld are built from. A change
+        here needs `reconfigure_radio()` — the driver is constructed once."""
+        c = self.config
+        return (
+            c.radio_backend,
+            c.rig_model,
+            c.cat_port,
+            c.cat_baud,
+            c.rigctld_host,
+            c.rigctld_port,
+            c.rigctld_path,
+            c.ptt_line,
+            c.ptt_type,
+        )
+
+    def reconfigure_radio(self) -> None:
+        """Rebuild the driver after the operator changes radio settings.
+
+        Before this existed a backend or PTT change only took effect after an
+        application restart: `make_driver` ran once in `__init__` and the old
+        driver (with the old port, host, and `reports_ptt`) lived on. The
+        rigctld child is kept — `ensure()` already restarts it when its
+        command line no longer matches.
+        """
+        with self._radio_lock:
+            try:
+                self.radio.close()
+            except Exception:  # noqa: BLE001 - a dead driver must not block the new one
+                pass
+            self.radio = make_driver(self.config)
+        self.rigctld.exe = find_executable("rigctld", self.config.rigctld_path)
+        self._log(
+            dual(
+                f"Radio control reconfigured ({self.radio.name}).",
+                f"Řízení rádia překonfigurováno ({self.radio.name}).",
+            ),
+            source="radio",
+        )
+        self.request_radio_poll(force=True)
+
     def vara_endpoint(self) -> tuple:
         """Which VARA instance we talk to. A change here needs a reconnect."""
         return (
@@ -483,6 +525,7 @@ class Operations:
                         config.cat_port,
                         config.rigctld_port,
                         config.cat_baud,
+                        ptt_type=config.ptt_type,
                     )
                 )
             self.radio.open()
@@ -612,10 +655,25 @@ class Operations:
             if on_result is not None:
                 on_result(False, message)
             return False
+        # Say exactly which wiring is being exercised — when the test fails,
+        # this line plus the rigctld command line are the whole diagnosis.
+        if self.config.radio_backend == "hamlib":
+            path = (
+                f"rigctld {self.config.rigctld_host}:{self.config.rigctld_port}"
+                f", PTT {self.config.ptt_type or 'RIG'}"
+                + (
+                    f" on {self.config.cat_port}"
+                    if (self.config.ptt_type or "RIG").upper() != "RIG"
+                    and self.config.cat_port
+                    else ""
+                )
+            )
+        else:
+            path = f"{self.config.ptt_line} on {self.config.cat_port or '?'}"
         self._log(
             dual(
-                f"PTT test: keying {self.radio.name} for {hold:.1f} s.",
-                f"Test PTT: klíčuji {self.radio.name} na {hold:.1f} s.",
+                f"PTT test: keying {self.radio.name} for {hold:.1f} s ({path}).",
+                f"Test PTT: klíčuji {self.radio.name} na {hold:.1f} s ({path}).",
             ),
             source="radio",
         )

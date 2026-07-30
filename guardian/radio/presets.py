@@ -30,13 +30,24 @@ class RadioPreset:
     note: str = ""
 
 
+# Hamlib's model 1 is a simulator: it answers every command and opens no
+# device at all. Useful alone for testing rigctld, and -- combined with
+# --ptt-type RTS/DTR -- as the front for a no-CAT radio keyed over a serial
+# line (AIOC and similar sound-card cables).
+DUMMY_MODEL = 1
+
 # Model ids verified against Hamlib 4.7.1 (`rigctl -l`). The authoritative
 # source at runtime is still the live "Browse all" list, which matches the
 # Hamlib version actually installed on each PC.
 CURATED: list[RadioPreset] = [
     RadioPreset("— No radio —", "none", 0, "UI/testing only, no control"),
     RadioPreset("Generic VOX / serial PTT", "vox", 0, "RTS or DTR keys PTT; no CAT"),
-    RadioPreset("Hamlib Dummy (test rig)", "hamlib", 1, "Fake rig for testing rigctld"),
+    RadioPreset(
+        "Hamlib Dummy — no-CAT radio / AIOC",
+        "hamlib",
+        DUMMY_MODEL,
+        "Simulated rig; set PTT via RTS/DTR to key a real radio on the COM port",
+    ),
     RadioPreset("Icom IC-7300", "hamlib", 3073),
     RadioPreset("Icom IC-705", "hamlib", 3085),
     RadioPreset("Icom IC-7100", "hamlib", 3070),

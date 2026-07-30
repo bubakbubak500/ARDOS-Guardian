@@ -96,23 +96,37 @@ class HamlibRadio(RadioDriver):
                     return False
         return True  # getters have no RPRT on success
 
+    @staticmethod
+    def _explain(lines: list[str]) -> str:
+        """Translate rigctld's RPRT code — a bare "RPRT -6" sends the operator
+        to a lookup table at exactly the moment they are debugging PTT wiring."""
+        for ln in lines:
+            if ln.startswith("RPRT"):
+                try:
+                    code = int(ln.split()[1])
+                except (IndexError, ValueError):
+                    break
+                meaning = _RPRT_MEANINGS.get(code)
+                return f"{ln} — {meaning}" if meaning else ln
+        return "; ".join(lines)
+
     def set_ptt(self, on: bool) -> None:
         with self._lock:
             lines = self._command(f"T {1 if on else 0}")
             if not self._ok(lines):
-                raise IOError(f"PTT command failed: {lines}")
+                raise IOError(f"PTT command failed: {self._explain(lines)}")
 
     def set_frequency(self, hz: int) -> None:
         with self._lock:
             lines = self._command(f"F {int(hz)}")
             if not self._ok(lines):
-                raise IOError(f"set frequency failed: {lines}")
+                raise IOError(f"set frequency failed: {self._explain(lines)}")
 
     def set_mode(self, mode: str, passband: int = 0) -> None:
         with self._lock:
             lines = self._command(f"M {mode} {passband}")
             if not self._ok(lines):
-                raise IOError(f"set mode failed: {lines}")
+                raise IOError(f"set mode failed: {self._explain(lines)}")
 
     def get_state(self) -> RadioState:
         if self._sock is None:
@@ -135,6 +149,22 @@ class HamlibRadio(RadioDriver):
         except (OSError, ValueError) as exc:
             st.error = str(exc)
         return st
+
+
+# Hamlib error codes, from `rigctld --help`. The ones an operator actually
+# hits while wiring PTT: -5/-6 mean the serial device (or the radio behind
+# it) is missing/busy, -4/-11 mean this model cannot do what was asked.
+_RPRT_MEANINGS = {
+    -1: "invalid parameter",
+    -2: "invalid configuration",
+    -4: "feature not implemented by this rig model",
+    -5: "communication timed out — is the device connected and the port right?",
+    -6: "IO error — serial port missing, busy, or opened by another program",
+    -8: "protocol error",
+    -9: "command rejected by the rig",
+    -11: "feature not available on this rig model",
+    -20: "rig is not powered on",
+}
 
 
 def _is_int(s: str) -> bool:

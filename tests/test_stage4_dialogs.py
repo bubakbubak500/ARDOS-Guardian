@@ -301,3 +301,21 @@ def test_ptt_test_is_offered_but_disabled_without_a_live_station() -> None:
         assert not dialog.ptt_test_button.isEnabled()
     finally:
         dialog.close()
+
+
+def test_hamlib_ptt_wiring_is_a_setting_and_participates_in_the_unsaved_check() -> None:
+    _application()
+    config = StationConfig(radio_backend="hamlib", rig_model=1, cat_port="COM7")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        assert dialog.ptt_type.currentData() == "RIG"
+
+        dialog.ptt_type.setCurrentIndex(dialog.ptt_type.findData("RTS"))
+        # PTT test refuses this state: the live rigctld still keys the old way.
+        assert dialog._radio_settings_changed()
+
+        assert dialog.apply()
+        assert config.ptt_type == "RTS"
+        assert not dialog._radio_settings_changed()
+    finally:
+        dialog.close()

@@ -130,6 +130,12 @@ def help_topics() -> list[HelpTopic]:
             VOX PTT. For Hamlib select the radio model by name, then set the CAT
             COM port, baud rate, rigctld host/port and executable. For VOX
             choose the COM port and RTS or DTR PTT line.</p>
+            <p>For a radio without CAT — a Baofeng-class handheld behind an
+            AIOC or similar sound-card cable — pick the <b>Hamlib Dummy</b>
+            model, the cable's COM port, and set <b>Hamlib PTT via</b> to RTS
+            or DTR. The dummy model never opens the port on its own, so with
+            the default CAT command nothing would ever be keyed. Use
+            <b>Test PTT</b> to prove the wiring.</p>
             <p><b>VARA & payload</b> stores separate FM and HF command/data
             ports and executable paths. VARA P2P lets Guardian transfer the
             bundle. Manual Winlink hand-off pauses at an operator confirmation.</p>
@@ -149,6 +155,11 @@ def help_topics() -> list[HelpTopic]:
             sériové PTT pro VOX. Pro Hamlib vyberte model rádia podle názvu a
             nastavte port COM pro CAT, rychlost, adresu/port rigctld a cestu k
             programu. Pro VOX zvolte port COM a linku PTT RTS nebo DTR.</p>
+            <p>Pro rádio bez CAT — ruční stanici typu Baofeng přes kabel AIOC
+            apod. — zvolte model <b>Hamlib Dummy</b>, COM port kabelu a
+            <b>PTT přes (Hamlib)</b> nastavte na RTS nebo DTR. Model Dummy sám
+            port nikdy neotevírá, takže s výchozím povelem CAT by se nikdy nic
+            nezaklíčovalo. Zapojení ověřte tlačítkem <b>Test PTT</b>.</p>
             <p><b>VARA a přenos</b> uchovává oddělené příkazové/datové porty a
             cesty k programům pro FM a HF. VARA P2P přenáší balíček přímo.
             Ruční Winlink se zastaví na potvrzení operátora.</p>

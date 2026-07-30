@@ -9,13 +9,23 @@ serial RTS/DTR PTT fallback for dumb VOX radios.
 from .base import RadioDriver, RadioState, NullRadio
 from .hamlib import HamlibRadio
 from .generic_vox import VoxRadio
+from .presets import DUMMY_MODEL
 
 
 def make_driver(cfg) -> RadioDriver:
     """Build the right driver for a StationConfig."""
     backend = (cfg.radio_backend or "none").lower()
     if backend == "hamlib":
-        return HamlibRadio(cfg.rigctld_host, cfg.rigctld_port)
+        driver = HamlibRadio(cfg.rigctld_host, cfg.rigctld_port)
+        # Hamlib can normally ask the rig whether it is transmitting -- but
+        # the dummy model just echoes whatever was set, and serial-line PTT
+        # reads back the wire we asserted. Neither is the radio speaking, so
+        # neither may count as confirmation in the PTT test.
+        driver.reports_ptt = (
+            int(getattr(cfg, "rig_model", 0) or 0) != DUMMY_MODEL
+            and (getattr(cfg, "ptt_type", "RIG") or "RIG").upper() == "RIG"
+        )
+        return driver
     if backend == "vox":
         return VoxRadio(cfg.cat_port, ptt_line=cfg.ptt_line)
     return NullRadio()

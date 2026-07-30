@@ -237,6 +237,36 @@ class SettingsDialog(QDialog):
         self.ptt_line = QComboBox()
         self.ptt_line.addItems(["RTS", "DTR"])
         self.ptt_line.setCurrentText(self.config.ptt_line)
+        # rigctld can key three ways; the default CAT command only exists on
+        # radios that *have* CAT. A no-CAT handheld behind an AIOC or data
+        # cable is keyed by a serial control line, paired with the Dummy model.
+        self.ptt_type = QComboBox()
+        self.ptt_type.addItem(
+            dual("CAT command (rig with CAT)", "Povel CAT (rádio s CAT)"), "RIG"
+        )
+        self.ptt_type.addItem(
+            dual("RTS line on the serial port", "Linka RTS na sériovém portu"),
+            "RTS",
+        )
+        self.ptt_type.addItem(
+            dual("DTR line on the serial port", "Linka DTR na sériovém portu"),
+            "DTR",
+        )
+        ptt_index = self.ptt_type.findData(
+            (self.config.ptt_type or "RIG").upper()
+        )
+        self.ptt_type.setCurrentIndex(max(0, ptt_index))
+        self.ptt_type.setToolTip(
+            dual(
+                "How rigctld keys the transmitter. For a radio without CAT "
+                "(Baofeng-class handheld on an AIOC cable), pick the Hamlib "
+                "Dummy model and RTS or DTR here — with CAT command the COM "
+                "port is never touched at all.",
+                "Jak rigctld klíčuje vysílač. Pro rádio bez CAT (ruční stanice "
+                "přes kabel AIOC) zvolte model Hamlib Dummy a zde RTS nebo "
+                "DTR — s povelem CAT se COM portu nikdy nikdo nedotkne.",
+            )
+        )
         form.addRow(dual("Control method", "Způsob řízení"), self.radio_backend)
         form.addRow(dual("Radio model", "Model rádia"), radio_picker)
         form.addRow(
@@ -247,6 +277,7 @@ class SettingsDialog(QDialog):
         form.addRow(dual("rigctld host", "Adresa rigctld"), self.rigctld_host)
         form.addRow(dual("rigctld port", "Port rigctld"), self.rigctld_port)
         form.addRow(dual("rigctld executable", "Program rigctld"), self.rigctld_path)
+        form.addRow(dual("Hamlib PTT via", "PTT přes (Hamlib)"), self.ptt_type)
         form.addRow(dual("VOX PTT line", "Linka PTT pro VOX"), self.ptt_line)
 
         # Proving that keying works is the one thing this page cannot tell you
@@ -319,6 +350,7 @@ class SettingsDialog(QDialog):
             or self.rigctld_port.value() != self.config.rigctld_port
             or self.rigctld_path.text() != self.config.rigctld_path
             or self.ptt_line.currentText() != self.config.ptt_line
+            or self.ptt_type.currentData() != (self.config.ptt_type or "RIG").upper()
         )
 
     def _browse_radios(self) -> None:
@@ -703,6 +735,7 @@ class SettingsDialog(QDialog):
         cfg.rigctld_port = self.rigctld_port.value()
         cfg.rigctld_path = self.rigctld_path.text() or "rigctld"
         cfg.ptt_line = self.ptt_line.currentText()
+        cfg.ptt_type = self.ptt_type.currentData()
         cfg.audio_input = self.audio_input.currentText().strip()
         cfg.audio_output = self.audio_output.currentText().strip()
         cfg.vara_host = self.vara_host.text().strip()

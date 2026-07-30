@@ -628,6 +628,7 @@ class GuardianMainWindow(QMainWindow):
             self.runtime.config.audio_output,
         ]
         applied_vara = [operations.vara_endpoint(), operations.vara_tuning()]
+        applied_radio = [operations.radio_settings()]
         dialog = SettingsDialog(
             self.runtime.config,
             self.theme_controller.preference,
@@ -685,6 +686,13 @@ class GuardianMainWindow(QMainWindow):
                             source="vara",
                         )
             applied_vara[:] = [endpoint, tuning]
+
+            # The radio driver is built from config once; a changed backend,
+            # port or PTT wiring only exists in the config until it is rebuilt.
+            radio_now = operations.radio_settings()
+            if radio_now != applied_radio[0]:
+                operations.reconfigure_radio()
+            applied_radio[0] = radio_now
 
             self.runtime.operations.configure_vara_host_ptt()
             self.theme_controller.set_preference(dialog.selected_theme)

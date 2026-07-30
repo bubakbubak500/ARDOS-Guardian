@@ -64,6 +64,14 @@ class StationConfig:
     # VOX / dumb-radio PTT (only used when radio_backend == "vox")
     ptt_line: str = "RTS"         # "RTS" | "DTR"
 
+    # How rigctld keys the transmitter (radio_backend == "hamlib").
+    # "RIG" sends the CAT PTT command; "RTS"/"DTR" assert a serial control
+    # line on cat_port instead (rigctld --ptt-type/--ptt-file). A no-CAT
+    # handheld behind an AIOC or data cable needs RTS or DTR together with
+    # the Hamlib Dummy model -- the dummy never opens a rig device, so
+    # without this the COM port was simply never touched.
+    ptt_type: str = "RIG"         # "RIG" | "RTS" | "DTR"
+
     # Experimental: let Guardian key the radio (via its own driver/rigctld) on
     # VARA's "PTT ON"/"PTT OFF" command-channel signals, so VARA never needs the
     # COM port. Generic across CI-V / RTS / DTR rigs — set VARA's own PTT to None.

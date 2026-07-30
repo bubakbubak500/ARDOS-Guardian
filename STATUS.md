@@ -107,10 +107,11 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
-**Built but not yet flown (0.6.35–0.6.37):** the alert frequency sweep (an
+**Built but not yet flown (0.6.35–0.6.38):** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
-goes back), the heard-stations S/N estimate + channel column, and the Test PTT
-button in radio settings.
+goes back), the heard-stations S/N estimate + channel column, the Test PTT
+button in radio settings, and no-CAT keying via Hamlib dummy + serial PTT
+(AIOC).
 
 **Needs real hardware/peers to verify:**
 - **VARA HF control channel — WORKING as of 0.6.32, confirmed on air
@@ -472,6 +473,29 @@ returned flag: 0.6.36 read `VoxRadio.get_state().ptt`, which is the RTS/DTR
 line Guardian had just asserted, and reported a dead cable as "the radio
 reported TX". Hamlib (`t`) confirms; VOX/serial says it cannot. The
 still-asserted check applies to both.
+
+## No-CAT radio via Hamlib dummy + serial PTT (0.6.38)
+Root cause of "AIOC handheld with Hamlib Dummy never keys": the dummy model
+is a simulator and **never opens the `-r` rig device**, so
+`rigctld -m 1 -r COMx` looked configured while the port was never touched
+(confirmed live on rigctld 4.7.2 — it even starts with a nonexistent port and
+answers `T`/`t` from the simulator). The port must be the **PTT device**:
+`-P RTS|DTR -p COMx`.
+
+- `config.ptt_type` ("RIG"/"RTS"/"DTR") + *Hamlib PTT via* in settings;
+  `RigctldProcess.command()` builds args (dummy gets no `-r`), full command
+  line goes to the log.
+- `ensure()` restarts **our own** rigctld when its args no longer match the
+  config (a changed PTT line existed only on the command line before);
+  foreign instances stay untouched.
+- `Operations.reconfigure_radio()` + `radio_settings()` — the driver used to
+  be built once in `__init__`, so any radio settings change needed an app
+  restart. Shell calls it on Save/Apply.
+- `make_driver` sets `reports_ptt=False` for dummy or serial PTT (both are
+  echoes of our own state), so the PTT test says "cannot confirm" instead of
+  fake-passing. Hamlib RPRT codes are translated in error messages.
+- AIOC note: whether RTS or DTR keys PTT depends on the AIOC firmware config;
+  try the other line if the first does not key.
 
 ## Serial port picker (0.6.37)
 `cat_port` is a dropdown of `radio.usb_serial.list_serial_ports()` with a

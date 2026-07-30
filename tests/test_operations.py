@@ -882,7 +882,9 @@ def _ptt_operations(tmp_path, radio, backend="hamlib"):
         HeardStations(),
     )
     operations.radio = radio
-    operations.rigctld = SimpleNamespace(ensure=lambda *a: "", stop=lambda: None)
+    operations.rigctld = SimpleNamespace(
+        ensure=lambda *a, **k: "", stop=lambda: None
+    )
     return operations, workers
 
 
@@ -1012,6 +1014,32 @@ def test_the_keying_time_is_capped_however_it_is_called(tmp_path, monkeypatch) -
         _await_worker(workers)
 
         assert sum(slept) == PTT_TEST_MAX_SECONDS
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_changed_radio_settings_rebuild_the_driver(tmp_path) -> None:
+    # make_driver ran once in __init__, so switching backend or PTT wiring in
+    # Settings kept the old driver (old port, old reports_ptt) until restart.
+    operations, workers, _ = _operations(tmp_path)
+    try:
+        before = operations.radio_settings()
+        assert operations.radio.name == "none"
+
+        operations.config.radio_backend = "hamlib"
+        operations.config.rig_model = 1
+        operations.config.ptt_type = "RTS"
+        assert operations.radio_settings() != before
+
+        operations.reconfigure_radio()
+        assert operations.radio.name == "hamlib"
+        assert operations.radio.reports_ptt is False, "dummy + serial PTT"
+
+        operations.config.rig_model = 3073
+        operations.config.ptt_type = "RIG"
+        operations.reconfigure_radio()
+        assert operations.radio.reports_ptt is True
     finally:
         operations.close()
         workers.close(wait=True)
