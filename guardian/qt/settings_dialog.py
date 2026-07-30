@@ -295,18 +295,21 @@ class SettingsDialog(QDialog):
         )
         self.vara_ptt_delay.setToolTip(
             dual(
-                "VARA FM only. If this radio unkeys slowly (typical for cheap "
-                "handhelds on an AIOC cable), both stations agree during the "
-                "handshake to wait this long before every VARA key-up, so the "
-                "other transmitter has died down first. Needs 'Let Guardian "
-                "key the radio for VARA'. VARA's speed is not affected; 0 "
-                "keeps today's behaviour.",
-                "Pouze VARA FM. Pokud se toto rádio pomalu odklíčovává "
+                "VARA FM only. If this radio clips the end of its bursts "
+                "(typical for cheap handhelds on an AIOC cable), both "
+                "stations agree during the handshake to keep PTT keyed this "
+                "long after every VARA burst, so the tail leaves the radio "
+                "before the carrier drops and the peer stops answering too "
+                "early. Needs 'Let Guardian key the radio for VARA'. VARA's "
+                "speed is not affected; 0 keeps today's behaviour.",
+                "Pouze VARA FM. Pokud toto rádio ustřihává konec vysílání "
                 "(typické pro levné ruční stanice přes kabel AIOC), obě "
-                "stanice si při handshaku dohodnou, že před každým "
-                "zaklíčováním VARA počkají tuto dobu, aby protější vysílač "
-                "stihl doznít. Vyžaduje „Guardian klíčuje rádio pro VARA“. "
-                "Rychlost VARA se nemění; 0 ponechá dnešní chování.",
+                "stanice si při handshaku dohodnou, že po každém vysílání "
+                "VARA podrží PTT ještě tuto dobu, aby konec burstu stihl "
+                "opustit rádio, než spadne nosná — a protistanice tak "
+                "neodpovídala příliš brzy. Vyžaduje „Guardian klíčuje rádio "
+                "pro VARA“. Rychlost VARA se nemění; 0 ponechá dnešní "
+                "chování.",
             )
         )
         form.addRow(

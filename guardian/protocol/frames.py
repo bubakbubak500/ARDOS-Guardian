@@ -88,12 +88,13 @@ class Flags(IntFlag):
 
 
 # Bits 3-5 of the flags byte: a slow-keying request for the VARA FM payload
-# phase, in 100 ms steps (0 = none, up to 700 ms). A cheap handheld unkeys
-# slowly, so during the long back-and-forth of a VARA transfer its peer must
-# hold off keying briefly or the first syllable of every burst is lost. The
-# value rides inside the existing flags byte of HAVE_MSG/ACK_HAVE: the wire
-# format is untouched, and a build that predates this keeps unknown flag bits
-# intact (IntFlag KEEP) and simply echoes them back.
+# phase, in 100 ms steps (0 = none, up to 700 ms). A cheap handheld unkeyed
+# the instant VARA says PTT OFF cuts the tail off its own burst, so both
+# stations agree to keep PTT asserted this long after each burst before
+# dropping the carrier. The value rides inside the existing flags byte of
+# HAVE_MSG/ACK_HAVE: the wire format is untouched, and a build that predates
+# this keeps unknown flag bits intact (IntFlag KEEP) and simply echoes them
+# back.
 PTT_DELAY_STEP_MS = 100
 _PTT_DELAY_SHIFT = 3
 _PTT_DELAY_BITS = 0x07

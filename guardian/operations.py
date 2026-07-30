@@ -1198,10 +1198,10 @@ class Operations:
                 if delay:
                     self._log(
                         dual(
-                            f"Slow keying negotiated: {delay} ms before each "
-                            "VARA key-up.",
-                            f"Vyjednáno pomalé klíčování: {delay} ms před "
-                            "každým zaklíčováním VARA.",
+                            f"Slow keying negotiated: PTT held {delay} ms "
+                            "after each VARA burst.",
+                            f"Vyjednáno pomalé klíčování: PTT drženo {delay} ms "
+                            "po každém vysílání VARA.",
                         ),
                         source="session",
                     )
@@ -1275,15 +1275,18 @@ class Operations:
         )
 
     def _vara_ptt(self, enabled: bool) -> None:
-        """Key the radio for VARA, honouring the negotiated slow-keying gap.
+        """Key the radio for VARA, honouring the negotiated slow-keying tail.
 
-        The hold-off applies to key-up only: the point is to give the peer's
-        slowly-decaying transmitter time to reach receive before our burst
-        starts. Holding our own release longer would do the opposite. Control
-        bursts keep their normal timing — they are short and rare; it is the
-        long VARA back-and-forth where a slow radio starts eating syllables.
+        The gap applies to the *release*: watched on a spectrum display, a
+        cheap handheld unkeyed the moment VARA said PTT OFF cut the tail off
+        its own burst, and the peer answered into what was still missing.
+        Holding PTT for the negotiated time lets the burst finish leaving the
+        radio before the carrier drops. Key-up stays immediate — VARA starts
+        modulating on its own clock, and keying late would clip the leader
+        instead. Control bursts keep their normal timing; they are short and
+        already carry their own tail guard.
         """
-        if enabled and self._payload_ptt_delay_ms > 0:
+        if not enabled and self._payload_ptt_delay_ms > 0:
             time.sleep(self._payload_ptt_delay_ms / 1000.0)
         self._radio_ptt(enabled)
 

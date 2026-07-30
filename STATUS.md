@@ -107,7 +107,7 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
-**Built but not yet flown (0.6.35–0.6.39):** the alert frequency sweep (an
+**Built but not yet flown (0.6.35–0.6.40):** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
 goes back), the heard-stations S/N estimate + channel column, and the
 negotiated VARA FM slow-keying gap. **Confirmed working in the field
@@ -475,7 +475,7 @@ line Guardian had just asserted, and reported a dead cable as "the radio
 reported TX". Hamlib (`t`) confirms; VOX/serial says it cannot. The
 still-asserted check applies to both.
 
-## Handshake polish + negotiated slow keying (0.6.39)
+## Handshake polish + negotiated slow keying (0.6.39–0.6.40)
 From the first multi-hop field reports:
 
 - **Re-ACK on repeated HAVE_MSG** — a responder in ACKED answers a repeated
@@ -488,12 +488,13 @@ From the first multi-hop field reports:
   (0–700, default 0) rides in spare flags bits (bits 3–5, 100 ms steps;
   `encode/decode_ptt_delay` in frames.py; wire format unchanged, old builds
   echo unknown bits). HAVE_MSG carries the request, ACK_HAVE the negotiated
-  max; both sides sleep that long before each VARA PTT ON for that session
+  max. Applied as a **PTT tail** (0.6.40, corrected from 0.6.39's pre-key
+  hold-off after spectrum observation: the fast unkey was cutting the tail
+  off the burst): after VARA's PTT OFF the transmitter stays keyed that long
   (`Operations._vara_ptt`, value captured from `_session_event` at
-  STARTING_VARA/RECEIVING, cleared at terminal). Requires vara_host_ptt.
-  Relay legs re-negotiate from their own setting. **To verify on air:** how
-  much hold-off the VARA FM leader tolerates before burst starts clip —
-  advice is start at 100–200 ms.
+  STARTING_VARA/RECEIVING, cleared at terminal). Key-up stays immediate —
+  keying late clips the VARA leader. Requires vara_host_ptt. Relay legs
+  re-negotiate from their own setting.
 - "Wrong message sent" report: selection/send path is id-keyed and clean;
   the observed behaviour is auto_deliver announcing another waiting message
   when its hop is heard (logged, by design, can be switched off).

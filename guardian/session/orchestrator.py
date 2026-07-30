@@ -149,7 +149,7 @@ class Message:
     # trying the destination directly. Blind announces get one repeat fewer —
     # the channel already carried a query nobody answered.
     blind: bool = False
-    # Slow-keying hold-off (ms) negotiated for the VARA payload phase: the
+    # Slow-keying PTT tail (ms) negotiated for the VARA payload phase: the
     # larger of what we and the peer asked for in HAVE_MSG/ACK_HAVE.
     ptt_delay_ms: int = 0
 

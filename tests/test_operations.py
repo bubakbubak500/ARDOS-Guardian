@@ -1065,11 +1065,13 @@ def test_slow_keying_is_only_requested_on_fm_and_stays_capped(tmp_path) -> None:
         workers.close(wait=True)
 
 
-def test_vara_keyups_wait_out_the_negotiated_gap_but_releases_do_not(
+def test_vara_releases_hold_the_negotiated_tail_but_keyups_stay_immediate(
     tmp_path, monkeypatch
 ) -> None:
-    # The gap exists so the peer's slowly-dying transmitter is quiet before
-    # our burst starts; holding our own release longer would do the opposite.
+    # Watched on a spectrum display: unkeying the instant VARA says PTT OFF
+    # cuts the tail off the burst and the peer answers into the gap. The tail
+    # belongs on the release. Key-up must stay immediate — VARA starts
+    # modulating on its own clock, and keying late clips the leader instead.
     slept: list[float] = []
     monkeypatch.setattr("guardian.operations.time.sleep", slept.append)
     operations, workers, _ = _operations(tmp_path, vara_host_ptt=True)
@@ -1086,9 +1088,10 @@ def test_vara_keyups_wait_out_the_negotiated_gap_but_releases_do_not(
 
         operations._payload_ptt_delay_ms = 400
         operations.vara.on_ptt(True)
+        assert slept == [], "key-up never waits"
         operations.vara.on_ptt(False)
         assert keyed == [True, False, True, False]
-        assert slept == [0.4], "key-up waits; release never does"
+        assert slept == [0.4], "the tail is held on release only"
     finally:
         operations.close()
         workers.close(wait=True)
