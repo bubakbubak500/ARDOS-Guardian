@@ -28,9 +28,9 @@ from PySide6.QtWidgets import (
 
 from ..config import StationConfig
 from ..i18n import Language, dual, language, set_language, tr
-from ..operations import PTT_TEST_SECONDS
 from ..modem.audio import list_audio_devices, match_device_name
 from ..radio.presets import CURATED, load_hamlib_models
+from ..radio.usb_serial import list_serial_ports, port_device
 from .theme import ThemePreference
 from .inputs import UppercaseLineEdit
 
@@ -214,8 +214,22 @@ class SettingsDialog(QDialog):
         radio_picker_layout.setSpacing(6)
         radio_picker_layout.addWidget(self.radio_model, 1)
         radio_picker_layout.addWidget(browse_radios)
-        self.cat_port = QLineEdit(self.config.cat_port)
-        self.cat_port.setPlaceholderText("COM7")
+        # Typing "COM7" from memory was the only way to set this. The ports are
+        # enumerable, so offer them -- still editable, because a port that is
+        # unplugged right now is a perfectly valid thing to configure.
+        self.cat_port = QComboBox()
+        self.cat_port.setEditable(True)
+        self.cat_port.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.cat_port.lineEdit().setPlaceholderText("COM7")
+        refresh_ports = QPushButton(tr("settings.refresh_ports"))
+        refresh_ports.clicked.connect(self._refresh_serial_ports)
+        cat_port_row = QWidget()
+        cat_port_layout = QHBoxLayout(cat_port_row)
+        cat_port_layout.setContentsMargins(0, 0, 0, 0)
+        cat_port_layout.setSpacing(6)
+        cat_port_layout.addWidget(self.cat_port, 1)
+        cat_port_layout.addWidget(refresh_ports)
+        self._refresh_serial_ports()
         self.cat_baud = _spin(0, 1_000_000, self.config.cat_baud)
         self.rigctld_host = QLineEdit(self.config.rigctld_host)
         self.rigctld_port = _spin(1, 65_535, self.config.rigctld_port)
@@ -225,7 +239,10 @@ class SettingsDialog(QDialog):
         self.ptt_line.setCurrentText(self.config.ptt_line)
         form.addRow(dual("Control method", "Způsob řízení"), self.radio_backend)
         form.addRow(dual("Radio model", "Model rádia"), radio_picker)
-        form.addRow(dual("CAT / PTT serial port", "Sériový port CAT / PTT"), self.cat_port)
+        form.addRow(
+            dual("CAT / PTT serial port", "Sériový port CAT / PTT"),
+            cat_port_row,
+        )
         form.addRow(dual("CAT baud (0 = automatic)", "Rychlost CAT (0 = automaticky)"), self.cat_baud)
         form.addRow(dual("rigctld host", "Adresa rigctld"), self.rigctld_host)
         form.addRow(dual("rigctld port", "Port rigctld"), self.rigctld_port)
@@ -250,30 +267,38 @@ class SettingsDialog(QDialog):
         form.addRow("", test_row)
         form.addRow("", self.ptt_status)
 
+    def _refresh_serial_ports(self) -> None:
+        """List the COM ports that exist, keeping whatever is configured."""
+        selected = self.cat_port.currentText().strip() or self.config.cat_port
+        device = port_device(selected)
+        labels = list_serial_ports()
+        self.cat_port.blockSignals(True)
+        self.cat_port.clear()
+        self.cat_port.addItem("")
+        self.cat_port.addItems(labels)
+        match = next(
+            (label for label in labels if port_device(label) == device), device
+        )
+        self.cat_port.setCurrentText(match)
+        self.cat_port.blockSignals(False)
+
+    def selected_cat_port(self) -> str:
+        """The bare device from the picker, without its description."""
+        return port_device(self.cat_port.currentText().strip())
+
     def _run_ptt_test(self) -> None:
         if self.operations is None:
             return
-        # Saved settings are what the live radio driver is using; testing the
-        # values still sitting in these fields would prove nothing about it.
+        # The test keys the radio the live station is using, so unapplied
+        # fields would prove nothing about it. Said in the status line rather
+        # than a dialog -- the operator asked for one click, not two.
         if self._radio_settings_changed():
-            QMessageBox.information(
-                self,
-                tr("settings.ptt_test"),
-                tr("settings.ptt_test_unsaved"),
-            )
-            return
-        confirm = QMessageBox.question(
-            self,
-            tr("settings.ptt_test"),
-            tr("settings.ptt_test_confirm", seconds=int(PTT_TEST_SECONDS)),
-        )
-        if confirm is not QMessageBox.StandardButton.Yes:
+            self.ptt_status.setText(tr("settings.ptt_test_unsaved"))
             return
         self.ptt_test_button.setEnabled(False)
         self.ptt_status.setText(tr("settings.ptt_test_running"))
-        if not self.operations.run_ptt_test(on_result=self._ptt_test_finished):
-            # A refusal is reported synchronously through the same callback.
-            return
+        # A refusal is reported synchronously through the same callback.
+        self.operations.run_ptt_test(on_result=self._ptt_test_finished)
 
     def _ptt_test_finished(self, _ok: bool, message: str) -> None:
         try:
@@ -288,7 +313,7 @@ class SettingsDialog(QDialog):
         return (
             self.radio_backend.currentData() != self.config.radio_backend
             or int(self.radio_model.currentData() or 0) != self.config.rig_model
-            or self.cat_port.text().strip() != self.config.cat_port
+            or self.selected_cat_port() != self.config.cat_port
             or self.cat_baud.value() != self.config.cat_baud
             or self.rigctld_host.text().strip() != self.config.rigctld_host
             or self.rigctld_port.value() != self.config.rigctld_port
@@ -672,7 +697,7 @@ class SettingsDialog(QDialog):
         else:
             cfg.radio = ""
             cfg.rig_model = 0
-        cfg.cat_port = self.cat_port.text().strip()
+        cfg.cat_port = self.selected_cat_port()
         cfg.cat_baud = self.cat_baud.value()
         cfg.rigctld_host = self.rigctld_host.text().strip()
         cfg.rigctld_port = self.rigctld_port.value()

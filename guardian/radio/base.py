@@ -30,6 +30,11 @@ class RadioDriver:
     """
 
     name = "radio"
+    # True only when get_state().ptt comes back *from the radio*. A backend
+    # that merely echoes the control line it just asserted knows nothing about
+    # whether the transmitter came up, and the PTT test must not present that
+    # as confirmation.
+    reports_ptt = False
 
     def open(self) -> None:
         """Establish the connection (open port / connect to rigctld)."""

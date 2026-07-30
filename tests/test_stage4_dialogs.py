@@ -216,30 +216,30 @@ class _FakeOperations:
         return True
 
 
-def test_ptt_test_button_keys_only_after_the_operator_confirms(monkeypatch) -> None:
-    # The button puts a real carrier on air, so a stray click must not do it.
+def test_ptt_test_keys_on_the_click_with_nothing_in_the_way(monkeypatch) -> None:
+    # One click, one carrier: the operator asked for no confirmation step, so
+    # a dialog appearing here would be the regression.
     _application()
     config = StationConfig(radio_backend="hamlib", rig_model=3073)
     operations = _FakeOperations()
     dialog = SettingsDialog(
         config, ThemePreference.SYSTEM, operations=operations
     )
+    popups: list[str] = []
+    for name in ("question", "information", "warning"):
+        monkeypatch.setattr(
+            QMessageBox, name,
+            staticmethod(
+                lambda *a, _name=name, **k: popups.append(_name)
+                or QMessageBox.StandardButton.Yes
+            ),
+        )
     try:
         assert dialog.ptt_test_button.isEnabled()
-
-        monkeypatch.setattr(
-            QMessageBox, "question",
-            staticmethod(lambda *a, **k: QMessageBox.StandardButton.No),
-        )
         dialog.ptt_test_button.click()
-        assert operations.calls == []
 
-        monkeypatch.setattr(
-            QMessageBox, "question",
-            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
-        )
-        dialog.ptt_test_button.click()
-        assert len(operations.calls) == 1
+        assert operations.calls == [PTT_TEST_SECONDS]
+        assert popups == []
         assert dialog.ptt_status.text() == "PTT test passed"
         # The button comes back for a second attempt once the result is in.
         assert dialog.ptt_test_button.isEnabled()
@@ -247,30 +247,48 @@ def test_ptt_test_button_keys_only_after_the_operator_confirms(monkeypatch) -> N
         dialog.close()
 
 
-def test_ptt_test_will_not_key_settings_that_were_never_applied(monkeypatch) -> None:
+def test_ptt_test_will_not_key_settings_that_were_never_applied() -> None:
     # The live driver still holds the old port; keying it would prove nothing
-    # about what is on screen.
+    # about what is on screen. Said in the status line, not in a dialog.
     _application()
     config = StationConfig(radio_backend="hamlib", rig_model=3073, cat_port="COM7")
     operations = _FakeOperations()
     dialog = SettingsDialog(
         config, ThemePreference.SYSTEM, operations=operations
     )
-    asked: list[str] = []
-    monkeypatch.setattr(
-        QMessageBox, "information",
-        staticmethod(lambda _p, _t, text, *a, **k: asked.append(text)),
-    )
-    monkeypatch.setattr(
-        QMessageBox, "question",
-        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
-    )
     try:
-        dialog.cat_port.setText("COM9")
+        dialog.cat_port.setCurrentText("COM9")
         dialog.ptt_test_button.click()
 
         assert operations.calls == []
-        assert asked == [tr("settings.ptt_test_unsaved")]
+        assert dialog.ptt_status.text() == tr("settings.ptt_test_unsaved")
+    finally:
+        dialog.close()
+
+
+def test_the_serial_port_is_picked_from_the_ports_that_exist(monkeypatch) -> None:
+    # It used to be a bare text field: the operator had to remember "COM7".
+    _application()
+    monkeypatch.setattr(
+        "guardian.qt.settings_dialog.list_serial_ports",
+        lambda: ["COM3 — USB Serial CH340", "COM7 — Silicon Labs CP210x"],
+    )
+    config = StationConfig(radio_backend="hamlib", rig_model=3073, cat_port="COM7")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        assert dialog.cat_port.isEditable(), "an unplugged port is still valid"
+        assert dialog.cat_port.currentText() == "COM7 — Silicon Labs CP210x"
+        # The description is a label for the operator, never part of the value.
+        assert dialog.selected_cat_port() == "COM7"
+
+        dialog.cat_port.setCurrentText("COM3 — USB Serial CH340")
+        assert dialog.apply()
+        assert config.cat_port == "COM3"
+
+        # A port that is not plugged in right now survives the refresh.
+        dialog.cat_port.setCurrentText("COM11")
+        dialog._refresh_serial_ports()
+        assert dialog.selected_cat_port() == "COM11"
     finally:
         dialog.close()
 

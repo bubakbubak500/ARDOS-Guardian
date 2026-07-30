@@ -18,6 +18,9 @@ except ImportError:  # pragma: no cover - pyserial is a hard dep, but be safe
 
 class VoxRadio(RadioDriver):
     name = "vox"
+    # get_state() reads back the RTS/DTR line *we* asserted, not the radio. It
+    # proves the port accepted the change and nothing more.
+    reports_ptt = False
 
     def __init__(self, port: str, ptt_line: str = "RTS", baud: int = 9600):
         self.port = port

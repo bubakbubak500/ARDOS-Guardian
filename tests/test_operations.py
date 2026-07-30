@@ -823,11 +823,23 @@ def test_sending_an_alert_hands_the_sweep_to_a_worker(tmp_path) -> None:
 
 
 class _PttRadio:
-    """A rig that logs keying and can misbehave the way real ones do."""
+    """A rig that logs keying and can misbehave the way real ones do.
+
+    `reports_ptt` is the driver capability: a Hamlib rig answers for itself,
+    while a VOX/serial line only ever echoes the wire we asserted.
+    """
 
     name = "fake-rig"
 
-    def __init__(self, *, reports_tx=True, sticks_keyed=False, fail_on=None) -> None:
+    def __init__(
+        self,
+        *,
+        reports_ptt=True,
+        reports_tx=True,
+        sticks_keyed=False,
+        fail_on=None,
+    ) -> None:
+        self.reports_ptt = reports_ptt
         self.reports_tx = reports_tx
         self.sticks_keyed = sticks_keyed
         self.fail_on = fail_on          # True/False: raise when keyed/unkeyed
@@ -913,7 +925,7 @@ def test_a_radio_left_keyed_is_reported_as_a_fault(tmp_path, monkeypatch) -> Non
         operations.run_ptt_test(on_result=lambda ok, msg: results.append((ok, msg)))
         _await_worker(workers)
 
-        assert "still reports TX" in results[0][1]
+        assert "still asserted" in results[0][1]
         assert "passed" not in results[0][1]
     finally:
         operations.close()
@@ -923,11 +935,13 @@ def test_a_radio_left_keyed_is_reported_as_a_fault(tmp_path, monkeypatch) -> Non
 def test_a_backend_that_cannot_read_back_says_so_instead_of_passing(
     tmp_path, monkeypatch
 ) -> None:
-    # A VOX/serial line has no telemetry; claiming a verified pass would be a
-    # lie the operator might rely on.
+    # A VOX/serial line has no telemetry: get_state() hands back the RTS/DTR
+    # wire we just asserted (this fake does exactly that), which says nothing
+    # about the transmitter. Reporting it as a verified pass would be a lie the
+    # operator might rely on in an emergency.
     monkeypatch.setattr("guardian.operations.time.sleep", lambda _seconds: None)
     operations, workers = _ptt_operations(
-        tmp_path, _PttRadio(reports_tx=False), backend="vox"
+        tmp_path, _PttRadio(reports_ptt=False), backend="vox"
     )
     results: list[tuple[bool, str]] = []
     try:

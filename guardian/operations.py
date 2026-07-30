@@ -566,6 +566,10 @@ class Operations:
             opened: list[str] = []
             if not self.radio.is_open:
                 opened = self._open_radio()
+            # A VOX/serial backend can only read back the control line it just
+            # asserted, so its "PTT on" says nothing about the transmitter.
+            # Trusting it would turn a dead interface into a confident pass.
+            confirms = bool(getattr(self.radio, "reports_ptt", False))
             with self._radio_lock:
                 keyed_reported = False
                 self.radio.set_ptt(True)
@@ -574,10 +578,12 @@ class Operations:
                     # a driver that accepts T 1 and transmits nothing is the
                     # interesting failure, and only the readback shows it.
                     time.sleep(hold / 2)
-                    keyed_reported = bool(self.radio.get_state().ptt)
+                    keyed_reported = confirms and bool(self.radio.get_state().ptt)
                     time.sleep(hold - hold / 2)
                 finally:
                     self.radio.set_ptt(False)
+                # Reading our own line back is still worth doing here: a line
+                # left asserted is a fault whoever is reporting it.
                 released = not self.radio.get_state().ptt
             detail = " ".join(message for message in opened if message)
             return self._ptt_test_report(hold, keyed_reported, released, detail)
@@ -624,12 +630,12 @@ class Operations:
     ) -> str:
         """Say what the rig actually did, not merely that nothing raised."""
         if not released:
-            # Worth shouting about: the radio is transmitting after we asked it
-            # to stop, and the operator should pull the interface.
+            # Worth shouting about: PTT is still asserted after we asked for it
+            # to drop, and the operator should pull the interface.
             return dual(
-                f"PTT test: the radio still reports TX after unkeying — "
+                f"PTT test: PTT is still asserted after unkeying — "
                 f"check the interface now. {detail}".strip(),
-                f"Test PTT: rádio i po odklíčování hlásí vysílání — "
+                f"Test PTT: PTT je i po odklíčování stále aktivní — "
                 f"ihned zkontrolujte rozhraní. {detail}".strip(),
             )
         if keyed_reported:

@@ -389,17 +389,14 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "settings.radio": ("Radio control", "Řízení rádia"),
     "settings.ptt_test": ("Test PTT", "Test PTT"),
     "settings.ptt_test_hint": (
-        "Keys the transmitter briefly to prove the interface really switches "
-        "the radio. Nothing is modulated — it is a bare carrier.",
-        "Krátce zaklíčuje vysílač, aby se ověřilo, že rozhraní rádio opravdu "
-        "přepne. Nic se nemoduluje — jde o holou nosnou.",
+        "Keys the transmitter for about two seconds, right away, to prove the "
+        "interface really switches the radio. A bare carrier on the current "
+        "frequency — have an antenna or dummy load connected.",
+        "Ihned zaklíčuje vysílač asi na dvě sekundy, aby se ověřilo, že "
+        "rozhraní rádio opravdu přepne. Holá nosná na aktuálním kmitočtu — "
+        "mějte připojenou anténu nebo umělou zátěž.",
     ),
-    "settings.ptt_test_confirm": (
-        "The radio will transmit for {seconds} seconds on its current "
-        "frequency. Make sure an antenna or dummy load is connected. Continue?",
-        "Rádio bude {seconds} sekundy vysílat na svém současném kmitočtu. "
-        "Ujistěte se, že je připojena anténa nebo umělá zátěž. Pokračovat?",
-    ),
+    "settings.refresh_ports": ("Refresh ports", "Obnovit porty"),
     "settings.ptt_test_running": (
         "Keying the radio…",
         "Klíčuji rádio…",

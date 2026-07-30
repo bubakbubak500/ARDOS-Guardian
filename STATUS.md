@@ -107,7 +107,7 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
-**Built but not yet flown (0.6.35–0.6.36):** the alert frequency sweep (an
+**Built but not yet flown (0.6.35–0.6.37):** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
 goes back), the heard-stations S/N estimate + channel column, and the Test PTT
 button in radio settings.
@@ -456,17 +456,27 @@ table's `freq_hz` entries are reused as an alert channel list.
 - **To verify on air:** whether 2 copies per channel is enough on HF, and
   whether the 45 s home wait feels too long before the first QSY.
 
-## Test PTT (0.6.36)
+## Test PTT (0.6.36, corrected in 0.6.37)
 `Settings → Radio control` ends with a **Test PTT** button:
 `Operations.run_ptt_test()` waits for control TX to idle, opens the radio if
 needed (same rigctld path as *Connect*), keys for 2 s and **reads `get_state()`
 back while keyed**, so a driver that accepts `T 1` and transmits nothing is
-distinguishable from a real key. Three reported outcomes — passed, "cannot
-confirm TX" (VOX/serial has no telemetry), and "still reports TX after
-unkeying". Unkey is in a `finally`; hold time capped at 5 s; refused with no
-radio backend, during a payload transfer, or when `radio-control` is busy. The
-button refuses to key unapplied dialog values — the live driver still holds the
-old ones.
+distinguishable from a real key. Unkey is in a `finally`; hold capped at 5 s;
+refused with no radio backend, during a payload transfer, or when
+`radio-control` is busy, and refused for unapplied dialog values (the live
+driver still holds the old ones). No confirmation dialog — the warning sits
+under the button; results go to the status line and the log.
+
+Whether the read-back means anything is `RadioDriver.reports_ptt`, **not** the
+returned flag: 0.6.36 read `VoxRadio.get_state().ptt`, which is the RTS/DTR
+line Guardian had just asserted, and reported a dead cable as "the radio
+reported TX". Hamlib (`t`) confirms; VOX/serial says it cannot. The
+still-asserted check applies to both.
+
+## Serial port picker (0.6.37)
+`cat_port` is a dropdown of `radio.usb_serial.list_serial_ports()` with a
+refresh button, editable so an unplugged port can still be configured; only
+`port_device()` (the bare COMx) is saved.
 
 ## Heard stations: S/N estimate and channel (0.6.35)
 The `Last SNR` column was dead — nothing ever passed a measurement to the

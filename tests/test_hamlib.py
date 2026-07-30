@@ -42,3 +42,15 @@ def test_hamlib_line_reader_preserves_partial_and_following_lines() -> None:
         reply = radio._command("m", reply_lines=2)
 
     assert reply == ["FM", "15000"]
+
+
+def test_only_a_driver_that_asks_the_radio_claims_to_report_ptt() -> None:
+    # The PTT test trusts this flag to decide whether a keyed read-back means
+    # the transmitter came up. VOX reads back the wire it just asserted, so it
+    # must not claim otherwise.
+    from guardian.radio.base import NullRadio
+    from guardian.radio.generic_vox import VoxRadio
+
+    assert HamlibRadio.reports_ptt is True
+    assert VoxRadio.reports_ptt is False
+    assert NullRadio.reports_ptt is False

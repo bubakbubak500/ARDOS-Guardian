@@ -27,6 +27,8 @@ from .base import RadioDriver, RadioState
 
 class HamlibRadio(RadioDriver):
     name = "hamlib"
+    # "t" asks the rig itself, so a keyed transmitter can be confirmed.
+    reports_ptt = True
 
     def __init__(self, host: str = "127.0.0.1", port: int = 4532, timeout: float = 2.0):
         self.host = host
