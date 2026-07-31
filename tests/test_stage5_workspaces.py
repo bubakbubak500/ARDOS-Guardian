@@ -460,6 +460,7 @@ def test_the_map_places_stations_that_beacon_a_position() -> None:
     from guardian.qt.map_window import MapWindow
 
     runtime = ShellRuntime()
+    runtime.config.map_background = False               # this test is not about tiles
     runtime.config.station_grid = "JO70FB28MC"          # Praha
     now = time.monotonic()
     runtime.heard.record("OK2IPW", now, grid="JN89HE", frame="BEACON")
@@ -489,6 +490,7 @@ def test_picking_on_the_map_stores_the_finest_locator() -> None:
     from guardian.routing import MAX_LOCATOR_CHARS, from_locator
 
     runtime = ShellRuntime()
+    runtime.config.map_background = False
     runtime.config.station_grid = ""
     window = MapWindow(runtime)
     try:
@@ -511,6 +513,7 @@ def test_a_typed_locator_is_accepted_and_nonsense_is_refused() -> None:
     from guardian.qt.map_window import MapWindow
 
     runtime = ShellRuntime()
+    runtime.config.map_background = False
     runtime.config.station_grid = "JO70FB"
     window = MapWindow(runtime)
     try:

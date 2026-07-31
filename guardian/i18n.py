@@ -380,7 +380,24 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     ),
     "map.pick": ("Pick my position", "Určit mou polohu"),
     "map.locator": ("Locator", "Lokátor"),
-    "map.centre": ("Fit to stations", "Přizpůsobit stanicím"),
+    "map.centre": ("Show all", "Zobrazit vše"),
+    "map.background": ("Map background", "Mapový podklad"),
+    "map.background_hint": (
+        "Topographic tiles from ČÚZK, which publishes them free and without "
+        "registration. Only what you look at is fetched, and it is kept on "
+        "disk so the same ground works later with no network.",
+        "Topografické dlaždice z ČÚZK, který je poskytuje zdarma a bez "
+        "registrace. Stahuje se jen to, na co se díváte, a ukládá se na disk, "
+        "takže stejné území funguje později i bez sítě.",
+    ),
+    "map.background_off": (
+        "Map background off — stations are drawn on the graticule alone.",
+        "Mapový podklad vypnut — stanice se kreslí jen do souřadnicové sítě.",
+    ),
+    "map.attribution": (
+        "{source}  ·  {credit}  ·  {tiles} tiles cached ({megabytes} MB)",
+        "{source}  ·  {credit}  ·  {tiles} dlaždic v mezipaměti ({megabytes} MB)",
+    ),
     "map.you": ("This station", "Tato stanice"),
     "map.transmit": ("Send in beacons", "Posílat v majáku"),
     "map.transmit_hint": (

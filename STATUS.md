@@ -107,7 +107,7 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
-**Built but not yet flown (0.6.35–0.6.44):** the alert frequency sweep (an
+**Built but not yet flown (0.6.35–0.6.45):** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
 goes back), the heard-stations S/N estimate + channel column, and the
 negotiated VARA FM slow-keying gap. **Confirmed working in the field:** Test PTT and no-CAT keying via Hamlib
@@ -500,10 +500,31 @@ whole pair, because an odd truncation names a different square.
 - Heard table gained Locator + Distance (`184 km 121°`), empty until this
   station knows its own position.
 
-**Next, if wanted:** optional offline raster background. `.mbtiles` (SQLite,
-stdlib `sqlite3`, no new dependency) in `%APPDATA%\Guardian\maps\`. Note that
-bulk downloading from public OSM tile servers is against their terms — either
-the operator supplies the file or we target a source that permits it.
+## Map background and Web Mercator (0.6.45)
+**Source: ČÚZK WMTS** — "poskytovány zdarma a bez registrace", data CC BY 4.0
+since 11/2023, standard `z/x/y` EPSG:3857 tiles. Verified live:
+`https://ags.cuzk.gov.cz/arcgis1/rest/services/ZTM_WM/MapServer/tile/{z}/{y}/{x}`
+returns JPEG. **Not OSM**: their tile policy forbids the prefetching an
+offline map needs.
+
+- On-demand fetch only (≤8 in flight, no region prefetch, a view needing
+  >400 tiles draws none), everything kept in
+  `%APPDATA%\Guardian\maps\cuzk-ztm.sqlite`. Attribution on screen.
+- Canvas moved to **Web Mercator** so the background and the station overlay
+  register; a station is verified to land inside its own tile.
+- `map_background` config switch; with it off the map is exactly as before.
+
+**Fit bug (found in the field, fixed here):** the old `_centre()` used
+`max(lat_span, lon_span)` as a *width*, ignoring the window aspect and the
+projection stretch — Vienna and Berlin fell off a Praha-centred view (4.33°
+asked, 3.49° shown). `MapCanvas.fit()` now works in world units and is tested
+across five spreads × three window shapes. Lone-station floor raised to 2°
+(~180 km); the frame is recomputed in `showEvent` because a widget has no
+real geometry before it is shown. Button renamed *Show all* / *Zobrazit vše*.
+
+**Still open, if wanted:** coverage outside ČR — Geofabrik sells pre-rendered
+tile packages (legal, unlike scraping OSM), or accept an operator-supplied
+`.mbtiles`.
 
 ## VARA host PTT is the default (0.6.43)
 Field report: OK2IPW's VARA produced a full session (`CONNECT`, `BITRATE`,

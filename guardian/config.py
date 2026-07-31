@@ -144,6 +144,10 @@ class StationConfig:
     # act, so it has its own switch -- though nothing goes out until beacons
     # themselves are enabled, which they are not by default.
     beacon_position: bool = True
+    # Draw the raster background on the map. Tiles are fetched only for what
+    # is on screen and kept in %APPDATA%\Guardian\maps, so ground the operator
+    # has already looked at stays available with no network.
+    map_background: bool = True
     scan_dwell: float = 3.0    # seconds per channel when scanning
     auto_qsy: bool = True      # VARA P2P: tune the radio to the station's freq before connecting
 

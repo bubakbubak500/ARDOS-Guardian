@@ -16,8 +16,9 @@ from __future__ import annotations
 import math
 import time
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
+from PySide6.QtCore import QPointF, QRectF, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -30,7 +31,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..i18n import dual, tr
+from .map_tiles import SOURCES, TILE_PIXELS, TileCache, TileSource, tile_for
 from ..routing import (
     MAX_LOCATOR_CHARS,
     distance_bearing,
@@ -43,6 +46,12 @@ from ..routing import (
 MIN_DEGREES_ACROSS = 0.02       # ~2 km wide; finer than any locator square
 MAX_DEGREES_ACROSS = 360.0
 DEFAULT_DEGREES_ACROSS = 8.0    # a comfortable regional view
+# A lone station has no span to fit, and framing it at the old floor gave a
+# view 57 km wide -- technically correct and useless. Show it some country.
+MIN_FIT_DEGREES = 2.0
+MERCATOR_LIMIT = 85.05112878     # where the projection runs to infinity
+MAX_TILES_PER_DRAW = 400         # a zoomed-out view must not ask for thousands
+MAX_TILES_IN_FLIGHT = 8          # polite to a service given away for free
 
 
 class MapCanvas(QWidget):
@@ -61,33 +70,172 @@ class MapCanvas(QWidget):
         self.stations: list[tuple[str, str, float]] = []   # call, grid, age
         self._drag_from: QPointF | None = None
         self._dragged = False
+        self.source: TileSource | None = None
+        self._cache: TileCache | None = None
+        self._pixmaps: dict[tuple[int, int, int], QPixmap] = {}
+        self._pending: set[tuple[int, int, int]] = set()
+        self._missing: set[tuple[int, int, int]] = set()
+        self._network = QNetworkAccessManager(self)
+        self._network.finished.connect(self._tile_arrived)
+
+    # --- tiles ------------------------------------------------------------ #
+    def set_source(self, source: TileSource | None) -> None:
+        if self._cache is not None:
+            self._cache.close()
+            self._cache = None
+        self.source = source
+        self._pixmaps.clear()
+        self._missing.clear()
+        if source is not None:
+            self._cache = TileCache(source)
+        self.update()
+
+    @property
+    def cache(self) -> TileCache | None:
+        return self._cache
+
+    def tile_zoom(self) -> int:
+        """The tile level whose pixels come closest to the screen's."""
+        if self.source is None:
+            return 0
+        scale = self.pixels_per_world()
+        zoom = int(round(math.log2(max(scale, 1.0) / TILE_PIXELS)))
+        return max(0, min(zoom, self.source.max_zoom))
+
+    def _draw_tiles(self, painter: QPainter) -> None:
+        if self.source is None or self._cache is None:
+            return
+        zoom = self.tile_zoom()
+        count = 2 ** zoom
+        scale = self.pixels_per_world()
+        size = scale / count                    # on-screen size of one tile
+        if size <= 0:
+            return
+        north_west = self.to_position(QPointF(0, 0))
+        south_east = self.to_position(QPointF(self.width(), self.height()))
+        first_x, first_y = tile_for(north_west[0], north_west[1], zoom)
+        last_x, last_y = tile_for(south_east[0], south_east[1], zoom)
+        # A view wider than the world would otherwise ask for thousands.
+        if (last_x - first_x + 1) * (last_y - first_y + 1) > MAX_TILES_PER_DRAW:
+            return
+        origin_x = self.world_x(self.center[1]) * scale - self.width() / 2
+        origin_y = self.world_y(self.center[0]) * scale - self.height() / 2
+        for x in range(first_x, last_x + 1):
+            for y in range(first_y, last_y + 1):
+                pixmap = self._tile(zoom, x, y)
+                if pixmap is None:
+                    continue
+                painter.drawPixmap(
+                    QRectF(x * size - origin_x, y * size - origin_y, size, size),
+                    pixmap,
+                    QRectF(0, 0, pixmap.width(), pixmap.height()),
+                )
+
+    def _tile(self, zoom: int, x: int, y: int) -> QPixmap | None:
+        key = (zoom, x, y)
+        if key in self._pixmaps:
+            return self._pixmaps[key]
+        if self._cache is None or key in self._missing:
+            return None
+        data = self._cache.get(zoom, x, y)
+        if data is not None:
+            pixmap = QPixmap()
+            if pixmap.loadFromData(data):
+                self._pixmaps[key] = pixmap
+                return pixmap
+            self._missing.add(key)
+            return None
+        self._request(key)
+        return None
+
+    def _request(self, key: tuple[int, int, int]) -> None:
+        """Ask for one tile, on demand only.
+
+        Never a region the operator has not looked at: prefetching is exactly
+        what tile providers forbid, and what would turn a courtesy into abuse.
+        """
+        if key in self._pending or len(self._pending) >= MAX_TILES_IN_FLIGHT:
+            return
+        if self.source is None:
+            return
+        zoom, x, y = key
+        request = QNetworkRequest(QUrl(self.source.tile_url(zoom, x, y)))
+        request.setHeader(
+            QNetworkRequest.KnownHeaders.UserAgentHeader,
+            f"Guardian/{__version__} (ARDOS emergency messaging)",
+        )
+        request.setAttribute(
+            QNetworkRequest.Attribute.User, f"{zoom}/{x}/{y}"
+        )
+        self._pending.add(key)
+        self._network.get(request)
+
+    def _tile_arrived(self, reply) -> None:
+        try:
+            coordinates = reply.request().attribute(QNetworkRequest.Attribute.User)
+            zoom, x, y = (int(part) for part in str(coordinates).split("/"))
+            key = (zoom, x, y)
+            self._pending.discard(key)
+            if reply.error() != reply.error().NoError:
+                self._missing.add(key)
+                return
+            data = bytes(reply.readAll())
+            pixmap = QPixmap()
+            if not data or not pixmap.loadFromData(data):
+                self._missing.add(key)
+                return
+            if self._cache is not None:
+                self._cache.put(zoom, x, y, data)
+            self._pixmaps[key] = pixmap
+            self.update()
+        finally:
+            reply.deleteLater()
 
     # --- projection ---------------------------------------------------- #
-    def _scale(self) -> tuple[float, float]:
-        """Pixels per degree of longitude and of latitude.
+    # Web Mercator, in the slippy-map convention where the whole world is a
+    # unit square. Not a cosmetic choice: the raster background is served in
+    # exactly this projection, and drawing it under stations plotted in any
+    # other would put the two out of register -- on a map used to find people,
+    # an unacceptable kind of wrong.
+    @staticmethod
+    def world_x(longitude: float) -> float:
+        return (longitude + 180.0) / 360.0
 
-        Longitude degrees shrink with latitude, so the vertical scale is
-        stretched by 1/cos(lat) to keep the picture from looking squashed --
-        the standard equirectangular compromise, honest enough at the size of
-        a VHF net and cheap enough to compute per frame.
-        """
-        per_lon = self.width() / max(self.degrees_across, MIN_DEGREES_ACROSS)
-        return per_lon, per_lon / max(0.15, math.cos(math.radians(self.center[0])))
+    @staticmethod
+    def world_y(latitude: float) -> float:
+        latitude = min(max(latitude, -MERCATOR_LIMIT), MERCATOR_LIMIT)
+        return (
+            1.0 - math.asinh(math.tan(math.radians(latitude))) / math.pi
+        ) / 2.0
+
+    @staticmethod
+    def longitude_at(world_x: float) -> float:
+        return world_x * 360.0 - 180.0
+
+    @staticmethod
+    def latitude_at(world_y: float) -> float:
+        return math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * world_y))))
+
+    def pixels_per_world(self) -> float:
+        """Pixels the whole world would span at the current zoom."""
+        return self.width() * 360.0 / max(self.degrees_across, MIN_DEGREES_ACROSS)
 
     def to_screen(self, latitude: float, longitude: float) -> QPointF:
-        per_lon, per_lat = self._scale()
+        scale = self.pixels_per_world()
         return QPointF(
-            self.width() / 2 + (longitude - self.center[1]) * per_lon,
-            self.height() / 2 - (latitude - self.center[0]) * per_lat,
+            self.width() / 2
+            + (self.world_x(longitude) - self.world_x(self.center[1])) * scale,
+            self.height() / 2
+            + (self.world_y(latitude) - self.world_y(self.center[0])) * scale,
         )
 
     def to_position(self, point: QPointF) -> tuple[float, float]:
-        per_lon, per_lat = self._scale()
-        longitude = self.center[1] + (point.x() - self.width() / 2) / per_lon
-        latitude = self.center[0] - (point.y() - self.height() / 2) / per_lat
+        scale = self.pixels_per_world()
+        world_x = self.world_x(self.center[1]) + (point.x() - self.width() / 2) / scale
+        world_y = self.world_y(self.center[0]) + (point.y() - self.height() / 2) / scale
         return (
-            min(max(latitude, -90.0), 90.0),
-            (longitude + 180.0) % 360.0 - 180.0,
+            self.latitude_at(min(max(world_y, 0.0), 1.0)),
+            (self.longitude_at(world_x) + 180.0) % 360.0 - 180.0,
         )
 
     # --- interaction ---------------------------------------------------- #
@@ -102,11 +250,10 @@ class MapCanvas(QWidget):
         if abs(delta.x()) + abs(delta.y()) < 3 and not self._dragged:
             return
         self._dragged = True
-        per_lon, per_lat = self._scale()
-        self.center = (
-            min(max(self.center[0] + delta.y() / per_lat, -90.0), 90.0),
-            self.center[1] - delta.x() / per_lon,
-        )
+        scale = self.pixels_per_world()
+        world_x = self.world_x(self.center[1]) - delta.x() / scale
+        world_y = min(max(self.world_y(self.center[0]) - delta.y() / scale, 0.0), 1.0)
+        self.center = (self.latitude_at(world_y), self.longitude_at(world_x))
         self._drag_from = QPointF(event.position())
         self.update()
 
@@ -125,6 +272,36 @@ class MapCanvas(QWidget):
         )
         self.update()
 
+    def fit(self, points: list[tuple[float, float]], margin: float = 1.25) -> None:
+        """Frame every point, allowing for the shape of the window.
+
+        The width is what `degrees_across` measures, but a north-south spread
+        is limited by the *height* -- and latitude degrees are stretched by
+        1/cos(lat) on top of that. Fitting to the larger of the two spans
+        alone dropped Vienna and Berlin off a Prague-centred view: 4.33
+        degrees of latitude asked for, 3.49 shown.
+        """
+        if not points:
+            self.look_at(20.0, 0.0, 340.0)
+            return
+        # In world units both axes are directly comparable, so "does it fit"
+        # is one division per axis instead of trigonometry that forgets the
+        # window is wider than it is tall.
+        xs = [self.world_x(point[1]) for point in points]
+        ys = [self.world_y(point[0]) for point in points]
+        span_x = max(max(xs) - min(xs), 1e-9)
+        span_y = max(max(ys) - min(ys), 1e-9)
+        scale = min(self.width() / span_x, self.height() / span_y) / margin
+        across = min(
+            MAX_DEGREES_ACROSS,
+            max(self.width() * 360.0 / scale, MIN_FIT_DEGREES),
+        )
+        self.look_at(
+            self.latitude_at((min(ys) + max(ys)) / 2),
+            self.longitude_at((min(xs) + max(xs)) / 2),
+            across,
+        )
+
     def look_at(self, latitude: float, longitude: float, degrees: float | None = None) -> None:
         self.center = (latitude, longitude)
         if degrees is not None:
@@ -138,6 +315,7 @@ class MapCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#101418"))
+        self._draw_tiles(painter)
         self._draw_graticule(painter)
         for callsign, grid, age in self.stations:
             self._draw_station(painter, callsign, grid, age, own=False)
@@ -236,6 +414,11 @@ class MapWindow(QDialog):
         self.transmit.toggled.connect(self._transmit_toggled)
         controls.addWidget(self.transmit)
         controls.addStretch(1)
+        self.background = QCheckBox(tr("map.background"))
+        self.background.setChecked(self.runtime.config.map_background)
+        self.background.setToolTip(tr("map.background_hint"))
+        self.background.toggled.connect(self._background_toggled)
+        controls.addWidget(self.background)
         home = QPushButton(tr("map.centre"))
         home.clicked.connect(self._centre)
         controls.addWidget(home)
@@ -253,6 +436,12 @@ class MapWindow(QDialog):
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
+        self.attribution = QLabel()
+        self.attribution.setObjectName("Metadata")
+        outer.addWidget(self.attribution)
+
+        self._framed = False
+        self._background_toggled(self.background.isChecked())
         self.refresh()
         self._centre()
 
@@ -271,6 +460,7 @@ class MapWindow(QDialog):
         self.canvas.stations = self.stations()
         self.canvas.update()
         self._describe()
+        self._describe_background()
 
     def _describe(self) -> None:
         own = self.canvas.own_grid
@@ -336,25 +526,45 @@ class MapWindow(QDialog):
         self.runtime.config.beacon_position = enabled
         self.runtime.config.save()
 
+    def _background_toggled(self, enabled: bool) -> None:
+        self.runtime.config.map_background = enabled
+        self.runtime.config.save()
+        self.canvas.set_source(SOURCES[0] if enabled else None)
+        self._describe_background()
+
+    def _describe_background(self) -> None:
+        """Credit the source, and say how much of it is already on disk."""
+        source = self.canvas.source
+        if source is None:
+            self.attribution.setText(tr("map.background_off"))
+            return
+        cache = self.canvas.cache
+        self.attribution.setText(
+            tr(
+                "map.attribution",
+                source=source.label,
+                credit=source.attribution,
+                tiles=cache.count() if cache else 0,
+                megabytes=f"{cache.megabytes():.1f}" if cache else "0.0",
+            )
+        )
+
+    def showEvent(self, event) -> None:
+        # A widget has no real geometry until it is shown, and the fit is
+        # computed from the window's shape -- framing it in __init__ used the
+        # size hint and then never corrected itself.
+        super().showEvent(event)
+        if not self._framed:
+            self._framed = True
+            self._centre()
+
     def _centre(self) -> None:
         """Frame what there is: us, or whoever we can hear, or the world."""
-        points = [
-            from_locator(grid)
-            for grid in [self.canvas.own_grid] + [s[1] for s in self.canvas.stations]
-            if is_locator(grid)
-        ]
-        if not points:
-            self.canvas.look_at(20.0, 0.0, 340.0)
-            return
-        latitudes = [point[0] for point in points]
-        longitudes = [point[1] for point in points]
-        span = max(
-            max(longitudes) - min(longitudes),
-            max(latitudes) - min(latitudes),
-            0.4,
-        )
-        self.canvas.look_at(
-            (min(latitudes) + max(latitudes)) / 2,
-            (min(longitudes) + max(longitudes)) / 2,
-            span * 2.0,
+        self.canvas.fit(
+            [
+                from_locator(grid)
+                for grid in [self.canvas.own_grid]
+                + [station[1] for station in self.canvas.stations]
+                if is_locator(grid)
+            ]
         )
