@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 
 from ..config import StationConfig
 from ..i18n import Language, dual, language, set_language, tr
-from ..modem.audio import list_audio_devices, match_device_name
+from ..modem.audio import match_device_name, scan_audio_devices
 from ..protocol import MAX_PTT_DELAY_MS, PTT_DELAY_STEP_MS
 from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.usb_serial import list_serial_ports, port_device
@@ -447,7 +447,7 @@ class SettingsDialog(QDialog):
             )
             combo.setMinimumContentsLength(55)
         refresh = QPushButton(dual("Refresh devices", "Obnovit zařízení"))
-        refresh.clicked.connect(self._refresh_audio_devices)
+        refresh.clicked.connect(self._rescan_audio_devices)
         self.audio_status = QLabel()
         self.audio_status.setObjectName("Metadata")
         self.audio_status.setWordWrap(True)
@@ -487,7 +487,32 @@ class SettingsDialog(QDialog):
         combo.view().setMinimumWidth(min(content_width + 42, available - 80))
         combo.blockSignals(False)
 
-    def _refresh_audio_devices(self) -> None:
+    def _rescan_audio_devices(self) -> None:
+        """Refresh button: make PortAudio look at the hardware again.
+
+        Without this the button re-read a snapshot taken when Guardian
+        started, so a codec plugged in afterwards could never appear. The
+        rescan is skipped while the control channel owns a stream — pulling
+        the device out from under it would kill the running channel.
+        """
+        live = (
+            self.operations is not None
+            and getattr(self.operations, "audio_transport", None) is not None
+        )
+        self._refresh_audio_devices(reinitialise=not live)
+        if live:
+            self.audio_status.setText(
+                dual(
+                    "Rescanned the existing list only — stop the control "
+                    "channel to detect newly connected devices. "
+                    + self.audio_status.text(),
+                    "Obnoven pouze stávající seznam — pro rozpoznání nově "
+                    "připojených zařízení zastavte řídicí kanál. "
+                    + self.audio_status.text(),
+                )
+            )
+
+    def _refresh_audio_devices(self, *, reinitialise: bool = False) -> None:
         selected_input = (
             self.audio_input.currentText().strip()
             if self.audio_input.count()
@@ -498,7 +523,8 @@ class SettingsDialog(QDialog):
             if self.audio_output.count()
             else self.config.audio_output
         )
-        inputs, outputs = list_audio_devices()
+        scan = scan_audio_devices(reinitialise=reinitialise)
+        inputs, outputs = scan.inputs, scan.outputs
         selected_input = (
             match_device_name(inputs, selected_input) or selected_input
         )
@@ -531,12 +557,22 @@ class SettingsDialog(QDialog):
                 )
             )
         else:
+            # Say which of the three very different failures this is; the
+            # blanket "check your settings" sent operators hunting through
+            # Windows privacy for a missing DLL.
+            reason = scan.error or dual(
+                "no device was reported", "nebylo hlášeno žádné zařízení"
+            )
             self.audio_status.setText(
                 dual(
-                    "No audio devices were reported. Check the interface and "
-                    "Windows privacy settings, then refresh.",
-                    "Nebyla nalezena zvuková zařízení. Zkontrolujte rozhraní "
-                    "a soukromí ve Windows, poté seznam obnovte.",
+                    f"No audio devices: {reason}. Plug the interface in, then "
+                    "press Refresh devices — and if it stays empty, export "
+                    "Help ▸ Diagnostics, which now lists what the audio "
+                    "backend itself reports.",
+                    f"Žádná zvuková zařízení: {reason}. Připojte rozhraní a "
+                    "stiskněte Obnovit zařízení — pokud zůstane prázdno, "
+                    "exportujte Nápověda ▸ Diagnostika, kde je nově vypsáno, "
+                    "co hlásí samotná zvuková vrstva.",
                 )
             )
 

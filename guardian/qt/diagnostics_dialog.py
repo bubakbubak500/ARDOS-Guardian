@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..config import DEFAULT_CONFIG_PATH, config_dir
 from ..i18n import dual, tr
+from ..modem.audio import audio_backend_report
 from .runtime import ShellRuntime
 
 
@@ -190,6 +191,9 @@ class DiagnosticsDialog(QDialog):
             "control_audio_levels": (
                 transport.levels() if transport is not None else None
             ),
+            # Unfiltered, so a report can distinguish "the backend sees
+            # nothing" from "Guardian's host-API choice hides what it sees".
+            "audio_backend": audio_backend_report(),
             "configuration": asdict(self.runtime.config),
             "snapshot": asdict(snapshot),
             "dependencies": [

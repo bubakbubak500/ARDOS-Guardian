@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from guardian.config import StationConfig
 from guardian.i18n import tr
+from guardian.modem.audio import AudioDeviceScan
 from guardian.install.dependencies import DependencyKind, DependencyStatus
 from guardian.operations import PTT_TEST_SECONDS
 from guardian.qt.diagnostics_dialog import DiagnosticsDialog
@@ -333,3 +334,70 @@ def test_vara_keying_delay_is_a_radio_setting_with_a_safe_default() -> None:
         assert config.vara_ptt_delay_ms == 300
     finally:
         dialog.close()
+
+
+def test_refresh_rescans_the_hardware_but_never_under_a_live_channel(
+    monkeypatch,
+) -> None:
+    # Re-initialising PortAudio is what makes a newly plugged codec appear --
+    # and it would pull the device out from under a running control channel,
+    # so the button must not do it while one is open.
+    _application()
+    asked: list[bool] = []
+    monkeypatch.setattr(
+        "guardian.qt.settings_dialog.scan_audio_devices",
+        lambda *, reinitialise=False: asked.append(reinitialise)
+        or AudioDeviceScan(inputs=["Mic (USB Audio CODEC)"], outputs=["Speakers"]),
+    )
+    operations = SimpleNamespace(audio_transport=None)
+    dialog = SettingsDialog(
+        StationConfig(), ThemePreference.SYSTEM, operations=operations
+    )
+    try:
+        asked.clear()
+        dialog._rescan_audio_devices()
+        assert asked == [True], "idle: really look at the hardware again"
+
+        operations.audio_transport = SimpleNamespace()
+        asked.clear()
+        dialog._rescan_audio_devices()
+        assert asked == [False], "live channel: list only, do not re-initialise"
+        assert "control channel" in dialog.audio_status.text()
+    finally:
+        dialog.close()
+
+
+def test_an_empty_picker_states_the_reason_it_is_empty(monkeypatch) -> None:
+    # "Check the interface and Windows privacy settings" sent an operator
+    # hunting through Windows for what turned out to be an unreadable device.
+    _application()
+    monkeypatch.setattr(
+        "guardian.qt.settings_dialog.scan_audio_devices",
+        lambda *, reinitialise=False: AudioDeviceScan(
+            error="the audio backend could not be loaded (ImportError: DLL load failed)"
+        ),
+    )
+    dialog = SettingsDialog(StationConfig(), ThemePreference.SYSTEM)
+    try:
+        text = dialog.audio_status.text()
+        assert "DLL load failed" in text
+        assert "Diagnostics" in text or "Diagnostika" in text
+    finally:
+        dialog.close()
+
+
+def test_diagnostics_carry_what_the_audio_backend_itself_reports() -> None:
+    # Without this the only evidence of an empty picker was the operator's
+    # word for it; now the report says what PortAudio saw, unfiltered.
+    _application()
+    runtime = ShellRuntime()
+    diagnostics = DiagnosticsDialog(runtime)
+    try:
+        audio = diagnostics.report()["audio_backend"]
+        assert audio["backend"] == "sounddevice/PortAudio"
+        assert "guardian_sees" in audio
+        assert "devices" in audio or "devices_error" in audio
+        assert "host_apis" in audio or "host_apis_error" in audio
+    finally:
+        diagnostics.close()
+        runtime.close()

@@ -261,3 +261,132 @@ def test_the_frame_snr_travels_with_the_frame_to_the_orchestrator() -> None:
     assert transport.pump() == 2
     assert seen == [("OK7PS", 8.5), ("OK2IPW", None)]
     assert transport.last_frame_snr is None, "a stale reading must not stick"
+
+
+def _fake_sounddevice(devices, *, default_hostapi=0, unreadable=(), hostapis=None):
+    """A PortAudio stand-in that can misbehave the way Windows does."""
+
+    def query_devices(index=None, kind=None):
+        if index is None:
+            return [dict(d, index=i) for i, d in enumerate(devices)]
+        if index in unreadable:
+            raise UnicodeDecodeError(
+                "utf-8", b"\xe1", 0, 1, "invalid start byte"
+            )
+        return dict(devices[index], index=index)
+
+    return SimpleNamespace(
+        _check=lambda value: value,
+        _lib=SimpleNamespace(Pa_GetDeviceCount=lambda: len(devices)),
+        query_devices=query_devices,
+        query_hostapis=lambda: hostapis or [{"name": "MME", "devices": [0]}],
+        get_portaudio_version=lambda: (1246976, "PortAudio V19.7.0"),
+        default=SimpleNamespace(hostapi=default_hostapi),
+        _terminate=lambda: None,
+        _initialize=lambda: None,
+    )
+
+
+def test_one_undecodable_device_no_longer_blanks_the_whole_picker(
+    monkeypatch,
+) -> None:
+    # Reported from a Czech Windows PC: Guardian showed no audio devices at
+    # all while VARA showed them fine. sounddevice decodes each device name
+    # and re-raises UnicodeDecodeError for host APIs other than
+    # MME/DirectSound/ASIO -- and WDM-KS hands back the local ANSI code page.
+    # Asking for the whole list at once meant one diacritic in one endpoint
+    # emptied the picker.
+    monkeypatch.setitem(
+        sys.modules, "sounddevice", _fake_sounddevice(DEVICES, unreadable={0})
+    )
+
+    scan = audio_module.scan_audio_devices()
+
+    assert scan.inputs == ["Mikrofon (USB Audio CODEC)"]
+    assert scan.outputs == ["Speakers (USB Audio CODEC)"]
+    assert scan.ok
+    report = audio_module.audio_backend_report()
+    assert len(report["unreadable_devices"]) == 1
+    assert "UnicodeDecodeError" in report["unreadable_devices"][0]
+
+
+def test_a_missing_audio_backend_is_reported_not_swallowed(monkeypatch) -> None:
+    # An empty list used to be indistinguishable from a crashed backend, so
+    # the operator was sent hunting through Windows privacy for a missing DLL.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def explode(name, *args, **kwargs):
+        if name == "sounddevice":
+            raise ImportError("DLL load failed: libportaudio64bit.dll")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    monkeypatch.setattr(builtins, "__import__", explode)
+
+    scan = audio_module.scan_audio_devices()
+
+    assert scan.inputs == [] and scan.outputs == []
+    assert not scan.ok
+    assert "could not be loaded" in scan.error
+    assert "libportaudio64bit.dll" in scan.error
+
+
+def test_a_backend_that_reports_nothing_says_how_many_it_saw(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "sounddevice", _fake_sounddevice([]))
+
+    scan = audio_module.scan_audio_devices()
+
+    assert not scan.ok
+    assert "no usable device" in scan.error
+    assert "0 endpoint" in scan.error
+
+
+def test_each_direction_falls_back_across_host_apis_on_its_own(
+    monkeypatch,
+) -> None:
+    # A default host API that exposes playback but no capture used to hide
+    # every microphone on the PC: the fallback only ran when *both* were empty.
+    devices = [
+        {
+            "name": "Speakers (USB Audio CODEC)",
+            "hostapi": 0,
+            "max_input_channels": 0,
+            "max_output_channels": 2,
+        },
+        {
+            "name": "Mikrofon (USB Audio CODEC)",
+            "hostapi": 1,
+            "max_input_channels": 1,
+            "max_output_channels": 0,
+        },
+    ]
+    monkeypatch.setitem(
+        sys.modules, "sounddevice", _fake_sounddevice(devices, default_hostapi=0)
+    )
+
+    scan = audio_module.scan_audio_devices()
+
+    assert scan.outputs == ["Speakers (USB Audio CODEC)"]
+    assert scan.inputs == ["Mikrofon (USB Audio CODEC)"], "found on another API"
+
+
+def test_a_rescan_asks_portaudio_to_look_at_the_hardware_again(
+    monkeypatch,
+) -> None:
+    # PortAudio enumerates once and hands out that snapshot forever, so a
+    # codec plugged in after Guardian started could never appear however often
+    # Refresh was pressed.
+    calls: list[str] = []
+    fake = _fake_sounddevice(DEVICES)
+    fake._terminate = lambda: calls.append("terminate")
+    fake._initialize = lambda: calls.append("initialize")
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+
+    audio_module.scan_audio_devices()
+    assert calls == [], "an ordinary listing must not disturb a running stream"
+
+    scan = audio_module.scan_audio_devices(reinitialise=True)
+    assert calls == ["terminate", "initialize"]
+    assert scan.reinitialised and scan.ok

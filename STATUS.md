@@ -107,7 +107,7 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
-**Built but not yet flown (0.6.35–0.6.40):** the alert frequency sweep (an
+**Built but not yet flown (0.6.35–0.6.41):** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
 goes back), the heard-stations S/N estimate + channel column, and the
 negotiated VARA FM slow-keying gap. **Confirmed working in the field
@@ -474,6 +474,34 @@ returned flag: 0.6.36 read `VoxRadio.get_state().ptt`, which is the RTS/DTR
 line Guardian had just asserted, and reported a dead cable as "the radio
 reported TX". Hamlib (`t`) confirms; VOX/serial says it cannot. The
 still-asserted check applies to both.
+
+## Audio device enumeration (0.6.41)
+Field report: one PC listed no audio devices in Guardian while VARA listed
+them fine; none of the Windows-side checks (privacy, disabled endpoints,
+AV quarantine, replug) helped.
+
+**Root cause:** `list_audio_devices()` called `sd.query_devices()` once for
+the whole list. sounddevice decodes each device name and *re-raises*
+`UnicodeDecodeError` for host APIs other than MME/DirectSound/ASIO —
+**WDM-KS returns the local ANSI code page**, so one endpoint with a diacritic
+(a Czech/Polish Windows) aborted the entire enumeration, and the bare
+`except Exception: return [], []` turned that into "no audio hardware".
+Reproduced locally by poisoning one endpoint.
+
+- `_query_devices_one_by_one()` — per-device query, unreadable endpoints
+  skipped and recorded.
+- `scan_audio_devices()` returns `AudioDeviceScan(inputs, outputs, error,
+  reinitialised)`; `list_audio_devices()` is now a thin wrapper. The settings
+  status line prints `error` verbatim.
+- Refresh calls `reinitialise_audio_backend()` (`sd._terminate()` +
+  `sd._initialize()`) — PortAudio otherwise serves the snapshot taken at
+  process start, so a codec plugged in later never appeared. Skipped while
+  `audio_transport` is open (it would kill the stream) and the UI says so.
+- Cross-API fallback is now per direction (a default API with playback but
+  no capture used to hide every microphone).
+- `audio_backend_report()` in diagnostics: PortAudio version, host APIs, the
+  **unfiltered** device list, which entries are filtered as aliases, which
+  were unreadable, and what Guardian ends up showing.
 
 ## Handshake polish + negotiated slow keying (0.6.39–0.6.40)
 From the first multi-hop field reports:

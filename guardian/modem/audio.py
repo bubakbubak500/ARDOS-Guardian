@@ -12,6 +12,7 @@ with no audio backend; start() raises a clear error if it can't be used.
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import threading
@@ -50,24 +51,105 @@ def is_real_audio_device_name(name: str) -> bool:
     return bool(normalized) and not normalized.startswith(_PSEUDO_DEVICE_PREFIXES)
 
 
-def list_audio_devices() -> tuple[list[str], list[str]]:
-    """Return (input_device_names, output_device_names). Empty if no backend.
+@dataclass(frozen=True)
+class AudioDeviceScan:
+    """What an enumeration attempt found, and why it found nothing.
+
+    An empty list used to be indistinguishable from a crashed backend: a
+    missing PortAudio DLL, a stopped Windows Audio service and a genuinely
+    silent PC all produced the same blank picker, so the operator had nothing
+    to act on. The reason now travels with the result.
+    """
+
+    inputs: list[str] = field(default_factory=list)
+    outputs: list[str] = field(default_factory=list)
+    error: str = ""            # empty when the backend answered normally
+    reinitialised: bool = False  # PortAudio re-scanned the hardware
+
+    @property
+    def ok(self) -> bool:
+        return not self.error and bool(self.inputs or self.outputs)
+
+
+def reinitialise_audio_backend() -> str:
+    """Make PortAudio look at the hardware again. Returns "" or an error.
+
+    PortAudio enumerates devices once, when it initialises, and hands out the
+    same snapshot forever after. A codec plugged in after Guardian started is
+    therefore invisible however often the operator presses Refresh -- which is
+    exactly the case where another program (started later) *does* see it. The
+    documented cure is to terminate and re-initialise, which is what this does.
+
+    The caller must be sure no stream is open: re-initialising underneath a
+    running control channel would pull the device out from under it.
+    """
+    try:
+        import sounddevice as sd
+
+        sd._terminate()
+        sd._initialize()
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
+def _query_devices_one_by_one(sd) -> tuple[list[dict], list[str]]:
+    """Enumerate device by device, so one bad entry cannot hide the rest.
+
+    sounddevice decodes each device name itself, and for host APIs other than
+    MME/DirectSound/ASIO a name that is not valid UTF-8 makes it re-raise
+    `UnicodeDecodeError`. Windows in a non-English locale does produce such
+    names -- WDM-KS in particular hands back the local ANSI code page, so a
+    single device with a diacritic in it is enough. Asking for the whole list
+    in one call meant that one undecodable entry blanked the picker
+    completely, on a PC where every other program saw the codec perfectly
+    well. Returns (devices, per-device failure descriptions).
+    """
+    count = None
+    try:
+        count = int(sd._check(sd._lib.Pa_GetDeviceCount()))
+    except Exception:  # noqa: BLE001 - private API; fall back to the bulk call
+        count = None
+    if count is None:
+        return [dict(device) for device in sd.query_devices()], []
+    devices: list[dict] = []
+    failures: list[str] = []
+    for index in range(count):
+        try:
+            devices.append(dict(sd.query_devices(index)))
+        except Exception as exc:  # noqa: BLE001 - skip it, keep the others
+            failures.append(f"device #{index}: {type(exc).__name__}: {exc}")
+    return devices, failures
+
+
+def scan_audio_devices(*, reinitialise: bool = False) -> AudioDeviceScan:
+    """Enumerate the usable audio endpoints, keeping any failure reason.
 
     Windows enumerates the *same* physical device once per host API (MME,
     WASAPI, DirectSound, WDM-KS) — and MME even truncates names to 31 chars —
     so one radio codec otherwise shows up 4+ times under slightly different
     names. We list devices from a single host API (the default one) so each
-    real device appears exactly once. Falls back to a name-deduped full list if
-    the host-API metadata isn't available.
+    real device appears exactly once, falling back per direction to a
+    name-deduped list across every API when the default one has nothing.
     """
+    reinit_error = reinitialise_audio_backend() if reinitialise else ""
     try:
         import sounddevice as sd
-    except Exception:
-        return [], []
+    except Exception as exc:  # noqa: BLE001 - the backend is optional at import
+        return AudioDeviceScan(
+            error=(
+                f"the audio backend could not be loaded ({type(exc).__name__}: "
+                f"{exc})"
+            ),
+            reinitialised=reinitialise and not reinit_error,
+        )
     try:
-        devices = list(sd.query_devices())
-    except Exception:
-        return [], []
+        devices, skipped = _query_devices_one_by_one(sd)
+    except Exception as exc:  # noqa: BLE001 - PortAudio/host API failure
+        return AudioDeviceScan(
+            error=f"the audio backend reported an error ({type(exc).__name__}: {exc})",
+            reinitialised=reinitialise and not reinit_error,
+        )
 
     def collect(api_filter) -> tuple[list[str], list[str]]:
         ins: list[str] = []
@@ -93,9 +175,98 @@ def list_audio_devices() -> tuple[list[str], list[str]]:
     except Exception:
         default_api = None
     inputs, outputs = collect(default_api)
-    if not inputs and not outputs:        # fallback: every API, deduped by name
-        inputs, outputs = collect(None)
-    return inputs, outputs
+    if not inputs or not outputs:
+        # Per direction, not both together: a host API that exposes playback
+        # but no capture would otherwise hide every microphone on the PC.
+        all_inputs, all_outputs = collect(None)
+        inputs = inputs or all_inputs
+        outputs = outputs or all_outputs
+
+    error = reinit_error
+    if not inputs and not outputs and not error:
+        error = (
+            f"the audio backend started but reported no usable device "
+            f"({len(devices)} endpoint(s) seen)"
+        )
+        if skipped:
+            error += f"; {len(skipped)} endpoint(s) unreadable: {skipped[0]}"
+    return AudioDeviceScan(
+        inputs=inputs,
+        outputs=outputs,
+        error=error,
+        reinitialised=reinitialise and not reinit_error,
+    )
+
+
+def list_audio_devices() -> tuple[list[str], list[str]]:
+    """Return (input_device_names, output_device_names). Empty if no backend."""
+    scan = scan_audio_devices()
+    return scan.inputs, scan.outputs
+
+
+def audio_backend_report() -> dict:
+    """Everything PortAudio will admit to, for the diagnostics export.
+
+    Deliberately *unfiltered*: the question this has to answer is whether the
+    backend sees nothing at all, or whether Guardian's own host-API choice and
+    pseudo-device filter are hiding what it does see. A filtered list cannot
+    tell those apart, and that is the case that had us guessing.
+    """
+    report: dict = {"backend": "sounddevice/PortAudio"}
+    try:
+        import sounddevice as sd
+    except Exception as exc:  # noqa: BLE001
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        return report
+    try:
+        report["portaudio_version"] = sd.get_portaudio_version()[1]
+    except Exception as exc:  # noqa: BLE001
+        report["portaudio_version_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        report["default_hostapi"] = sd.default.hostapi
+    except Exception as exc:  # noqa: BLE001
+        report["default_hostapi_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        report["host_apis"] = [
+            {
+                "index": index,
+                "name": api.get("name"),
+                "devices": len(api.get("devices", ())),
+                "default_input": api.get("default_input_device"),
+                "default_output": api.get("default_output_device"),
+            }
+            for index, api in enumerate(sd.query_hostapis())
+        ]
+    except Exception as exc:  # noqa: BLE001
+        report["host_apis_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        devices, skipped = _query_devices_one_by_one(sd)
+        report["devices"] = [
+            {
+                "index": device.get("index", index),
+                "name": device.get("name"),
+                "hostapi": device.get("hostapi"),
+                "in": device.get("max_input_channels"),
+                "out": device.get("max_output_channels"),
+                "default_samplerate": device.get("default_samplerate"),
+                "excluded_as_alias": not is_real_audio_device_name(
+                    (device.get("name", "") or "").strip()
+                ),
+            }
+            for index, device in enumerate(devices)
+        ]
+        # The interesting line when a picker is empty: which endpoints the
+        # backend could not even describe, and why.
+        report["unreadable_devices"] = skipped
+    except Exception as exc:  # noqa: BLE001
+        report["devices_error"] = f"{type(exc).__name__}: {exc}"
+    scan = scan_audio_devices()
+    report["guardian_sees"] = {
+        "inputs": scan.inputs,
+        "outputs": scan.outputs,
+        "error": scan.error,
+    }
+    return report
 
 
 def default_device_names() -> tuple[str | None, str | None]:
