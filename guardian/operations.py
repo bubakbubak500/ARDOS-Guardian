@@ -1195,7 +1195,7 @@ class Operations:
         ):
             if delay != self._payload_ptt_delay_ms:
                 self._payload_ptt_delay_ms = delay
-                if delay:
+                if delay and self.config.vara_host_ptt:
                     self._log(
                         dual(
                             f"Slow keying negotiated: PTT held {delay} ms "
@@ -1203,6 +1203,21 @@ class Operations:
                             f"Vyjednáno pomalé klíčování: PTT drženo {delay} ms "
                             "po každém vysílání VARA.",
                         ),
+                        source="session",
+                    )
+                elif delay:
+                    # Agreed on the air but unusable here: Guardian only slows
+                    # keying it performs itself. Silence would leave the peer
+                    # believing both ends were holding their tail.
+                    self._log(
+                        dual(
+                            f"Slow keying of {delay} ms was negotiated but "
+                            "cannot be applied: Guardian is not keying the "
+                            "radio for VARA.",
+                            f"Bylo vyjednáno pomalé klíčování {delay} ms, ale "
+                            "nelze je uplatnit: Guardian pro VARA neklíčuje.",
+                        ),
+                        LogLevel.WARNING,
                         source="session",
                     )
         elif message.state.terminal:
@@ -1290,7 +1305,37 @@ class Operations:
             time.sleep(self._payload_ptt_delay_ms / 1000.0)
         self._radio_ptt(enabled)
 
+    def _warn_if_nothing_can_key_vara(self) -> bool:
+        """Warn when VARA is about to transmit and nobody can key the radio.
+
+        The trap that cost OK2IPW an evening: host PTT off, so Guardian
+        ignores VARA's "PTT ON", while Guardian's own rigctld holds the CAT
+        port -- leaving VARA no port to key through either. The session looks
+        perfect (CONNECT, BITRATE, PTT ON, then DISCONNECTED) and not one
+        watt reaches the antenna. Returns True when the warning applied.
+        """
+        if self.config.vara_host_ptt:
+            return False
+        if self.config.radio_backend != "hamlib" or not self.config.cat_port:
+            return False
+        self._log(
+            dual(
+                f"Guardian is not keying the radio for VARA and rigctld holds "
+                f"{self.config.cat_port}, so VARA has no port left to key "
+                "through. If the radio stays in receive, enable 'Let Guardian "
+                "key the radio for VARA'.",
+                f"Guardian pro VARA neklíčuje a rigctld drží "
+                f"{self.config.cat_port}, takže VARA nemá čím klíčovat. Pokud "
+                "rádio zůstane na příjmu, zapněte „Guardian klíčuje rádio pro "
+                "VARA“.",
+            ),
+            LogLevel.WARNING,
+            source="vara",
+        )
+        return True
+
     def _suspend_control(self) -> None:
+        self._warn_if_nothing_can_key_vara()
         self._payload_active.set()
         try:
             # Wait for a radio poll already in progress before VARA begins.

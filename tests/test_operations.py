@@ -14,7 +14,13 @@ from guardian.modem import make_modem
 from guardian.protocol import ControlFrame, FrameType, Priority, encode_alert
 from guardian.radio.base import RadioState
 from guardian.routing import HeardStations, Route, RouteTable
-from guardian.services import EventBus, RadioSnapshot, SnapshotStore, WorkerPool
+from guardian.services import (
+    EventBus,
+    LogLevel,
+    RadioSnapshot,
+    SnapshotStore,
+    WorkerPool,
+)
 from guardian.session import SessionState
 from guardian.session.orchestrator import ACK_TIMEOUT, START_TIMEOUT
 
@@ -1118,6 +1124,77 @@ def test_the_negotiated_gap_follows_the_session_and_dies_with_it(tmp_path) -> No
         inbound.state = SessionState.FAILED
         operations._session_event(inbound, "failed")
         assert operations._payload_ptt_delay_ms == 0, "never leaks to the next session"
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_guardian_keys_for_vara_out_of_the_box(tmp_path) -> None:
+    # OK2IPW's evening: rigctld owns the CAT port, so with host PTT off VARA
+    # had no port left to key through. The session looked perfect -- CONNECT,
+    # BITRATE, PTT ON, DISCONNECTED -- and not one watt reached the antenna.
+    # Keying through Guardian is the only configuration that works with our
+    # own rigctld holding the port.
+    assert StationConfig().vara_host_ptt is True
+
+    operations, workers, _ = _operations(tmp_path)
+    try:
+        assert operations.vara.on_ptt is not None, "wired at startup"
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_a_profile_that_already_chose_its_own_keying_is_left_alone(
+    tmp_path,
+) -> None:
+    # A station may be keying through VARA deliberately; taking that over
+    # behind the operator's back could double-key the radio.
+    path = tmp_path / "config.json"
+    path.write_text('{"callsign": "OK7PS", "vara_host_ptt": false}', encoding="utf-8")
+
+    assert StationConfig.load(path).vara_host_ptt is False
+
+
+def test_a_station_that_cannot_key_for_vara_is_warned_before_the_handoff(
+    tmp_path,
+) -> None:
+    # The one log line that would have ended the search in a minute.
+    operations, workers, _ = _operations(tmp_path, vara_host_ptt=False)
+    operations.config.radio_backend = "hamlib"
+    operations.config.cat_port = "COM3"
+    try:
+        assert operations._warn_if_nothing_can_key_vara()
+        warning = operations.events.history()[-1]
+        assert warning.level is LogLevel.WARNING
+        assert "COM3" in warning.message
+
+        # Keying through Guardian, or no rigctld holding a port: no warning.
+        operations.config.vara_host_ptt = True
+        assert not operations._warn_if_nothing_can_key_vara()
+        operations.config.vara_host_ptt = False
+        operations.config.cat_port = ""
+        assert not operations._warn_if_nothing_can_key_vara()
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_a_negotiated_delay_nobody_can_apply_says_so(tmp_path) -> None:
+    # The peer holds its tail believing we hold ours; silence here would make
+    # a half-applied agreement look like a working one.
+    operations, workers, _ = _operations(tmp_path, vara_host_ptt=False)
+    try:
+        operations._session_event(
+            SimpleNamespace(
+                source="OK7PS", msg_id=1, direction="out",
+                state=SessionState.STARTING_VARA, ptt_delay_ms=400,
+            ),
+            "starting VARA",
+        )
+        warning = operations.events.history()[-1]
+        assert warning.level is LogLevel.WARNING
+        assert "400" in warning.message
     finally:
         operations.close()
         workers.close(wait=True)

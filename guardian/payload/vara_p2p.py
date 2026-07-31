@@ -276,7 +276,18 @@ class VaraP2PBackend(PayloadBackend):
             return self.vara.wait_link("DISCONNECTED", timeout)
 
     def _abort_link(self) -> None:
-        """Stop a failed/stale exchange and briefly await RF release."""
+        """Stop a failed/stale exchange and briefly await RF release.
+
+        Only when there is something to abort: VARA answers WRONG to an ABORT
+        with no link up, which surfaced as a permanent "VARA rejected: ABORT"
+        in the diagnostics of a station whose *peer* had failed to transmit --
+        an alarming line about the one component that was working correctly.
+        """
+        # getattr: a VARA stand-in need not model link state, and when we
+        # cannot tell we still try -- an unnecessary ABORT is a log line, a
+        # missing one leaves the modem keyed.
+        if getattr(self.vara.state, "link_state", "") == "DISCONNECTED":
+            return
         try:
             self.vara.abort()
         except Exception:

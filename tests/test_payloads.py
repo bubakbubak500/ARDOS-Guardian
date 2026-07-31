@@ -590,3 +590,22 @@ def test_vara_does_not_connect_when_audio_handoff_fails() -> None:
     assert vara.commands == []
 
 
+
+
+def test_abort_is_only_sent_when_there_is_a_link_to_abort() -> None:
+    # VARA answers WRONG to an ABORT with no link up. That left a permanent
+    # "VARA rejected: ABORT" in the diagnostics of a station whose *peer* had
+    # failed to transmit -- an alarming line about the one component that was
+    # working correctly.
+    from guardian.payload.vara_p2p import VaraP2PBackend
+
+    vara = FakeVara()
+    backend = VaraP2PBackend(vara=vara)
+
+    vara.state.link_state = "DISCONNECTED"
+    backend._abort_link()
+    assert ("abort",) not in vara.commands
+
+    vara.state.link_state = "CONNECTED"
+    backend._abort_link()
+    assert ("abort",) in vara.commands

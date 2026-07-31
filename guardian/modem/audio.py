@@ -463,6 +463,19 @@ MIN_POLL_INTERVAL = 0.25  # seconds; likewise
 # not a VARA or S-meter reading -- which is why the UI labels it an estimate.
 SNR_BLOCK_SECONDS = 0.1
 SNR_MIN_BLOCKS = 4
+# Until the tracker has heard this much audio the floor is still whatever the
+# first block happened to be -- a burst there would peg the floor at signal
+# level and understate every later reading.
+SNR_FLOOR_SETTLE_SECONDS = 2.0
+# A squelched FM receiver delivers *digital silence*, so the floor tracker,
+# which chases the minimum, collapses toward the 1e-5 term in its own update.
+# Dividing a burst by that produced OK7PS's "S/N ~78.7 dB" on a frame the same
+# session otherwise scored around 40 dB (measured floor: 3.8e-5). Silence is
+# not a noise measurement: clamp the reference to a level below any real
+# receiver noise but far above nothing at all, and cap the result, because
+# beyond this much margin the number stops carrying information anyway.
+SNR_MIN_FLOOR = 1e-4        # -80 dBFS
+SNR_MAX_DB = 40.0
 
 
 class AudioControlTransport(ControlTransport):
@@ -520,6 +533,7 @@ class AudioControlTransport(ControlTransport):
         # Live RX metering (linear RMS in 0..1).
         self._level = 0.0          # smoothed current level
         self._floor = 0.0          # slow-tracking idle noise floor
+        self._floor_seconds = 0.0  # audio heard since the floor started tracking
         self._peak = 0.0
         self._max_peak = 0.0
         self._last_diagnostic_audio = 0.0
@@ -668,6 +682,8 @@ class AudioControlTransport(ControlTransport):
         if self._floor == 0.0:
             self._floor = rms
         self._floor = min(rms, self._floor * 1.001 + 1e-5) if rms < self._floor else self._floor * 0.9995 + 0.0005 * rms
+        if len(block):
+            self._floor_seconds += len(block) / float(self.fs)
 
     @staticmethod
     def to_db(rms: float) -> float:
@@ -697,12 +713,15 @@ class AudioControlTransport(ControlTransport):
         blocks = samples.size // block
         if floor <= 0.0 or blocks < SNR_MIN_BLOCKS:
             return None
+        if self._floor_seconds < SNR_FLOOR_SETTLE_SECONDS:
+            return None
+        floor = max(floor, SNR_MIN_FLOOR)
         rms = np.sqrt((samples[: blocks * block].reshape(blocks, block) ** 2).mean(axis=1))
         loudest = np.sort(rms)[-max(1, blocks // 4):]
         signal = float(loudest.mean())
         if signal <= floor:
             return 0.0
-        return round(self.to_db(signal) - self.to_db(floor), 1)
+        return round(min(self.to_db(signal) - self.to_db(floor), SNR_MAX_DB), 1)
 
     def _rx_loop(self) -> None:
         while self._running:

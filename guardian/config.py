@@ -72,10 +72,17 @@ class StationConfig:
     # without this the COM port was simply never touched.
     ptt_type: str = "RIG"         # "RIG" | "RTS" | "DTR"
 
-    # Experimental: let Guardian key the radio (via its own driver/rigctld) on
-    # VARA's "PTT ON"/"PTT OFF" command-channel signals, so VARA never needs the
-    # COM port. Generic across CI-V / RTS / DTR rigs — set VARA's own PTT to None.
-    vara_host_ptt: bool = False
+    # Let Guardian key the radio (via its own driver/rigctld) on VARA's
+    # "PTT ON"/"PTT OFF" command-channel signals, so VARA never needs the COM
+    # port. Generic across CI-V / RTS / DTR rigs — set VARA's own PTT to None.
+    #
+    # Default ON since 0.6.43. Guardian's rigctld owns the CAT port, so with
+    # this off VARA has no port left to key through: OK2IPW's station produced
+    # a textbook VARA session (CONNECT, BITRATE, PTT ON) with the transmitter
+    # never coming up, and nothing on air. A station whose profile already
+    # stores `false` keeps it -- it may be keying through VARA deliberately,
+    # and taking that over behind the operator's back could double-key.
+    vara_host_ptt: bool = True
 
     # Slow-keying PTT tail (ms, 0 = off) requested for the VARA FM payload
     # phase. For AIOC-class cables on cheap handhelds: unkeying the moment

@@ -107,12 +107,14 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
-**Built but not yet flown (0.6.35–0.6.42):** the alert frequency sweep (an
+**Built but not yet flown (0.6.35–0.6.43):** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
 goes back), the heard-stations S/N estimate + channel column, and the
-negotiated VARA FM slow-keying gap. **Confirmed working in the field
-2026-07-30:** Test PTT and no-CAT keying via Hamlib dummy + serial PTT (AIOC,
-0.6.38) — "uz to funguje".
+negotiated VARA FM slow-keying gap. **Confirmed working in the field:** Test PTT and no-CAT keying via Hamlib
+dummy + serial PTT (AIOC, 0.6.38, 2026-07-30); audio devices on Windows on
+ARM (0.6.42) and the AFSK control channel there, handshake both ways at
+39–48 dB (2026-07-31); the negotiated VARA FM slow-keying tail (0.6.40) —
+"funguje výborně".
 
 **Needs real hardware/peers to verify:**
 - **VARA HF control channel — WORKING as of 0.6.32, confirmed on air
@@ -474,6 +476,32 @@ returned flag: 0.6.36 read `VoxRadio.get_state().ptt`, which is the RTS/DTR
 line Guardian had just asserted, and reported a dead cable as "the radio
 reported TX". Hamlib (`t`) confirms; VOX/serial says it cannot. The
 still-asserted check applies to both.
+
+## VARA host PTT is the default (0.6.43)
+Field report: OK2IPW's VARA produced a full session (`CONNECT`, `BITRATE`,
+`PTT ON/OFF`, `DISCONNECTED`) with nothing on air, and both directions failed.
+Cause: `vara_host_ptt: false` **and** rigctld holding `COM3` — Guardian
+ignored VARA's PTT and VARA had no port left to key through. Nothing to do
+with ARM; the control channel was working the whole time.
+
+- `config.vara_host_ptt` now defaults **True**. Existing profiles that store
+  `false` are left alone (they may be keying via VARA on purpose; taking over
+  could double-key).
+- `Operations._warn_if_nothing_can_key_vara()` — logged at the codec handoff
+  when host PTT is off and `radio_backend == hamlib` with a `cat_port` set.
+- A negotiated slow-keying delay with host PTT off is now a WARNING: Guardian
+  can only slow keying it performs itself.
+- **Slow keying is already symmetric** (0.6.39): request in HAVE_MSG,
+  `max()` result back in ACK_HAVE, both sides adopt it — an AIOC station gets
+  its delay whether it initiates or answers. Older peers ignore the bits and
+  simply do not slow down.
+
+**Cosmetics fixed with it:** the S/N estimate divided by a floor that had
+collapsed to digital silence behind a closed squelch (`3.8e-5` → "78.7 dB");
+now clamped (`SNR_MIN_FLOOR`), capped (`SNR_MAX_DB = 40`) and suppressed for
+the first `SNR_FLOOR_SETTLE_SECONDS`. And `ABORT` is only sent with a live
+link — VARA answers `WRONG` otherwise, which parked a permanent
+"VARA rejected: ABORT" in diagnostics.
 
 ## Windows on ARM: PortAudio DLL choice (0.6.42)
 The 0.6.41 diagnostics closed the missing-audio-devices report at OK2IPW in

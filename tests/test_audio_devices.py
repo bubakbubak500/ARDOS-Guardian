@@ -237,6 +237,11 @@ def test_signal_to_noise_is_estimated_from_the_burst_against_the_idle_floor() ->
     assert transport.window_snr(window) is None, "no floor yet, no number"
 
     transport._floor = quiet
+    # The floor is only worth dividing by once the tracker has heard enough
+    # audio to have settled on it.
+    assert transport.window_snr(window) is None, "floor has not settled yet"
+    transport._floor_seconds = audio_module.SNR_FLOOR_SETTLE_SECONDS
+
     snr = transport.window_snr(window)
     assert snr is not None
     assert 19.0 < snr < 21.0, snr               # 0.1 over 0.01 is 20 dB
@@ -245,6 +250,30 @@ def test_signal_to_noise_is_estimated_from_the_burst_against_the_idle_floor() ->
     assert transport.window_snr(np.full(48_000, quiet, dtype=np.float32)) == 0.0
     # Too little audio to judge.
     assert transport.window_snr(np.zeros(100, dtype=np.float32)) is None
+
+
+def test_a_squelched_receiver_cannot_produce_an_80_db_signal_report() -> None:
+    # OK7PS's log: "S/N ~78.7 dB" on a frame the same session otherwise scored
+    # around 40 dB. A squelched FM receiver delivers digital silence, so the
+    # floor tracker (which chases the minimum) collapses toward its own 1e-5
+    # term and every later burst divides by nothing.
+    transport = AudioControlTransport(sample_rate=48_000)
+    transport._floor = 3.8e-5                  # measured from that station
+    transport._floor_seconds = audio_module.SNR_FLOOR_SETTLE_SECONDS
+    window = np.full(48_000, 1e-5, dtype=np.float32)
+    window[:12_000] = 0.33                     # his peak level
+
+    snr = transport.window_snr(window)
+
+    assert snr == audio_module.SNR_MAX_DB, snr
+    assert snr < 50.0, "silence is not a noise measurement"
+
+    # The cap alone is not enough: a *weak* burst against a collapsed floor
+    # would otherwise still report the ceiling. The noise reference is clamped
+    # to a level below any real receiver but far above digital silence.
+    weak = np.full(48_000, 1e-5, dtype=np.float32)
+    weak[:12_000] = 1e-3
+    assert transport.window_snr(weak) == 20.0, "1e-3 over the 1e-4 clamp"
 
 
 def test_the_frame_snr_travels_with_the_frame_to_the_orchestrator() -> None:
