@@ -37,6 +37,7 @@ from .network_workspace import NetworkWorkspace
 from .readiness_dialog import ReadinessDialog
 from .runtime import ShellRuntime
 from .settings_dialog import SettingsDialog
+from .map_window import MapWindow
 from .spectrum_window import SpectrumWindow
 from .theme import ThemeController, ThemePreference
 from .update_dialog import UpdateDialog
@@ -136,6 +137,10 @@ class GuardianMainWindow(QMainWindow):
         spectrum_action.setShortcut("Ctrl+Shift+W")
         spectrum_action.triggered.connect(self.show_spectrum)
         view_menu.addAction(spectrum_action)
+        map_action = QAction(tr("map.menu"), self)
+        map_action.setShortcut("Ctrl+Shift+M")
+        map_action.triggered.connect(self.show_map)
+        view_menu.addAction(map_action)
         view_menu.addSeparator()
         self.workspace_actions: dict[str, QAction] = {}
         workspace_group = QActionGroup(self)
@@ -431,6 +436,11 @@ class GuardianMainWindow(QMainWindow):
         self.activity_count.setText(
             tr("activity.events", count=len(self.runtime.events.history()))
         )
+        # The map is a plain window, not a workspace, so the poll has to feed
+        # it the way it feeds the alert banner.
+        map_window = getattr(self, "map_window", None)
+        if map_window is not None and map_window.isVisible():
+            map_window.refresh()
         active = self.workspace_stack.currentWidget()
         refresh = getattr(active, "refresh", None)
         if callable(refresh):
@@ -716,6 +726,14 @@ class GuardianMainWindow(QMainWindow):
         )
         if not completed:
             self._show_readiness()
+
+    def show_map(self) -> None:
+        """Open the station map, refreshed by the ordinary UI poll."""
+        if getattr(self, "map_window", None) is None:
+            self.map_window = MapWindow(self.runtime, self)
+        self.map_window.show()
+        self.map_window.raise_()
+        self.map_window.activateWindow()
 
     def _show_diagnostics(self) -> None:
         self.runtime.drain_workers()

@@ -136,6 +136,14 @@ class StationConfig:
     auto_deliver: bool = True  # send waiting Outbox/Transit mail when the hop is heard
     beacon_enabled: bool = False
     beacon_interval: float = 120.0   # seconds between presence beacons
+    # This station's Maidenhead locator ("" = unknown). Set from the map or
+    # typed in; the finest form (10 characters, ~50 x 90 m) fits the beacon
+    # beside any callsign.
+    station_grid: str = ""
+    # Put that locator in the beacon. Transmitting a position is a deliberate
+    # act, so it has its own switch -- though nothing goes out until beacons
+    # themselves are enabled, which they are not by default.
+    beacon_position: bool = True
     scan_dwell: float = 3.0    # seconds per channel when scanning
     auto_qsy: bool = True      # VARA P2P: tune the radio to the station's freq before connecting
 

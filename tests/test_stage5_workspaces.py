@@ -436,6 +436,8 @@ def test_heard_stations_show_the_signal_and_the_channel_they_arrived_on() -> Non
             tr("network.frames"),
             tr("network.snr"),
             tr("network.heard_on"),
+            tr("network.locator"),
+            tr("network.distance"),
             tr("network.last_frame"),
         ]
         rows = {
@@ -447,6 +449,107 @@ def test_heard_stations_show_the_signal_and_the_channel_they_arrived_on() -> Non
         }
         assert rows["OK2IPW"] == ("12.5 dB", "145.2375 MHz")
         # A station heard with no measurement says so instead of inventing one.
+        assert rows["OK1AAA"] == ("-", "-")
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_the_map_places_stations_that_beacon_a_position() -> None:
+    _application()
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.config.station_grid = "JO70FB28MC"          # Praha
+    now = time.monotonic()
+    runtime.heard.record("OK2IPW", now, grid="JN89HE", frame="BEACON")
+    runtime.heard.record("OK1AAA", now, frame="BEACON")  # heard, but no position
+    window = MapWindow(runtime)
+    try:
+        placed = {call for call, _grid, _age in window.stations()}
+        assert placed == {"OK2IPW"}, "a station without a locator has nowhere to go"
+
+        # The status line carries the path an operator would otherwise
+        # measure off a paper map: Praha -> Brno, ~185 km to the south-east.
+        window.refresh()
+        text = window.status.text()
+        assert "JO70FB28MC" in text
+        assert "OK2IPW JN89HE" in text
+        assert "18" in text and "km" in text
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_picking_on_the_map_stores_the_finest_locator() -> None:
+    # A coarse square can be derived from a fine one, never the other way
+    # round, so what gets stored is all ten characters.
+    _application()
+    from guardian.qt.map_window import MapWindow
+    from guardian.routing import MAX_LOCATOR_CHARS, from_locator
+
+    runtime = ShellRuntime()
+    runtime.config.station_grid = ""
+    window = MapWindow(runtime)
+    try:
+        window._picked(50.0755, 14.4378)
+
+        stored = runtime.config.station_grid
+        assert len(stored) == MAX_LOCATOR_CHARS
+        assert stored.startswith("JO70FB")
+        latitude, longitude = from_locator(stored)
+        assert abs(latitude - 50.0755) < 0.01
+        assert abs(longitude - 14.4378) < 0.01
+        assert not window.pick_button.isChecked(), "one click, one position"
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_a_typed_locator_is_accepted_and_nonsense_is_refused() -> None:
+    _application()
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.config.station_grid = "JO70FB"
+    window = MapWindow(runtime)
+    try:
+        window.locator_edit.setText("jn89he12ab")
+        window._typed()
+        assert runtime.config.station_grid == "JN89HE12AB", "upper-cased as sent"
+
+        window.locator_edit.setText("ZZ99XX")
+        window._typed()
+        assert runtime.config.station_grid == "JN89HE12AB", "kept the good one"
+        assert "ZZ99XX" in window.status.text()
+        assert window.locator_edit.text() == "JN89HE12AB"
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_heard_stations_list_the_locator_and_the_path_to_it() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.routes = RouteTable()
+    runtime.config.station_grid = "JO70FB"
+    workspace = NetworkWorkspace(runtime)
+    try:
+        now = time.monotonic()
+        runtime.heard.record("OK2IPW", now, grid="JN89HE", frame="BEACON")
+        runtime.heard.record("OK1AAA", now, frame="BEACON")
+        workspace.refresh()
+
+        rows = {
+            workspace.heard_table.item(row, 0).text(): (
+                workspace.heard_table.item(row, 5).text(),
+                workspace.heard_table.item(row, 6).text(),
+            )
+            for row in range(workspace.heard_table.rowCount())
+        }
+        assert rows["OK2IPW"][0] == "JN89HE"
+        assert "km" in rows["OK2IPW"][1] and "°" in rows["OK2IPW"][1]
+        # No position, no path -- and no invented one.
         assert rows["OK1AAA"] == ("-", "-")
     finally:
         workspace.close()

@@ -1,6 +1,6 @@
 # Guardian (ARDOS) — Project Status & Plan
 
-_Last updated: 2026-07-30_
+_Last updated: 2026-07-31_
 
 A resumable snapshot: what Guardian is, what's built, what's verified, the key
 decisions and why, and what comes next. Read this first when picking the project
@@ -107,7 +107,7 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
-**Built but not yet flown (0.6.35–0.6.43):** the alert frequency sweep (an
+**Built but not yet flown (0.6.35–0.6.44):** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
 goes back), the heard-stations S/N estimate + channel column, and the
 negotiated VARA FM slow-keying gap. **Confirmed working in the field:** Test PTT and no-CAT keying via Hamlib
@@ -476,6 +476,34 @@ returned flag: 0.6.36 read `VoxRadio.get_state().ptt`, which is the RTS/DTR
 line Guardian had just asserted, and reported a dead cable as "the radio
 reported TX". Hamlib (`t`) confirms; VOX/serial says it cannot. The
 still-asserted check applies to both.
+
+## Station positions and the map (0.6.44)
+Beacons carry a **Maidenhead locator** in the address field (unused for a
+broadcast, same trick as alerts; wire format untouched, old builds ignore it).
+Binary lat/lon is impossible there — the field is ASCII and upper-cased, so
+bytes >127 come back as `?`. Ten characters (~50 × 90 m) fit beside any
+callsign Settings accepts; `beacon_locator_room()` rounds the room down to a
+whole pair, because an odd truncation names a different square.
+
+- `routing/grid.py` — encode/decode/bounds/haversine, one code path for all
+  precisions via the 18/10/24/10/24 division table. Verified against six
+  cities' documented squares.
+- `config.station_grid` + `beacon_position` (default True, but beacons
+  themselves are off by default, so nothing goes out unasked).
+- **Only `FrameType.BEACON` sets `HeardStation.grid`** — a group named
+  `JN89HE` parses as a locator, and reading that destination as a position
+  would place the sender in Brno.
+- `qt/map_window.py` — QPainter, equirectangular. **No QtWebEngine**: Leaflet
+  would add ~150 MB to a 41 MB installer and want a network we exist to
+  survive without. Works with **no map data at all**; an offline `.mbtiles`
+  background is a later layer, never a dependency.
+- Heard table gained Locator + Distance (`184 km 121°`), empty until this
+  station knows its own position.
+
+**Next, if wanted:** optional offline raster background. `.mbtiles` (SQLite,
+stdlib `sqlite3`, no new dependency) in `%APPDATA%\Guardian\maps\`. Note that
+bulk downloading from public OSM tile servers is against their terms — either
+the operator supplies the file or we target a source that permits it.
 
 ## VARA host PTT is the default (0.6.43)
 Field report: OK2IPW's VARA produced a full session (`CONNECT`, `BITRATE`,

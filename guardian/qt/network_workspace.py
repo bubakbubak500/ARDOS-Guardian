@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..routing import Route
+from ..routing import Route, locator_distance_bearing
 from ..i18n import dual, tr
 from .inputs import FrequencySpinBox, RowTable, UppercaseLineEdit
 from .runtime import ShellRuntime
@@ -98,7 +98,7 @@ class NetworkWorkspace(QWidget):
         )
         detail.setObjectName("Metadata")
         layout.addWidget(detail)
-        self.heard_table = RowTable(0, 6)
+        self.heard_table = RowTable(0, 8)
         self.heard_table.setHorizontalHeaderLabels(
             [
                 tr("network.callsign"),
@@ -106,11 +106,13 @@ class NetworkWorkspace(QWidget):
                 tr("network.frames"),
                 tr("network.snr"),
                 tr("network.heard_on"),
+                tr("network.locator"),
+                tr("network.distance"),
                 tr("network.last_frame"),
             ]
         )
         self.heard_table.horizontalHeader().setSectionResizeMode(
-            5, QHeaderView.ResizeMode.Stretch
+            7, QHeaderView.ResizeMode.Stretch
         )
         layout.addWidget(self.heard_table, 1)
         return page
@@ -211,8 +213,14 @@ class NetworkWorkspace(QWidget):
                 self.routes_table.setItem(row, column, QTableWidgetItem(value))
         now = time.monotonic()
         heard = self.runtime.heard.active(now)
+        own_grid = (self.runtime.config.station_grid or "").upper()
         self.heard_table.setRowCount(len(heard))
         for row, station in enumerate(heard):
+            # Distance needs both ends of the path, so it stays empty until
+            # this station knows where it is itself.
+            relative = locator_distance_bearing(own_grid, station.grid) if (
+                own_grid and station.grid
+            ) else None
             values = (
                 station.callsign,
                 f"{station.age(now):.0f} s",
@@ -223,6 +231,8 @@ class NetworkWorkspace(QWidget):
                     if station.last_freq_hz
                     else "-"
                 ),
+                station.grid or "-",
+                "-" if relative is None else f"{relative[0]:.0f} km  {relative[1]:.0f}°",
                 station.last_frame,
             )
             for column, value in enumerate(values):

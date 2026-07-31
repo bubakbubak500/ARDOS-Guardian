@@ -365,6 +365,44 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.frames": ("Frames", "Rámce"),
     "network.snr": ("Last S/N (est.)", "Poslední S/N (odhad)"),
     "network.heard_on": ("Heard on", "Slyšeno na"),
+    "network.locator": ("Locator", "Lokátor"),
+    "network.distance": ("Distance", "Vzdálenost"),
+    # Map
+    "map.title": ("Station map", "Mapa stanic"),
+    "map.menu": ("Station map…", "Mapa stanic…"),
+    "map.intro": (
+        "Stations appear here once they beacon a position. Drag to pan, wheel "
+        "to zoom. Set your own position by picking it on the map or by typing "
+        "the locator.",
+        "Stanice se zde objeví, jakmile odvysílají polohu v majáku. Tažením "
+        "posunete, kolečkem přiblížíte. Vlastní polohu zadáte klepnutím do "
+        "mapy nebo napsáním lokátoru.",
+    ),
+    "map.pick": ("Pick my position", "Určit mou polohu"),
+    "map.locator": ("Locator", "Lokátor"),
+    "map.centre": ("Fit to stations", "Přizpůsobit stanicím"),
+    "map.you": ("This station", "Tato stanice"),
+    "map.transmit": ("Send in beacons", "Posílat v majáku"),
+    "map.transmit_hint": (
+        "Your locator travels in the presence beacon, so other stations can "
+        "place you. Nothing is transmitted while beacons are switched off.",
+        "Váš lokátor cestuje v majáku přítomnosti, aby vás ostatní stanice "
+        "mohly umístit. Dokud jsou majáky vypnuté, nevysílá se nic.",
+    ),
+    "map.no_position": (
+        "No position set for this station yet.",
+        "Poloha této stanice zatím není nastavena.",
+    ),
+    "map.own_position": (
+        "This station: {locator} ({latitude}, {longitude})",
+        "Tato stanice: {locator} ({latitude}, {longitude})",
+    ),
+    "map.bad_locator": (
+        "{locator} is not a Maidenhead locator (2 to 10 characters, "
+        "e.g. JN89HE12AB).",
+        "{locator} není lokátor Maidenhead (2 až 10 znaků, "
+        "např. JN89HE12AB).",
+    ),
     "network.last_frame": ("Last frame", "Poslední rámec"),
     "network.route_required": (
         "Enter a destination. The preferred hop may stay empty for a direct route.",

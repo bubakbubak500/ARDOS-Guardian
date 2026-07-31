@@ -1,4 +1,5 @@
 from guardian.protocol import ControlFrame, Flags, FrameType
+from guardian.routing import is_locator
 from guardian.session import LoopbackBus, Message, Orchestrator, SessionState
 from guardian.routing import Route, RouteTable
 from guardian.session.orchestrator import (
@@ -381,3 +382,85 @@ def test_the_slow_keying_field_survives_the_wire_and_old_builds() -> None:
     # Rounding and cap.
     assert decode_ptt_delay(encode_ptt_delay(Flags.NONE, 250)) == 200
     assert decode_ptt_delay(encode_ptt_delay(Flags.NONE, 5_000)) == MAX_PTT_DELAY_MS
+
+
+def test_a_beacon_carries_the_locator_and_only_a_beacon_sets_one() -> None:
+    # The position rides in the address field, which every other frame type
+    # uses for a real callsign -- reading one of those as a locator would put
+    # a station on the map somewhere it has never been.
+    from guardian.protocol import MAX_CONTROL_FRAME_BYTES
+
+    bus = LoopbackBus()
+    station = Orchestrator("OK7PS", bus.endpoint("a"), auto_route=False)
+    sent = _spy(station)
+    station.position = lambda: "JO70FB28MC"
+    station.tick(0.0)
+
+    station.beacon()
+
+    assert len(sent) == 1
+    assert sent[0].type is FrameType.BEACON
+    assert sent[0].destination == "JO70FB28MC"
+    assert len(sent[0].encode()) <= MAX_CONTROL_FRAME_BYTES
+
+    # A peer's beacon puts them on the map.
+    listener = Orchestrator("OK2IPW", bus.endpoint("b"), auto_route=False)
+    listener.tick(0.0)
+    listener._on_frame(sent[0])
+    assert listener.heard.get("OK7PS").grid == "JO70FB28MC"
+
+    # The hazard is a destination that *parses* as a locator: a group named
+    # JN89HE is a perfectly ordinary thing to route to, and reading it as a
+    # position would drop that station onto the map in Brno.
+    assert is_locator("JN89HE")
+    listener._on_frame(
+        ControlFrame(
+            type=FrameType.HAVE_MSG, source="OK9ZZZ", destination="JN89HE",
+            next_hop="OK2IPW", message_id=1,
+        )
+    )
+    assert listener.heard.get("OK9ZZZ").grid == ""
+
+
+def test_a_station_with_no_position_beacons_exactly_as_before() -> None:
+    bus = LoopbackBus()
+    station = Orchestrator("OK7PS", bus.endpoint("a"), auto_route=False)
+    sent = _spy(station)
+    station.tick(0.0)
+
+    station.beacon()                              # no position callback at all
+    station.position = lambda: ""                 # or one that declines
+    station.beacon()
+    station.position = lambda: "not a locator"    # or nonsense
+    station.beacon()
+    station.position = lambda: (_ for _ in ()).throw(OSError("bad config"))
+    station.beacon()
+
+    assert len(sent) == 4
+    assert all(frame.destination == "" for frame in sent)
+    assert all(len(frame.encode()) == 22 for frame in sent)
+
+
+def test_the_locator_fits_beside_even_the_longest_callsign() -> None:
+    # An odd truncation would name a different square, so the room is always
+    # rounded down to a whole locator pair.
+    from guardian.protocol import MAX_CONTROL_FRAME_BYTES
+    from guardian.session.orchestrator import beacon_locator_room
+
+    # 16 is the longest callsign Settings accepts, and ten characters fit
+    # beside it with room to spare -- the 25-character case is the guard
+    # itself, kept because an oversize frame would mis-size the RX window
+    # and every session timeout derived from it.
+    assert beacon_locator_room("A" * 25) == 6
+    for callsign in ("OK7PS", "OK1ABC/P", "VK9XYZ/MM", "A" * 16, "A" * 25):
+        bus = LoopbackBus()
+        station = Orchestrator(callsign, bus.endpoint("x"), auto_route=False)
+        sent = _spy(station)
+        station.position = lambda: "JO70FB28MC"
+        station.tick(0.0)
+        station.beacon()
+
+        room = beacon_locator_room(callsign)
+        assert room % 2 == 0, callsign
+        assert len(sent[0].encode()) <= MAX_CONTROL_FRAME_BYTES, callsign
+        assert sent[0].destination == "JO70FB28MC"[:room], callsign

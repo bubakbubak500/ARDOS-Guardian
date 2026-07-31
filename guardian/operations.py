@@ -172,8 +172,15 @@ class Operations:
         net.on_alert = self._on_alert
         net.channel_frequency = self.current_frequency
         net.ptt_delay_request = self._vara_keying_delay_request
+        net.position = self.beacon_position
         self._scale_session_timeouts(net, transport)
         return net
+
+    def beacon_position(self) -> str:
+        """The locator our beacons carry, or "" to keep it off the air."""
+        if not self.config.beacon_position:
+            return ""
+        return (self.config.station_grid or "").strip().upper()
 
     def _vara_keying_delay_request(self) -> int:
         """Slow-keying hold-off this station asks its peer for, in ms.

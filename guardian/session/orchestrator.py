@@ -33,6 +33,7 @@ from enum import Enum
 from typing import Callable
 
 from ..protocol import (
+    MAX_CONTROL_FRAME_BYTES,
     ControlFrame,
     Flags,
     FrameType,
@@ -43,7 +44,7 @@ from ..protocol import (
     encode_alert,
     encode_ptt_delay,
 )
-from ..routing import HeardStations
+from ..routing import MAX_LOCATOR_CHARS, HeardStations, is_locator
 from .transport import ControlTransport
 
 DISCOVERY_TIMEOUT = 8.0
@@ -67,6 +68,9 @@ ALERT_RELAY_MIN = 1.0
 ALERT_RELAY_MAX = 5.0
 ALERT_MEMORY = 3600.0
 MAX_ANNOUNCE = 3
+# Everything a beacon spends that is not the locator, for a five-character
+# callsign: 12 header + 2 CRC + three length prefixes + "OK7PS".
+_BEACON_OVERHEAD = 22
 _PAYLOAD_TRANSFER_TIMEOUT = 120.0
 _PAYLOAD_WIRE_OVERHEAD = 14
 # Mirrors payload.vara_p2p.MIN_WIRE_SIZE; kept as a local constant so the
@@ -76,6 +80,20 @@ _PAYLOAD_MIN_WIRE_SIZE = 256
 _SLOW_LINK_BPS = 300.0
 _TRANSFER_MARGIN = 3.0
 _SESSION_MARGIN = 60.0
+
+
+def beacon_locator_room(callsign: str) -> int:
+    """Locator characters a beacon can carry beside this callsign.
+
+    Measured against the real encoder by test_beacon_position: header + CRC +
+    three length prefixes + the callsign, all subtracted from the frame
+    ceiling, then rounded down to a whole locator pair. Even a 16-character
+    callsign leaves room for the full ten, so in practice this only guards
+    the arithmetic -- but a truncated *odd* locator would name a different
+    square, which is the kind of quiet wrongness worth spending a line on.
+    """
+    room = MAX_CONTROL_FRAME_BYTES - _BEACON_OVERHEAD - max(0, len(callsign) - 5)
+    return max(0, min(MAX_LOCATOR_CHARS, room - room % 2))
 
 
 def alert_priority(code: int) -> Priority:
@@ -211,6 +229,10 @@ class Orchestrator:
         # asked at call time so a mode change needs no rebuild. The owner sets
         # it only when it applies (VARA FM, operator configured a delay).
         self.ptt_delay_request: Callable[[], int] | None = None
+        # This station's Maidenhead locator for the beacon, or "" to keep the
+        # position off the air. Asked at beacon time so a change in Settings
+        # needs no rebuild.
+        self.position: Callable[[], str] | None = None
         # Broadcast alerts: what we have already seen (so a flood converges)
         # and what is waiting to go out (repeats and jittered relays).
         self.on_alert: Callable[[ControlFrame, bool], None] | None = None
@@ -294,8 +316,32 @@ class Orchestrator:
         self._send(FrameType.HAVE_MSG, msg)
 
     def beacon(self) -> None:
-        """Transmit a presence beacon so neighbours hear (and can deliver to) us."""
-        self.transport.send(ControlFrame(type=FrameType.BEACON, source=self.callsign))
+        """Transmit a presence beacon so neighbours hear (and can deliver to) us.
+
+        The beacon carries our Maidenhead locator when the operator has set
+        one. It rides in the address field, which is unused for a broadcast --
+        the same trick alerts use, so the wire format is untouched and a build
+        that predates this reads the beacon and ignores the extra text.
+        """
+        self.transport.send(
+            ControlFrame(
+                type=FrameType.BEACON,
+                source=self.callsign,
+                destination=self._own_position(),
+            )
+        )
+
+    def _own_position(self) -> str:
+        """Our locator for the air, trimmed to what the frame can carry."""
+        if self.position is None:
+            return ""
+        try:
+            locator = (self.position() or "").strip().upper()
+        except Exception:      # noqa: BLE001 - a config fault must not stop the beacon
+            return ""
+        if not is_locator(locator):
+            return ""
+        return locator[: beacon_locator_room(self.callsign)]
 
     def cancel(self, msg_id: int) -> None:
         msg = self.sessions.get(msg_id)
@@ -485,11 +531,17 @@ class Orchestrator:
     def _on_frame(self, frame: ControlFrame) -> None:
         # Every frame we hear means its sender is reachable right now.
         if frame.source and frame.source != self.callsign:
+            # Only a beacon's address field is a locator. Every other type
+            # puts a real callsign or an alert payload there, and reading one
+            # of those as a position would put a station on the map somewhere
+            # it has never been.
+            grid = frame.destination if frame.type is FrameType.BEACON else ""
             self.heard.record(
                 frame.source,
                 self._now,
                 snr=getattr(self.transport, "last_frame_snr", None),
                 freq_hz=self._current_frequency(),
+                grid=grid if is_locator(grid) else "",
                 frame=frame.type.name,
             )
         self._dispatch(frame)

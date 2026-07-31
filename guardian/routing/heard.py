@@ -21,6 +21,9 @@ class HeardStation:
     # frequency, not a measurement of theirs -- on a simplex net they are the
     # same thing, and after a QSY it says which channel the contact was on.
     last_freq_hz: int | None = None
+    # Maidenhead locator the station put in its beacon, "" until one arrives.
+    # Only beacons carry a position, so it survives every other frame type.
+    grid: str = ""
     last_frame: str = ""
     # Destinations this station has offered to reach (from ROUTE_OFFER), so we
     # can prefer it as a relay toward those.
@@ -36,7 +39,7 @@ class HeardStations:
         self._stations: dict[str, HeardStation] = {}
 
     def record(self, callsign: str, now: float, *, snr: float | None = None,
-               freq_hz: int | None = None, frame: str = "",
+               freq_hz: int | None = None, grid: str = "", frame: str = "",
                reaches: str | None = None) -> None:
         call = callsign.strip().upper()
         if not call:
@@ -51,6 +54,8 @@ class HeardStations:
             st.last_snr = snr
         if freq_hz:
             st.last_freq_hz = int(freq_hz)
+        if grid:
+            st.grid = grid.strip().upper()
         if frame:
             st.last_frame = frame
         if reaches:
