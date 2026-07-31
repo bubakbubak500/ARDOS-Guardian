@@ -107,7 +107,7 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
-**Built but not yet flown (0.6.35–0.6.41):** the alert frequency sweep (an
+**Built but not yet flown (0.6.35–0.6.42):** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
 goes back), the heard-stations S/N estimate + channel column, and the
 negotiated VARA FM slow-keying gap. **Confirmed working in the field
@@ -474,6 +474,22 @@ returned flag: 0.6.36 read `VoxRadio.get_state().ptt`, which is the RTS/DTR
 line Guardian had just asserted, and reported a dead cable as "the radio
 reported TX". Hamlib (`t`) confirms; VOX/serial says it cannot. The
 still-asserted check applies to both.
+
+## Windows on ARM: PortAudio DLL choice (0.6.42)
+The 0.6.41 diagnostics closed the missing-audio-devices report at OK2IPW in
+one line: `OSError: cannot load library ...libportaudioarm64.dll: error 0x7e`.
+
+That station is an ARM64 machine running the **x64** build under emulation.
+Windows reports `PROCESSOR_ARCHITECTURE=AMD64` (the process) and
+`PROCESSOR_ARCHITEW6432=ARM64` (the machine); `platform.machine()` prefers
+the latter, and sounddevice picks its bundled DLL from it — so it asked for
+an ARM64 library that the x64 wheel does not ship and an emulated x64 process
+could not load anyway. Bundling the ARM64 DLL is **not** the fix.
+
+`_import_sounddevice()` overrides `platform.machine` with
+`process_architecture()` for the duration of the import and restores it
+straight after; it engages only when process and machine differ, so native
+hosts are untouched. Diagnostics now print both architectures.
 
 ## Audio device enumeration (0.6.41)
 Field report: one PC listed no audio devices in Guardian while VARA listed

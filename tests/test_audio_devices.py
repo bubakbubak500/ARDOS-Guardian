@@ -390,3 +390,75 @@ def test_a_rescan_asks_portaudio_to_look_at_the_hardware_again(
     scan = audio_module.scan_audio_devices(reinitialise=True)
     assert calls == ["terminate", "initialize"]
     assert scan.reinitialised and scan.ok
+
+
+def test_the_portaudio_build_is_chosen_for_the_process_not_the_machine(
+    monkeypatch,
+) -> None:
+    # OK2IPW's PC, 0.6.41 diagnostics: Windows on ARM running the x64 build
+    # under emulation. platform.machine() resolves PROCESSOR_ARCHITEW6432
+    # first, so it says ARM64, and sounddevice went looking for
+    # libportaudioarm64.dll -- a file no x64 wheel ships and an emulated x64
+    # process could not load anyway. Result: error 0x7e and not one audio
+    # device anywhere in Guardian.
+    import builtins
+    import platform
+
+    seen: list[str] = []
+    fake = _fake_sounddevice(DEVICES)
+    real_import = builtins.__import__
+
+    def capture(name, *args, **kwargs):
+        if name == "sounddevice":
+            seen.append(platform.machine())
+            return fake
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+    monkeypatch.setattr(platform, "machine", lambda: "ARM64")
+    monkeypatch.setattr(audio_module, "_platform", platform)
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    monkeypatch.setattr(builtins, "__import__", capture)
+
+    assert audio_module._import_sounddevice() is fake
+    assert seen == ["AMD64"], "sounddevice must see the process architecture"
+    assert platform.machine() == "ARM64", "and the patch must not linger"
+
+
+def test_a_native_machine_is_left_completely_alone(monkeypatch) -> None:
+    # The override exists only for the emulated case; an ordinary x64 PC (or
+    # any non-Windows host) must import exactly as before.
+    import builtins
+    import platform
+
+    seen: list[str] = []
+    fake = _fake_sounddevice(DEVICES)
+    real_import = builtins.__import__
+
+    def capture(name, *args, **kwargs):
+        if name == "sounddevice":
+            seen.append(platform.machine())
+            return fake
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(audio_module, "_platform", platform)
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    monkeypatch.setattr(builtins, "__import__", capture)
+
+    audio_module._import_sounddevice()
+
+    assert seen == ["AMD64"]
+
+
+def test_diagnostics_name_both_architectures(monkeypatch) -> None:
+    # The pair is what identifies an emulated process at a glance.
+    monkeypatch.setitem(sys.modules, "sounddevice", _fake_sounddevice(DEVICES))
+
+    report = audio_module.audio_backend_report()
+
+    assert "process_architecture" in report
+    assert "machine_architecture" in report

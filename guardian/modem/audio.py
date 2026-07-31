@@ -13,8 +13,11 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
+import platform as _platform
 import re
+import sys
 import threading
 import time
 from typing import Callable
@@ -51,6 +54,46 @@ def is_real_audio_device_name(name: str) -> bool:
     return bool(normalized) and not normalized.startswith(_PSEUDO_DEVICE_PREFIXES)
 
 
+def process_architecture() -> str:
+    """The instruction set *this process* runs as, upper-case ("AMD64").
+
+    Not the machine's: on Windows on ARM an x64 program runs under emulation,
+    and Windows tells it so through PROCESSOR_ARCHITECTURE while advertising
+    the native ARM64 in PROCESSOR_ARCHITEW6432.
+    """
+    return (os.environ.get("PROCESSOR_ARCHITECTURE", "") or "").strip().upper()
+
+
+def _import_sounddevice():
+    """Import sounddevice with the PortAudio build the *process* can load.
+
+    sounddevice picks its bundled DLL from `platform.machine()`, and Python
+    resolves that to PROCESSOR_ARCHITEW6432 first -- the *machine's* native
+    architecture. On a Windows-on-ARM PC that is ARM64 even though Guardian
+    itself is the x64 build running under emulation, so sounddevice asked for
+    `libportaudioarm64.dll`: a file no x64 wheel ships, and one an emulated
+    x64 process could not load even if it did. The import failed and every
+    audio device on the PC vanished from the pickers (OK2IPW, 0.6.41
+    diagnostics, error 0x7e = module not found).
+
+    The process architecture is the right question, so answer that one while
+    sounddevice decides, and put `platform.machine` back immediately.
+    """
+    machine = _platform.machine().strip().upper()
+    process = process_architecture()
+    if sys.platform != "win32" or not process or process == machine:
+        import sounddevice
+
+        return sounddevice
+    original = _platform.machine
+    _platform.machine = lambda: process
+    try:
+        import sounddevice
+    finally:
+        _platform.machine = original
+    return sounddevice
+
+
 @dataclass(frozen=True)
 class AudioDeviceScan:
     """What an enumeration attempt found, and why it found nothing.
@@ -84,7 +127,7 @@ def reinitialise_audio_backend() -> str:
     running control channel would pull the device out from under it.
     """
     try:
-        import sounddevice as sd
+        sd = _import_sounddevice()
 
         sd._terminate()
         sd._initialize()
@@ -134,7 +177,7 @@ def scan_audio_devices(*, reinitialise: bool = False) -> AudioDeviceScan:
     """
     reinit_error = reinitialise_audio_backend() if reinitialise else ""
     try:
-        import sounddevice as sd
+        sd = _import_sounddevice()
     except Exception as exc:  # noqa: BLE001 - the backend is optional at import
         return AudioDeviceScan(
             error=(
@@ -212,9 +255,15 @@ def audio_backend_report() -> dict:
     pseudo-device filter are hiding what it does see. A filtered list cannot
     tell those apart, and that is the case that had us guessing.
     """
-    report: dict = {"backend": "sounddevice/PortAudio"}
+    report: dict = {
+        "backend": "sounddevice/PortAudio",
+        # The pair that mattered on Windows on ARM: an x64 process on an ARM64
+        # machine, where the wrong one picks a DLL that cannot be loaded.
+        "process_architecture": process_architecture(),
+        "machine_architecture": _platform.machine(),
+    }
     try:
-        import sounddevice as sd
+        sd = _import_sounddevice()
     except Exception as exc:  # noqa: BLE001
         report["error"] = f"{type(exc).__name__}: {exc}"
         return report
@@ -275,7 +324,7 @@ def default_device_names() -> tuple[str | None, str | None]:
     the Windows default device — Windows would then mix system sounds into it
     and compete for the device (and put PC beeps on the air)."""
     try:
-        import sounddevice as sd
+        sd = _import_sounddevice()
         devs = list(sd.query_devices())
         ha = sd.query_hostapis(sd.default.hostapi)
     except Exception:
@@ -295,7 +344,7 @@ def resolve_device(name: str, kind: str = "input"):
     if not name:
         return None
     try:
-        import sounddevice as sd
+        sd = _import_sounddevice()
         devices = list(sd.query_devices())
         default_api = sd.default.hostapi
     except Exception:
@@ -477,7 +526,7 @@ class AudioControlTransport(ControlTransport):
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
-        import sounddevice as sd  # lazy; raises if PortAudio missing
+        sd = _import_sounddevice()  # lazy; raises if PortAudio missing
         self._sd = sd
         if not isinstance(self.input_device, int):
             raise RuntimeError("The configured RX audio input is not available")
