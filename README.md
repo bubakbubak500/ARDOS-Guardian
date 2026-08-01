@@ -52,7 +52,13 @@ manifest, and asks again before launching it.
   and verifies the exact PortAudio endpoint opened by the active channel
 - **Direct-route QSY**: with automatic QSY enabled, a direct route is tuned to
   its configured working frequency before the first control announcement and
-  the previous frequency is restored after the session
+  the previous frequency is restored after the session. A Hamlib Dummy / no-CAT
+  radio instead shows an operator-maintained current frequency and requires an
+  explicit tune-and-confirm step; Cancel leaves the message unsent.
+- **Operational station map**: cached ČÚZK topographic tiles, high-contrast
+  own/heard markers, mail-activity links labelled with distance and azimuth,
+  and one-click message composition addressed to a heard station. The map is
+  an independent window and does not stay above the main application.
 - **Consent-driven VARA setup**: Station readiness can download the exact
   reviewed VARA FM/HF archive from the official Winlink distribution server,
   enforce the version, size and SHA-256 pinned in this Guardian release, then

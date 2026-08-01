@@ -25,7 +25,7 @@ from .protocol import (
     max_note_length,
 )
 from .radio import make_driver
-from .radio.presets import find_executable
+from .radio.presets import DUMMY_MODEL, find_executable
 from .radio.rigctld_launcher import RigctldProcess
 from .routing import HeardStations, RouteTable
 from .services import (
@@ -131,6 +131,9 @@ class Operations:
         self._vara_process: subprocess.Popen | None = None
         # Negotiated slow-keying hold-off for the payload session in flight.
         self._payload_ptt_delay_ms = 0
+        # Set by the Qt shell. Operations stays UI-independent, while every
+        # no-CAT QSY still has a synchronous operator safety gate.
+        self.confirm_manual_qsy: Callable[[str, int, str], bool] | None = None
         self.alerts: list[AlertRecord] = []      # newest first
         self.net = self._build_net(NullTransport())
 
@@ -220,11 +223,33 @@ class Operations:
         return True
 
     def current_frequency(self) -> int | None:
-        """Where the radio is tuned according to the last CAT poll."""
+        """Where the radio is tuned according to CAT or the no-CAT operator."""
+        if self.is_no_cat_radio():
+            return int(self.config.manual_frequency_hz or 0) or None
         return self.snapshots.read().radio.frequency_hz
+
+    def is_no_cat_radio(self) -> bool:
+        return (
+            self.config.radio_backend == "hamlib"
+            and int(self.config.rig_model or 0) == DUMMY_MODEL
+        )
+
+    def set_manual_frequency(self, frequency_hz: int) -> None:
+        """Record the physical dial position for a radio without CAT."""
+        value = max(0, int(frequency_hz or 0))
+        self.config.manual_frequency_hz = value
+        self.config.save()
+        if getattr(self.radio, "no_cat", False):
+            self.radio.manual_frequency_hz = value
+        self.request_radio_poll(force=True)
 
     def alert_sweep_channels(self) -> list[tuple[int, str]]:
         """Other frequencies from the route table an alert should also reach."""
+        # A dummy backend can key PTT but cannot move the physical dial. A
+        # background sweep through simulated Hamlib frequencies would silently
+        # transmit every copy on the original channel.
+        if self.is_no_cat_radio():
+            return []
         here = self.current_frequency()
         channels = [
             (freq, mode)
@@ -1394,6 +1419,38 @@ class Operations:
         if target is None:
             return False
         frequency, mode = target
+        if self.is_no_cat_radio():
+            here = int(self.config.manual_frequency_hz or 0)
+            if here == frequency:
+                return True
+            confirm = self.confirm_manual_qsy
+            if confirm is None or not confirm(callsign, frequency, mode):
+                self._log(
+                    dual(
+                        f"Message to {callsign} cancelled: manual QSY to "
+                        f"{frequency / 1_000_000:.4f} MHz was not confirmed.",
+                        f"Zpráva pro {callsign} zrušena: ruční QSY na "
+                        f"{frequency / 1_000_000:.4f} MHz nebylo potvrzeno.",
+                    ),
+                    LogLevel.WARNING,
+                    source="radio",
+                )
+                return False
+            # OK means the operator has physically tuned the dial. Persist the
+            # newly reported truth; do not pretend that Dummy tuned it for us.
+            self.set_manual_frequency(frequency)
+            self._log(
+                dual(
+                    f"Manual QSY confirmed for {callsign}: "
+                    f"{frequency / 1_000_000:.4f} MHz"
+                    + (f" {mode}" if mode else ""),
+                    f"Ruční QSY pro {callsign} potvrzeno: "
+                    f"{frequency / 1_000_000:.4f} MHz"
+                    + (f" {mode}" if mode else ""),
+                ),
+                source="radio",
+            )
+            return True
         try:
             if self._qsy_previous is None:
                 self._qsy_previous = self.radio.get_state().frequency_hz

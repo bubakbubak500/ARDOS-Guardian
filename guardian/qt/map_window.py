@@ -17,7 +17,7 @@ import math
 import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -33,6 +33,8 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..i18n import dual, tr
+from ..message import Folder, Status
+from .mail_workspace import ComposeDialog
 from .map_tiles import SOURCES, TILE_PIXELS, TileCache, TileSource, tile_for
 from ..routing import (
     MAX_LOCATOR_CHARS,
@@ -58,6 +60,7 @@ class MapCanvas(QWidget):
     """Pans, zooms, and reports where the operator clicked."""
 
     picked = Signal(float, float)          # latitude, longitude
+    station_picked = Signal(str)           # callsign
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -68,6 +71,7 @@ class MapCanvas(QWidget):
         self.picking = False
         self.own_grid = ""
         self.stations: list[tuple[str, str, float]] = []   # call, grid, age
+        self.links: list[tuple[str, str, str]] = []  # call, grid, mail activity
         self._drag_from: QPointF | None = None
         self._dragged = False
         self.source: TileSource | None = None
@@ -263,7 +267,27 @@ class MapCanvas(QWidget):
         if self.picking and not self._dragged:
             latitude, longitude = self.to_position(QPointF(event.position()))
             self.picked.emit(latitude, longitude)
+        elif not self._dragged:
+            callsign = self.station_at(QPointF(event.position()))
+            if callsign:
+                self.station_picked.emit(callsign)
         self._drag_from = None
+
+    def station_at(self, point: QPointF, radius: float = 16.0) -> str:
+        """Return the nearest plotted peer under a click, if there is one."""
+        nearest = ""
+        nearest_distance = radius
+        for callsign, grid, _age in self.stations:
+            try:
+                latitude, longitude = from_locator(grid)
+            except ValueError:
+                continue
+            centre = self.to_screen(latitude, longitude)
+            distance = math.hypot(point.x() - centre.x(), point.y() - centre.y())
+            if distance <= nearest_distance:
+                nearest = callsign
+                nearest_distance = distance
+        return nearest
 
     def wheelEvent(self, event) -> None:
         step = 0.8 if event.angleDelta().y() > 0 else 1.25
@@ -317,6 +341,8 @@ class MapCanvas(QWidget):
         painter.fillRect(self.rect(), QColor("#101418"))
         self._draw_tiles(painter)
         self._draw_graticule(painter)
+        for callsign, grid, activity in self.links:
+            self._draw_link(painter, callsign, grid, activity)
         for callsign, grid, age in self.stations:
             self._draw_station(painter, callsign, grid, age, own=False)
         if self.own_grid:
@@ -358,23 +384,107 @@ class MapCanvas(QWidget):
             south, west, north, east = locator_bounds(grid)
         except ValueError:
             return
-        colour = QColor("#4ea1ff") if own else QColor("#7ddc7d")
+        colour = QColor("#1683ff") if own else QColor("#14a83b")
         if age > 600:
-            colour = QColor("#8a949e")      # heard a while ago, faded back
+            colour = QColor("#66717c")      # heard a while ago, faded back
         top_left = self.to_screen(north, west)
         bottom_right = self.to_screen(south, east)
         square = QRectF(top_left, bottom_right)
-        painter.setPen(QPen(colour, 1, Qt.PenStyle.DashLine))
+        painter.save()
+        # A dark under-stroke preserves the vector outline over white roads,
+        # yellow fields, and other high-contrast raster detail.
+        painter.setPen(QPen(QColor(0, 0, 0, 190), 5, Qt.PenStyle.DashLine))
         # Below a few pixels the square is a smudge; the dot is the honest
         # rendering of "somewhere in here" at that zoom.
         if square.width() >= 6 and square.height() >= 6:
             painter.drawRect(square)
+            painter.setPen(QPen(colour, 3, Qt.PenStyle.DashLine))
+            painter.drawRect(square)
         centre = square.center()
+        painter.setPen(QPen(QColor(0, 0, 0, 210), 2))
+        painter.setBrush(QColor(0, 0, 0, 210))
+        painter.drawEllipse(centre, 9, 9)
         painter.setPen(QPen(colour, 2))
         painter.setBrush(colour)
-        painter.drawEllipse(centre, 4, 4)
+        painter.drawEllipse(centre, 6, 6)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawText(centre + QPointF(8, 4), f"{label}  {grid}")
+        font = QFont(painter.font())
+        font.setBold(True)
+        painter.setFont(font)
+        text = f"{label}  {grid}"
+        metrics = QFontMetricsF(font)
+        bounds = metrics.boundingRect(text).adjusted(-5, -3, 5, 3)
+        bounds.moveTopLeft(centre + QPointF(10, -bounds.height() / 2))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 185))
+        painter.drawRoundedRect(bounds, 4, 4)
+        painter.setPen(QPen(QColor("#ffffff"), 1))
+        painter.drawText(
+            bounds,
+            Qt.AlignmentFlag.AlignCenter,
+            text,
+        )
+        painter.restore()
+
+    def _draw_link(
+        self, painter: QPainter, callsign: str, grid: str, _activity: str
+    ) -> None:
+        """Draw an operator-visible path to a station with mail activity."""
+        if not self.own_grid:
+            return
+        try:
+            own_lat, own_lon = from_locator(self.own_grid)
+            other_lat, other_lon = from_locator(grid)
+        except ValueError:
+            return
+        start = self.to_screen(own_lat, own_lon)
+        end = self.to_screen(other_lat, other_lon)
+        distance, bearing = distance_bearing(
+            own_lat, own_lon, other_lat, other_lon
+        )
+        painter.save()
+        painter.setPen(QPen(QColor(0, 0, 0, 205), 7, Qt.PenStyle.SolidLine))
+        painter.drawLine(start, end)
+        colour = QColor("#ff7a00")
+        painter.setPen(QPen(colour, 4, Qt.PenStyle.SolidLine))
+        painter.drawLine(start, end)
+
+        # Arrowhead points toward the correspondent, not merely between the
+        # two markers, so the direction remains obvious in a busy map.
+        dx, dy = end.x() - start.x(), end.y() - start.y()
+        length = math.hypot(dx, dy)
+        if length > 20:
+            ux, uy = dx / length, dy / length
+            arrow = 13.0
+            wing = 7.0
+            base = end - QPointF(ux * 11, uy * 11)
+            left = (
+                base
+                - QPointF(ux * arrow, uy * arrow)
+                + QPointF(-uy * wing, ux * wing)
+            )
+            right = (
+                base
+                - QPointF(ux * arrow, uy * arrow)
+                - QPointF(-uy * wing, ux * wing)
+            )
+            painter.drawLine(base, left)
+            painter.drawLine(base, right)
+
+        text = f"{callsign}  {distance:.0f} km  {bearing:.0f}°"
+        font = QFont(painter.font())
+        font.setBold(True)
+        painter.setFont(font)
+        metrics = QFontMetricsF(font)
+        bounds = metrics.boundingRect(text).adjusted(-6, -4, 6, 4)
+        midpoint = (start + end) / 2
+        bounds.moveCenter(midpoint + QPointF(0, -12))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 205))
+        painter.drawRoundedRect(bounds, 5, 5)
+        painter.setPen(QPen(QColor("#ffffff"), 1))
+        painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
 
 
 class MapWindow(QDialog):
@@ -394,6 +504,7 @@ class MapWindow(QDialog):
 
         self.canvas = MapCanvas()
         self.canvas.picked.connect(self._picked)
+        self.canvas.station_picked.connect(self._compose_to)
         outer.addWidget(self.canvas, 1)
 
         controls = QHBoxLayout()
@@ -458,9 +569,41 @@ class MapWindow(QDialog):
     def refresh(self) -> None:
         self.canvas.own_grid = (self.runtime.config.station_grid or "").upper()
         self.canvas.stations = self.stations()
+        self.canvas.links = self.interactions()
         self.canvas.update()
         self._describe()
         self._describe_background()
+
+    def interactions(self) -> list[tuple[str, str, str]]:
+        """Mapped peers involved in sending, sent, or received mail."""
+        positions = {
+            callsign.upper(): grid
+            for callsign, grid, _age in self.canvas.stations
+        }
+        mine = (self.runtime.config.callsign or "").strip().upper()
+        activity: dict[str, str] = {}
+        for meta in self.runtime.mailstore.list():
+            folder = meta.get("folder")
+            status = meta.get("status")
+            callsign = ""
+            kind = ""
+            if folder == Folder.INBOX and status == Status.RECEIVED:
+                callsign = str(meta.get("source") or "").strip().upper()
+                kind = "received"
+            elif folder == Folder.SENT and status == Status.DELIVERED:
+                callsign = str(meta.get("final_dest") or "").strip().upper()
+                kind = "sent"
+            elif folder == Folder.OUTBOX and status == Status.SENDING:
+                callsign = str(meta.get("final_dest") or "").strip().upper()
+                kind = "sending"
+            if callsign and callsign != mine and callsign in positions:
+                # Active transfer wins if a peer also has older history.
+                if kind == "sending" or callsign not in activity:
+                    activity[callsign] = kind
+        return [
+            (callsign, positions[callsign], kind)
+            for callsign, kind in sorted(activity.items())
+        ]
 
     def _describe(self) -> None:
         own = self.canvas.own_grid
@@ -491,6 +634,11 @@ class MapWindow(QDialog):
         self.canvas.setCursor(
             Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor
         )
+
+    def _compose_to(self, callsign: str) -> None:
+        """Clicking a heard marker starts a message addressed to that peer."""
+        dialog = ComposeDialog(self.runtime, self, destination=callsign)
+        dialog.exec()
 
     def _picked(self, latitude: float, longitude: float) -> None:
         # Always store the finest locator: the beacon can carry all ten

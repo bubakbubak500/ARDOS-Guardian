@@ -403,6 +403,97 @@ def test_direct_route_qsy_happens_before_message_announcement(
         workers.close(wait=True)
 
 
+def test_no_cat_qsy_waits_for_operator_and_cancel_keeps_message_queued(
+    tmp_path, monkeypatch
+) -> None:
+    operations, workers, mailstore = _operations(
+        tmp_path,
+        rig_model=1,
+        manual_frequency_hz=145_500_000,
+        auto_qsy=True,
+    )
+    operations.config.radio_backend = "hamlib"
+    operations.routes.add(
+        Route("OK1AAA", "", freq_hz=145_550_000, mode="FM")
+    )
+    message = MailMessage(
+        msg_id=mailstore.next_id("OK7PS"),
+        source="OK7PS",
+        final_dest="OK1AAA",
+        created=time.time(),
+        folder=Folder.OUTBOX,
+        status=Status.QUEUED,
+    )
+    mailstore.add(message)
+    operations.audio_transport = SimpleNamespace()
+    announced: list[str] = []
+    monkeypatch.setattr(operations.config, "save", lambda *a, **k: None)
+    monkeypatch.setattr(
+        operations.net,
+        "send_message",
+        lambda **kwargs: announced.append(kwargs["final_dest"]),
+    )
+    prompts: list[tuple[str, int, str]] = []
+    operations.confirm_manual_qsy = lambda call, freq, mode: (
+        prompts.append((call, freq, mode)) or False
+    )
+    try:
+        assert not operations.send_queued(message.msg_id)
+        assert prompts == [("OK1AAA", 145_550_000, "FM")]
+        assert announced == []
+        assert mailstore.get(message.msg_id).status == Status.QUEUED
+        assert operations.current_frequency() == 145_500_000
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_confirmed_no_cat_qsy_updates_the_reported_dial_before_sending(
+    tmp_path, monkeypatch
+) -> None:
+    operations, workers, mailstore = _operations(
+        tmp_path,
+        rig_model=1,
+        manual_frequency_hz=145_500_000,
+        auto_qsy=True,
+    )
+    operations.config.radio_backend = "hamlib"
+    operations.routes.add(
+        Route("OK1AAA", "", freq_hz=145_550_000, mode="FM")
+    )
+    message = MailMessage(
+        msg_id=mailstore.next_id("OK7PS"),
+        source="OK7PS",
+        final_dest="OK1AAA",
+        created=time.time(),
+        folder=Folder.OUTBOX,
+        status=Status.QUEUED,
+    )
+    mailstore.add(message)
+    operations.audio_transport = SimpleNamespace()
+    monkeypatch.setattr(operations.config, "save", lambda *a, **k: None)
+    announced: list[tuple[str, int | None]] = []
+    monkeypatch.setattr(
+        operations.net,
+        "send_message",
+        lambda **kwargs: announced.append(
+            (kwargs["final_dest"], operations.current_frequency())
+        ),
+    )
+    operations.confirm_manual_qsy = lambda *_args: True
+    try:
+        assert operations.send_queued(message.msg_id)
+        assert announced == [("OK1AAA", 145_550_000)]
+        assert operations.config.manual_frequency_hz == 145_550_000
+        assert operations._qsy_previous is None, "a no-CAT dial cannot auto-restore"
+        assert operations.alert_sweep_channels() == []
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
 class _FakeVara:
     """Records the command lines Guardian sends to VARA."""
 

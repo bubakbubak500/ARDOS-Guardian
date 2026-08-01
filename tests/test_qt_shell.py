@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from guardian.qt.runtime import ShellRuntime
 from guardian.services import MailboxSnapshot
@@ -37,6 +37,12 @@ def test_shell_has_native_menu_minimum_size_and_snapshot_content(tmp_path) -> No
             window.spectrum_window.windowFlags()
             & Qt.WindowType.WindowStaysOnTopHint
         )
+        window.show_map()
+        assert window.map_window.parent() is None
+        assert not (
+            window.map_window.windowFlags()
+            & Qt.WindowType.WindowStaysOnTopHint
+        )
         assert window.minimumWidth() == 1180
         assert window.minimumHeight() == 720
         assert [action.text() for action in window.menuBar().actions()] == [
@@ -67,6 +73,39 @@ def test_theme_preference_is_persisted(tmp_path) -> None:
         assert settings.value("ui/theme") == "dark"
         assert window.theme_controller.tokens is DARK_TOKENS
         assert application.styleSheet()
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_no_cat_header_shows_manual_frequency_and_qsy_defaults_to_cancel(
+    tmp_path, monkeypatch
+) -> None:
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-no-cat.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    runtime.config.radio_backend = "hamlib"
+    runtime.config.rig_model = 1
+    runtime.config.manual_frequency_hz = 145_500_000
+    window = GuardianMainWindow(runtime, settings)
+    asked: list[tuple[str, object]] = []
+
+    def question(*args):
+        asked.append((args[2], args[-1]))
+        return QMessageBox.StandardButton.Cancel
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(question))
+    try:
+        window._apply_snapshot(runtime.snapshots.read())
+        assert not window.manual_frequency_row.isHidden()
+        assert window.manual_frequency.value() == 145_500_000
+        assert not window._confirm_manual_qsy("OK2IPW", 145_550_000, "FM")
+        assert "OK2IPW" in asked[0][0]
+        assert "145.5500 MHz" in asked[0][0]
+        assert asked[0][1] == QMessageBox.StandardButton.Cancel
     finally:
         window.close()
         runtime.close()

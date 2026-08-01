@@ -54,6 +54,7 @@ class ComposeDialog(QDialog):
         parent=None,
         *,
         reply_to: MailMessage | None = None,
+        destination: str = "",
     ) -> None:
         super().__init__(parent)
         self.runtime = runtime
@@ -129,6 +130,8 @@ class ComposeDialog(QDialog):
         self._render_template()
         self.subject = self.field_widgets["subject"]
         self.body = self.field_widgets["body"]
+        if destination:
+            self.destination.setText(destination.strip().upper())
         if reply_to is not None:
             self.destination.setText(reply_to.source)
             subject = self.field_widgets["subject"]
@@ -703,12 +706,19 @@ class MailWorkspace(QWidget):
     def send_selected(self) -> None:
         if self.selected_id is None:
             return
-        if not self.runtime.operations.send_queued(self.selected_id):
+        # `send_queued()` can also return False because an operator cancelled
+        # a required manual no-CAT QSY. Do not misreport that deliberate safety
+        # stop as a missing control channel.
+        if self.runtime.operations.audio_transport is None:
             QMessageBox.information(
                 self,
                 tr("mail.send_queued"),
                 tr("mail.send_requires_control"),
             )
+            return
+        if not self.runtime.operations.send_queued(self.selected_id):
+            self.runtime.refresh()
+            self.refresh()
             return
         self.runtime.refresh()
         self.refresh()

@@ -1,6 +1,6 @@
 # Guardian (ARDOS) — Project Status & Plan
 
-_Last updated: 2026-07-31_
+_Last updated: 2026-08-01_
 
 A resumable snapshot: what Guardian is, what's built, what's verified, the key
 decisions and why, and what comes next. Read this first when picking the project
@@ -658,6 +658,42 @@ figure — the column says *(est.)*, and shows `-` until the floor has settled.
 A `Heard on` column records the CAT frequency at reception
 (`Orchestrator.channel_frequency`), which after a QSY or a sweep says which
 channel the contact was on.
+
+## Map operations and safe no-CAT tuning (0.6.46)
+
+The first map-background field capture exposed that the original one-pixel
+locator vectors and four-pixel dots disappeared into pale roads and fields.
+Both own and heard stations now have a dark contrast under-stroke, three-pixel
+locator outlines, larger dots, and bold labels on a translucent dark plate.
+
+The map is now part of the mail workflow rather than a passive picture:
+
+- Sent, currently sending, and received mail is matched to positioned heard
+  stations. Each correspondent gets an orange directional line from this
+  station, an arrowhead, and a label with great-circle distance and true
+  azimuth.
+- Clicking a heard station opens the ordinary compose dialog with its callsign
+  preselected. Position-picking mode still owns the click while enabled.
+- The map is created without a Qt owner. On Windows, an owned top-level dialog
+  is forced above its owner; the independent map can now move behind or in
+  front like the spectrum window. It is still closed with the main shell.
+
+Hamlib Dummy is PTT wiring, not CAT telemetry. Guardian now skips its simulated
+frequency/mode/S-meter getters and exposes **Current radio frequency** in the
+station-context header. That operator-entered value is persisted and used for
+beacons/heard-channel reporting. If a direct route requires a different
+frequency, Guardian stops before the first announcement and tells the operator
+exactly where to tune. **OK** records the new physical dial value and permits
+the send; **Cancel** keeps the mail queued and transmits nothing. Automatic
+alert sweeps are suppressed for no-CAT, because issuing `F` commands to the
+Dummy model changes only the simulator and would put every supposed channel on
+the same real frequency.
+
+Software verification: 289 tests pass, including pixel-level contrast,
+station hit testing, mail-link selection, compose prefill, independent map
+ownership, a no-CAT poll that sends only `t` (never `f/m/l`), and both QSY
+branches proving Cancel emits no announcement while OK updates the dial before
+the announcement.
 
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,

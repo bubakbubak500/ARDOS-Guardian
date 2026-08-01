@@ -25,6 +25,10 @@ def make_driver(cfg) -> RadioDriver:
             int(getattr(cfg, "rig_model", 0) or 0) != DUMMY_MODEL
             and (getattr(cfg, "ptt_type", "RIG") or "RIG").upper() == "RIG"
         )
+        driver.no_cat = int(getattr(cfg, "rig_model", 0) or 0) == DUMMY_MODEL
+        driver.manual_frequency_hz = int(
+            getattr(cfg, "manual_frequency_hz", 0) or 0
+        )
         return driver
     if backend == "vox":
         return VoxRadio(cfg.cat_port, ptt_line=cfg.ptt_line)

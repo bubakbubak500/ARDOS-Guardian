@@ -27,10 +27,12 @@ from ..assets import get_ico_path
 from ..i18n import dual, tr
 from ..routing import read_csv, write_csv
 from ..routing.csv_io import TEMPLATE_ROWS
+from ..radio.presets import DUMMY_MODEL
 from ..services import ApplicationSnapshot
 from .alerts import AlertBanner
 from .diagnostics_dialog import DiagnosticsDialog
 from .help_dialog import HelpDialog
+from .inputs import FrequencySpinBox
 from .log_workspace import LogWorkspace
 from .mail_workspace import MailWorkspace
 from .network_workspace import NetworkWorkspace
@@ -87,6 +89,7 @@ class GuardianMainWindow(QMainWindow):
         super().__init__()
         self.runtime = runtime
         self.settings = settings
+        self.runtime.operations.confirm_manual_qsy = self._confirm_manual_qsy
         self.theme_controller = ThemeController(settings, self)
         # On Windows an owned top-level window is forced above its owner.
         # Keep the spectrum independent so either window can receive focus.
@@ -284,6 +287,23 @@ class GuardianMainWindow(QMainWindow):
         context_layout.addWidget(section)
         context_layout.addWidget(self.context_value)
         context_layout.addWidget(self.context_detail)
+        self.manual_frequency_row = QWidget()
+        manual_frequency_layout = QHBoxLayout(self.manual_frequency_row)
+        manual_frequency_layout.setContentsMargins(0, 0, 0, 0)
+        manual_frequency_layout.setSpacing(8)
+        self.manual_frequency_label = QLabel(tr("shell.manual_frequency"))
+        self.manual_frequency = FrequencySpinBox()
+        self.manual_frequency.setValue(
+            int(self.runtime.config.manual_frequency_hz or 0)
+        )
+        self.manual_frequency.setKeyboardTracking(False)
+        self.manual_frequency.editingFinished.connect(
+            self._manual_frequency_changed
+        )
+        manual_frequency_layout.addWidget(self.manual_frequency_label)
+        manual_frequency_layout.addWidget(self.manual_frequency)
+        manual_frequency_layout.addStretch()
+        context_layout.addWidget(self.manual_frequency_row)
         context_layout.addWidget(self.context_activity)
         context_layout.addStretch()
         layout.addWidget(context, 1)
@@ -477,6 +497,13 @@ class GuardianMainWindow(QMainWindow):
     def _apply_snapshot(self, snapshot: ApplicationSnapshot) -> None:
         self.alert_banner.show_latest(self.runtime.operations.alerts)
         config = self.runtime.config
+        no_cat = (
+            config.radio_backend == "hamlib"
+            and int(config.rig_model or 0) == DUMMY_MODEL
+        )
+        self.manual_frequency_row.setVisible(no_cat)
+        if no_cat and not self.manual_frequency.hasFocus():
+            self.manual_frequency.setValue(int(config.manual_frequency_hz or 0))
         payload = (
             "VARA P2P"
             if config.payload_backend == "vara_p2p"
@@ -730,10 +757,41 @@ class GuardianMainWindow(QMainWindow):
     def show_map(self) -> None:
         """Open the station map, refreshed by the ordinary UI poll."""
         if getattr(self, "map_window", None) is None:
-            self.map_window = MapWindow(self.runtime, self)
+            # An owned top-level window is forced above its owner on Windows.
+            # The map is an independent operating view, like the spectrum.
+            self.map_window = MapWindow(self.runtime)
         self.map_window.show()
         self.map_window.raise_()
         self.map_window.activateWindow()
+
+    def _manual_frequency_changed(self) -> None:
+        self.runtime.operations.set_manual_frequency(
+            self.manual_frequency.value()
+        )
+
+    def _confirm_manual_qsy(
+        self, callsign: str, frequency_hz: int, mode: str
+    ) -> bool:
+        current = int(self.runtime.config.manual_frequency_hz or 0)
+        answer = QMessageBox.question(
+            self,
+            tr("shell.manual_qsy_title"),
+            tr(
+                "shell.manual_qsy",
+                callsign=callsign,
+                frequency=f"{frequency_hz / 1_000_000:.4f} MHz",
+                mode=mode or "—",
+                current=(
+                    f"{current / 1_000_000:.4f} MHz"
+                    if current
+                    else tr("shell.manual_frequency_unknown")
+                ),
+            ),
+            QMessageBox.StandardButton.Ok
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Ok
 
     def _show_diagnostics(self) -> None:
         self.runtime.drain_workers()
@@ -898,4 +956,7 @@ class GuardianMainWindow(QMainWindow):
         self.settings.setValue("ui/main_geometry", self.saveGeometry())
         self.settings.sync()
         self.spectrum_window.shutdown()
+        map_window = getattr(self, "map_window", None)
+        if map_window is not None:
+            map_window.close()
         super().closeEvent(event)

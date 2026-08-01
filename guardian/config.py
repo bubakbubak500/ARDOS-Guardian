@@ -72,6 +72,11 @@ class StationConfig:
     # without this the COM port was simply never touched.
     ptt_type: str = "RIG"         # "RIG" | "RTS" | "DTR"
 
+    # A Hamlib Dummy / no-CAT radio cannot report where its dial is. Keep the
+    # operator-entered channel as explicit station state instead of accepting
+    # the dummy backend's simulated value as if it came from real hardware.
+    manual_frequency_hz: int = 0
+
     # Let Guardian key the radio (via its own driver/rigctld) on VARA's
     # "PTT ON"/"PTT OFF" command-channel signals, so VARA never needs the COM
     # port. Generic across CI-V / RTS / DTR rigs — set VARA's own PTT to None.

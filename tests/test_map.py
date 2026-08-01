@@ -4,6 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QPointF
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
 from guardian.qt.map_tiles import CUZK_ZTM, TILE_PIXELS, TileCache, tile_for
@@ -188,3 +189,30 @@ def test_the_tile_url_is_the_service_we_verified() -> None:
     assert CUZK_ZTM.tile_url(10, 553, 346).endswith("/tile/10/346/553")
     assert "cuzk" in CUZK_ZTM.url
     assert "ČÚZK" in CUZK_ZTM.attribution
+
+
+def test_station_markers_have_a_thick_contrast_ring_and_are_clickable() -> None:
+    canvas = _canvas()
+    canvas.set_source(None)
+    canvas.own_grid = "JO70FB28MC"
+    canvas.stations = [("OK2IPW", "JO70FB29MC", 0.0)]
+    canvas.look_at(*from_locator("JO70FB28MC"), 0.08)
+
+    pixmap = QPixmap(canvas.size())
+    canvas.render(pixmap)
+    image = pixmap.toImage()
+    own = canvas.to_screen(*from_locator(canvas.own_grid))
+    colours = [
+        image.pixelColor(round(own.x()) + x, round(own.y()) + y)
+        for x in range(-9, 10)
+        for y in range(-9, 10)
+    ]
+    assert any(colour.name() == "#1683ff" for colour in colours)
+    assert any(
+        max(colour.red(), colour.green(), colour.blue()) < 12
+        for colour in colours
+    ), "dark under-stroke keeps marker visible on tiles"
+
+    peer = canvas.to_screen(*from_locator("JO70FB29MC"))
+    assert canvas.station_at(peer) == "OK2IPW"
+    assert canvas.station_at(peer + QPointF(40, 40)) == ""

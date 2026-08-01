@@ -482,6 +482,72 @@ def test_the_map_places_stations_that_beacon_a_position() -> None:
         runtime.close()
 
 
+def test_map_links_only_correspondents_with_mail_history(tmp_path) -> None:
+    _application()
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.mailstore = MessageStore(tmp_path / "map-mail")
+    runtime.config.map_background = False
+    runtime.config.callsign = "OK7PS"
+    runtime.config.station_grid = "JO70FB28MC"
+    now = time.monotonic()
+    runtime.heard.record("OK2IPW", now, grid="JN89HE", frame="BEACON")
+    runtime.heard.record("OK1AAA", now, grid="JO80AB", frame="BEACON")
+    runtime.heard.record("OK1IDLE", now, grid="JN88EE", frame="BEACON")
+    runtime.mailstore.add(MailMessage(
+        msg_id=runtime.mailstore.next_id("OK7PS"),
+        source="OK7PS", final_dest="OK2IPW", created=time.time(),
+        folder=Folder.SENT, status=Status.DELIVERED,
+    ))
+    runtime.mailstore.add(MailMessage(
+        msg_id=runtime.mailstore.next_id("OK1AAA"),
+        source="OK1AAA", final_dest="OK7PS", created=time.time(),
+        folder=Folder.INBOX, status=Status.RECEIVED,
+    ))
+    window = MapWindow(runtime)
+    try:
+        links = {
+            call: (grid, activity)
+            for call, grid, activity in window.interactions()
+        }
+        assert links == {
+            "OK1AAA": ("JO80AB", "received"),
+            "OK2IPW": ("JN89HE", "sent"),
+        }
+        assert "OK1IDLE" not in links
+        window.refresh()
+        assert window.canvas.links == window.interactions()
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_clicking_a_mapped_station_prefills_a_new_message(monkeypatch) -> None:
+    _application()
+    import guardian.qt.map_window as map_module
+
+    runtime = ShellRuntime()
+    runtime.config.map_background = False
+    opened: list[tuple[str, str]] = []
+
+    class Dialog:
+        def __init__(self, _runtime, _parent, *, destination=""):
+            opened.append(("destination", destination))
+
+        def exec(self):
+            opened.append(("exec", ""))
+
+    monkeypatch.setattr(map_module, "ComposeDialog", Dialog)
+    window = map_module.MapWindow(runtime)
+    try:
+        window._compose_to("OK2IPW")
+        assert opened == [("destination", "OK2IPW"), ("exec", "")]
+    finally:
+        window.close()
+        runtime.close()
+
+
 def test_picking_on_the_map_stores_the_finest_locator() -> None:
     # A coarse square can be derived from a fine one, never the other way
     # round, so what gets stored is all ten characters.

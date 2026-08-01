@@ -35,6 +35,8 @@ class RadioDriver:
     # whether the transmitter came up, and the PTT test must not present that
     # as confirmation.
     reports_ptt = False
+    # True when the driver keys a radio but cannot read or change its dial.
+    no_cat = False
 
     def open(self) -> None:
         """Establish the connection (open port / connect to rigctld)."""

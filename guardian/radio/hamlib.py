@@ -37,6 +37,8 @@ class HamlibRadio(RadioDriver):
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
         self._rx_buffer = bytearray()
+        self.no_cat = False
+        self.manual_frequency_hz = 0
 
     @property
     def is_open(self) -> bool:
@@ -134,10 +136,16 @@ class HamlibRadio(RadioDriver):
         st = RadioState(connected=True)
         try:
             with self._lock:
-                freq = self._command("f")
-                mode = self._command("m", reply_lines=2)
+                # Hamlib's Dummy model is useful for RTS/DTR PTT, but its CAT
+                # getters are simulated. Asking it for a frequency would make
+                # a made-up value look like real telemetry. Only PTT is useful
+                # on this path; the dial value is entered by the operator.
+                freq = [] if self.no_cat else self._command("f")
+                mode = [] if self.no_cat else self._command("m", reply_lines=2)
                 ptt = self._command("t")
-                sig = self._command("l STRENGTH")
+                sig = [] if self.no_cat else self._command("l STRENGTH")
+            if self.no_cat:
+                st.frequency_hz = self.manual_frequency_hz or None
             if freq and freq[0].lstrip("-").isdigit():
                 st.frequency_hz = int(freq[0])
             if mode:

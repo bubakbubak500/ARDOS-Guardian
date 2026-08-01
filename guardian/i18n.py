@@ -106,6 +106,20 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "shell.disconnect_vara": ("Disconnect VARA", "Odpojit VARA"),
     "shell.start_control": ("Start control", "Spustit řízení"),
     "shell.stop_control": ("Stop control", "Zastavit řízení"),
+    "shell.manual_frequency": (
+        "Current radio frequency",
+        "Aktuální kmitočet rádia",
+    ),
+    "shell.manual_frequency_unknown": ("not entered", "nezadaný"),
+    "shell.manual_qsy_title": ("Manual radio tuning", "Ruční přeladění rádia"),
+    "shell.manual_qsy": (
+        "Guardian cannot tune this no-CAT radio. To send to {callsign}, tune "
+        "the radio from {current} to {frequency} ({mode}). Press OK only after "
+        "the radio is tuned; Cancel leaves the message unsent.",
+        "Guardian toto rádio bez CAT nedokáže přeladit. Pro odeslání stanici "
+        "{callsign} přelaďte rádio z {current} na {frequency} ({mode}). OK "
+        "stiskněte až po přeladění; Zrušit ponechá zprávu neodeslanou.",
+    ),
     "metric.inbox": ("Inbox", "Doručené"),
     "metric.unread": ("Unread", "Nepřečtené"),
     "metric.outbox": ("Outbox", "K odeslání"),
@@ -372,11 +386,12 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "map.menu": ("Station map…", "Mapa stanic…"),
     "map.intro": (
         "Stations appear here once they beacon a position. Drag to pan, wheel "
-        "to zoom. Set your own position by picking it on the map or by typing "
-        "the locator.",
+        "to zoom, or click a station to write it a message. Set your own "
+        "position by picking it on the map or by typing the locator.",
         "Stanice se zde objeví, jakmile odvysílají polohu v majáku. Tažením "
-        "posunete, kolečkem přiblížíte. Vlastní polohu zadáte klepnutím do "
-        "mapy nebo napsáním lokátoru.",
+        "posunete, kolečkem přiblížíte a klepnutím na stanici jí napíšete "
+        "zprávu. Vlastní polohu zadáte klepnutím do mapy nebo napsáním "
+        "lokátoru.",
     ),
     "map.pick": ("Pick my position", "Určit mou polohu"),
     "map.locator": ("Locator", "Lokátor"),

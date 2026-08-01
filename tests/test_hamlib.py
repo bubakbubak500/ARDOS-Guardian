@@ -33,6 +33,21 @@ def test_hamlib_consumes_complete_multiline_mode_reply() -> None:
     assert sock.sent == [b"f\n", b"m\n", b"t\n", b"l STRENGTH\n"]
 
 
+def test_no_cat_poll_uses_operator_frequency_and_never_reads_dummy_cat() -> None:
+    radio = HamlibRadio()
+    radio.no_cat = True
+    radio.manual_frequency_hz = 145_500_000
+    sock = ChunkedSocket([b"0\n"])
+    radio._sock = sock
+
+    state = radio.get_state()
+
+    assert state.connected
+    assert state.frequency_hz == 145_500_000
+    assert state.mode is None and state.signal is None
+    assert sock.sent == [b"t\n"], "dummy f/m/l values are not hardware telemetry"
+
+
 def test_hamlib_line_reader_preserves_partial_and_following_lines() -> None:
     radio = HamlibRadio()
     sock = ChunkedSocket([b"F", b"M\n150", b"00\n"])
