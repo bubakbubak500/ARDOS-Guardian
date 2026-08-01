@@ -67,6 +67,10 @@ class FrameType(IntEnum):
     CANCEL = 9        # cancel/retract message
     BEACON = 10       # presence beacon ("I am here") — lets neighbours hear us
     ALERT = 11        # net-wide broadcast, flooded hop to hop (see alerts.py)
+    # Opt-in payload-channel negotiation. Older releases reject these unknown
+    # frame types and therefore never leave their current single channel.
+    WORKING_OFFER = 12  # propose a separately configured payload channel
+    WORKING_ACK = 13    # peer independently configured the same channel
 
     @property
     def label(self) -> str:

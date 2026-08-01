@@ -290,17 +290,26 @@ def help_topics() -> list[HelpTopic]:
             """
             <h2>Routes and network state</h2>
             <p>A manual route maps a final destination to a preferred next hop,
-            optional backup, working frequency and mode. Add or replace saves
+            optional backup, control/direct-QSY frequency and mode. Add or replace saves
             the normalized uppercase route. Remove selected deletes only that
             destination entry.</p>
             <p>When automatic route discovery is enabled and no manual or
             learned route exists, ARDOS broadcasts ROUTE_QUERY and evaluates
-            ROUTE_OFFER responses. Heard stations appear only after a real
-            control frame; age is measured from the latest frame.</p>
+            ROUTE_OFFER responses. A direct destination wins; relay candidates
+            with a measurement are ranked by S/N, then freshness and callsign.
+            Heard stations appear only after a real control frame; age is
+            measured from the latest frame.</p>
             <p>TTL limits relay depth. Auto relay allows this station to hold
             and forward traffic for another destination. Auto QSY uses the
             route frequency before VARA P2P and restores the prior frequency
             afterwards when supported by the radio driver.</p>
+            <p>Separate VARA working channels are an advanced opt-in under
+            Network behavior and require real CAT on both peers. Until enabled,
+            their route fields are hidden and single-channel operation is
+            unchanged. When enabled, both peers must independently configure
+            the same working frequency and mode. They agree it on the calling
+            channel, move only for the VARA payload, then return before control
+            confirmations resume. A missing or mismatched channel is refused.</p>
             <p>Last S/N is estimated from the received audio against the idle
             noise floor, not reported by the modem, and stays empty until that
             floor has settled. Heard on is the frequency this radio was tuned
@@ -320,16 +329,24 @@ def help_topics() -> list[HelpTopic]:
             """
             <h2>Trasy a stav sítě</h2>
             <p>Ruční trasa přiřazuje konečnému cíli upřednostněný další bod,
-            volitelnou zálohu, pracovní frekvenci a režim. Přidání nebo nahrazení
+            volitelnou zálohu, řídicí frekvenci či frekvenci přímého QSY a režim. Přidání nebo nahrazení
             uloží trasu normalizovanou na velká písmena. Odstranění smaže jen
             záznam vybraného cíle.</p>
             <p>Je-li zapnuto automatické hledání a neexistuje ruční ani naučená
             trasa, ARDOS vyšle ROUTE_QUERY a vyhodnotí odpovědi ROUTE_OFFER.
-            Slyšené stanice se zobrazí jen po skutečném řídicím rámci; stáří se
-            počítá od posledního rámce.</p>
+            Přímý cíl má přednost; relay kandidáti s měřením se řadí podle S/N,
+            potom podle čerstvosti a volací značky. Slyšené stanice se zobrazí
+            jen po skutečném řídicím rámci; stáří se počítá od posledního rámce.</p>
             <p>TTL omezuje hloubku předávání. Automatický relay dovolí stanici
             podržet a předat provoz jinému cíli. Auto QSY před VARA P2P použije
             frekvenci z trasy a po skončení podle možností rádia obnoví původní.</p>
+            <p>Samostatné pracovní kanály VARA jsou pokročilá volitelná funkce
+            v Chování sítě a na obou stranách vyžadují skutečné CAT. Dokud ji
+            nezapnete, její pole tras jsou skrytá a jednokanálový provoz se
+            nemění. Po zapnutí musí obě stanice nezávisle nastavit shodnou
+            pracovní frekvenci a režim. Shodu potvrdí na volacím kanálu, pouze
+            na payload se přeladí a před řídicím potvrzením se vrátí. Chybějící
+            nebo neshodný kanál je odmítnut.</p>
             <p>Poslední S/N je odhad z přijatého zvuku proti klidové úrovni
             šumu, nikoli údaj z modemu, a zůstává prázdné, dokud se úroveň
             neustálí. Slyšeno na je kmitočet, na kterém bylo rádio naladěno při

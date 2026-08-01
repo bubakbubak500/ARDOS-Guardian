@@ -107,7 +107,8 @@ watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
 **Built but not yet flown:** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
-goes back) and the production channel scanner (0.6.47). **Confirmed working in the field:** the heard-stations S/N estimate
+goes back), the production channel scanner (0.6.47), and the optional
+calling/working-channel split (0.6.48). **Confirmed working in the field:** the heard-stations S/N estimate
 and channel column (operator-confirmed 2026-08-01); Test PTT and no-CAT keying via Hamlib
 dummy + serial PTT (AIOC, 0.6.38, 2026-07-30); audio devices on Windows on
 ARM (0.6.42) and the AFSK control channel there, handshake both ways at
@@ -352,8 +353,10 @@ are considered sufficient for operations.
   `freq_hz`/`mode`. In **VARA P2P** (only), before connecting to the next hop
   Guardian tunes the radio to that station's frequency and restores afterwards
   (`auto_qsy`, Hamlib only). Ignored for Winlink (operator tunes) and VOX
-  (can't tune). Caveat: assumes the peer is on its home freq and control bursts
-  share the current channel — a full calling/working-frequency split is future.
+  (can't tune). This original single-channel path remains the default. Since
+  0.6.48 an explicit Network-behavior option can instead negotiate a separate
+  payload channel between two CAT-controlled peers; its route UI is otherwise
+  hidden.
 
 ## Net alerts (0.6.34 — confirmed on air 2026-07-30, HF and FM)
 Tested end to end with OK2IPW on **both** control modems: MFSK-16 on HF and
@@ -653,6 +656,26 @@ the announcement.
 - **Software verification:** 299 tests pass. Remaining P0 evidence is explicitly
   operational: scanner CAT movement/hold/home return, alert timing and copy count
   on air, and classification of the next naturally occurring rejected frame.
+
+## P1 network operation (0.6.48)
+
+- **Default preserved:** `separate_working_channels` defaults to false. No new
+  negotiation frame is emitted, existing `freq_hz`/`mode`, direct pre-announce
+  QSY, scanner and alert sweep retain their 0.6.47 behaviour.
+- **Opt-in calling/working split:** enabling the advanced option reveals
+  independent VARA working frequency/mode fields. `WORKING_OFFER` and
+  `WORKING_ACK` carry a compact exact channel identity while both radios remain
+  on calling. Only matching local configurations proceed to `START_VARA`, then
+  both CAT radios move for the payload and restore before control confirmation.
+  No-CAT, mismatched modes/channels, QSY failures and older peers fail without
+  an automatic retune.
+- **Signal-aware discovery:** every `ROUTE_OFFER` snapshots its own S/N, receive
+  time and frequency. Direct reach still wins; relay candidates rank by a
+  present measurement, strongest S/N, freshness and callsign. Manual and
+  learned paths retain their precedence.
+- **Software verification:** 314 tests pass. The separate-channel path still
+  needs an on-air pass with two CAT radios, including mismatch, successful
+  payload and restoration after success and failure.
 
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,

@@ -21,11 +21,19 @@ __all__ = ["PayloadBackend", "VaraP2PBackend", "make_backend"]
 
 
 def make_backend(name: str = "vara_p2p", *, vara=None, on_log=None, on_qsy=None,
-                 on_unqsy=None, on_acquire=None, on_release=None, **_legacy):
+                 on_receive_qsy=None, on_unqsy=None, on_acquire=None,
+                 on_release=None, **_legacy):
     """Build a payload backend by config name.
 
     `name` and any surplus keyword arguments (an operator `prompt` callback,
     for one) are accepted and ignored so an older config still loads.
     """
-    return VaraP2PBackend(vara=vara, on_log=on_log, on_qsy=on_qsy, on_unqsy=on_unqsy,
-                          on_acquire=on_acquire, on_release=on_release)
+    return VaraP2PBackend(
+        vara=vara,
+        on_log=on_log,
+        on_qsy=on_qsy,
+        on_receive_qsy=on_receive_qsy,
+        on_unqsy=on_unqsy,
+        on_acquire=on_acquire,
+        on_release=on_release,
+    )

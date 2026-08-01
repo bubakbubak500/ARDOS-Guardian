@@ -313,6 +313,52 @@ def test_network_tables_are_read_only_row_selectors() -> None:
         runtime.close()
 
 
+def test_working_channel_route_ui_is_hidden_until_network_opt_in() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.config.separate_working_channels = False
+    workspace = NetworkWorkspace(runtime)
+    try:
+        assert workspace.routes_table.isColumnHidden(5)
+        assert workspace.routes_table.isColumnHidden(6)
+        assert workspace.working_frequency.isHidden()
+        assert workspace.working_mode.isHidden()
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_opt_in_working_channel_ui_persists_separate_route_fields() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.config.separate_working_channels = True
+    runtime.routes = RouteTable()
+    workspace = NetworkWorkspace(runtime)
+    try:
+        assert not workspace.routes_table.isColumnHidden(5)
+        assert not workspace.routes_table.isColumnHidden(6)
+        assert not workspace.working_frequency.isHidden()
+        assert not workspace.working_mode.isHidden()
+
+        workspace.destination.setText("OK1AAA")
+        workspace.frequency.setValue(145_500_000)
+        workspace.working_frequency.setValue(145_550_000)
+        workspace.working_mode.setCurrentIndex(
+            workspace.working_mode.findData("FM")
+        )
+        workspace._save_route()
+
+        route = runtime.routes.lookup("OK1AAA")
+        assert route is not None
+        assert route.freq_hz == 145_500_000
+        assert route.working_freq_hz == 145_550_000
+        assert route.working_mode == "FM"
+        assert workspace.routes_table.item(0, 5).text() == "145.5500 MHz"
+    finally:
+        workspace.close()
+        runtime.close()
+
+
 def test_selecting_a_route_loads_it_into_the_form_for_editing() -> None:
     _application()
     runtime = ShellRuntime()

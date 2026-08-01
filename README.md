@@ -34,7 +34,7 @@ manifest, and asks again before launching it.
 - Station profile (JSON) — load/save, lives in `%APPDATA%\Guardian\config.json`
 - **Control-burst protocol**: binary `ARD` frames with CRC-16, all frame types
   (`HAVE_MSG`, `ACK_HAVE`, `BUSY`, `ROUTE_QUERY`, `ROUTE_OFFER`, `START_VARA`,
-  `RECEIVED`, `DELIVERED`, `CANCEL`), priorities and flags. Message composer
+  `WORKING_OFFER`, `WORKING_ACK`, `RECEIVED`, `DELIVERED`, `CANCEL`), priorities and flags. Message composer
   builds and self-tests real bursts.
 - **Configurable route table** (destination/group → preferred + backup hop)
 - **Radio drivers**: Hamlib/rigctld TCP backend (freq/mode/PTT/S-meter) and a
@@ -55,6 +55,12 @@ manifest, and asks again before launching it.
   the previous frequency is restored after the session. A Hamlib Dummy / no-CAT
   radio instead shows an operator-maintained current frequency and requires an
   explicit tune-and-confirm step; Cancel leaves the message unsent.
+- **Optional calling/working split**: disabled by default, so existing
+  single-channel stations behave exactly as before. Enabling it under Network
+  behavior reveals separate VARA working-channel fields. Two CAT-controlled
+  peers prove that they configured the same channel, finish `START_VARA` on
+  the calling channel, move only for the payload and return before control
+  confirmations resume. A mismatch or an older peer never triggers QSY.
 - **Operational station map**: cached ČÚZK topographic tiles, high-contrast
   own/heard markers, mail-activity links labelled with distance and azimuth,
   and one-click message composition addressed to a heard station. The map is
@@ -96,7 +102,9 @@ See [Product description](PRODUCT.md) for intended use and boundaries and
 Heard-stations registry (built from every received control frame),
 **ROUTE_QUERY/ROUTE_OFFER** route discovery when no manual route exists,
 learned-path memory and **multi-hop auto-relay** (TTL + loop avoidance) are
-built and tested. The production **channel scanner** has explicit Network UI,
+built and tested. Dynamic relay offers are ranked by direct reach, measured
+S/N, freshness and a deterministic callsign tie-break. The production
+**channel scanner** has explicit Network UI,
 dwell + activity/S-meter hold, session/payload safety pauses and worker-based
 CAT tuning. (*) Its software paths are tested; physical-radio scanning remains
 to be field-verified.

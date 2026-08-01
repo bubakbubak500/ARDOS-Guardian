@@ -45,7 +45,7 @@ class NetworkWorkspace(QWidget):
     def _routes_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        self.routes_table = RowTable(0, 5)
+        self.routes_table = RowTable(0, 7)
         self.routes_table.setHorizontalHeaderLabels(
             [
                 tr("network.destination"),
@@ -53,6 +53,8 @@ class NetworkWorkspace(QWidget):
                 tr("network.backup"),
                 tr("network.frequency"),
                 tr("network.mode"),
+                tr("network.working_frequency"),
+                tr("network.working_mode"),
             ]
         )
         # Selecting a row loads it into the form below, so an existing entry
@@ -61,7 +63,7 @@ class NetworkWorkspace(QWidget):
         route_header = self.routes_table.horizontalHeader()
         route_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         route_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in (2, 3, 4):
+        for column in (2, 3, 4, 5, 6):
             route_header.setSectionResizeMode(
                 column,
                 QHeaderView.ResizeMode.ResizeToContents,
@@ -75,11 +77,19 @@ class NetworkWorkspace(QWidget):
         self.mode = QComboBox()
         self.mode.addItem(tr("network.mode_vara_fm"), "FM")
         self.mode.addItem(tr("network.mode_vara_hf"), "USB")
+        self.working_frequency = FrequencySpinBox()
+        self.working_mode = QComboBox()
+        self.working_mode.addItem(tr("network.mode_vara_fm"), "FM")
+        self.working_mode.addItem(tr("network.mode_vara_hf"), "USB")
         form.addRow(tr("network.destination"), self.destination)
         form.addRow(tr("network.preferred"), self.preferred)
         form.addRow(tr("network.backup"), self.backup)
         form.addRow(tr("network.frequency"), self.frequency)
         form.addRow(tr("network.mode"), self.mode)
+        self.working_frequency_label = QLabel(tr("network.working_frequency"))
+        self.working_mode_label = QLabel(tr("network.working_mode"))
+        form.addRow(self.working_frequency_label, self.working_frequency)
+        form.addRow(self.working_mode_label, self.working_mode)
         layout.addLayout(form)
         actions = QHBoxLayout()
         add = QPushButton(tr("network.add"))
@@ -91,7 +101,20 @@ class NetworkWorkspace(QWidget):
         actions.addStretch()
         actions.addWidget(remove)
         layout.addLayout(actions)
+        self._sync_working_channel_visibility()
         return page
+
+    def _sync_working_channel_visibility(self) -> None:
+        visible = bool(self.runtime.config.separate_working_channels)
+        for column in (5, 6):
+            self.routes_table.setColumnHidden(column, not visible)
+        for widget in (
+            self.working_frequency_label,
+            self.working_frequency,
+            self.working_mode_label,
+            self.working_mode,
+        ):
+            widget.setVisible(visible)
 
     def _heard_page(self) -> QWidget:
         page = QWidget()
@@ -189,6 +212,10 @@ class NetworkWorkspace(QWidget):
         index = self.mode.findData(route.mode)
         if index >= 0:
             self.mode.setCurrentIndex(index)
+        self.working_frequency.setValue(route.working_freq_hz)
+        index = self.working_mode.findData(route.working_mode)
+        if index >= 0:
+            self.working_mode.setCurrentIndex(index)
 
     def _clear_form(self) -> None:
         self.destination.clear()
@@ -196,6 +223,8 @@ class NetworkWorkspace(QWidget):
         self.backup.clear()
         self.frequency.setValue(0)
         self.mode.setCurrentIndex(0)
+        self.working_frequency.setValue(0)
+        self.working_mode.setCurrentIndex(0)
 
     def _save_route(self) -> None:
         destination = self.destination.text().strip().upper()
@@ -214,6 +243,8 @@ class NetworkWorkspace(QWidget):
                 self.backup.text(),
                 self.frequency.value(),
                 self.mode.currentData(),
+                self.working_frequency.value(),
+                self.working_mode.currentData(),
             )
         )
         self.runtime.routes.save()
@@ -249,6 +280,7 @@ class NetworkWorkspace(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
+        self._sync_working_channel_visibility()
         routes = self.runtime.routes.routes
         self.routes_table.setRowCount(len(routes))
         for row, route in enumerate(routes):
@@ -262,6 +294,12 @@ class NetworkWorkspace(QWidget):
                     else ""
                 ),
                 route.mode,
+                (
+                    self.working_frequency.textFromValue(route.working_freq_hz)
+                    if route.working_freq_hz
+                    else ""
+                ),
+                route.working_mode,
             )
             for column, value in enumerate(values):
                 self.routes_table.setItem(row, column, QTableWidgetItem(value))

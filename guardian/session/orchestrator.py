@@ -68,6 +68,38 @@ ALERT_RELAY_MIN = 1.0
 ALERT_RELAY_MAX = 5.0
 ALERT_MEMORY = 3600.0
 MAX_ANNOUNCE = 3
+MAX_WORKING_OFFERS = 3
+
+_BASE36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_WORKING_MODE_CODES = {
+    "FM": "F",
+    "NFM": "N",
+    "PKTFM": "P",
+    "DATAFM": "D",
+    "USB": "U",
+    "LSB": "L",
+    "PKTUSB": "B",
+    "PKTLSB": "C",
+    "DATAUSB": "X",
+    "DATALSB": "Y",
+}
+
+
+def working_channel_token(frequency_hz: int, mode: str) -> str:
+    """Compact, exact identity used to prove both peers configured one channel."""
+    value = max(0, int(frequency_hz))
+    digits = "0"
+    if value:
+        encoded: list[str] = []
+        while value:
+            value, remainder = divmod(value, 36)
+            encoded.append(_BASE36[remainder])
+        digits = "".join(reversed(encoded))
+    normal_mode = (mode or "").strip().upper().replace("-", "")
+    code = _WORKING_MODE_CODES.get(normal_mode)
+    if code is None:
+        raise ValueError(f"unsupported working mode {mode!r}")
+    return digits + code
 # Everything a beacon spends that is not the locator, for a five-character
 # callsign: 12 header + 2 CRC + three length prefixes + "OK7PS".
 _BEACON_OVERHEAD = 22
@@ -125,6 +157,7 @@ class SessionState(Enum):
     # initiator
     ROUTE_DISCOVERY = "discovery"  # no route known; ROUTE_QUERY out, gathering offers
     ANNOUNCING = "announcing"      # sent HAVE_MSG, waiting for ACK
+    NEGOTIATING_WORKING = "working"  # both peers prove the same opt-in payload channel
     WAITING_BUSY = "waiting"       # peer was busy, will retry
     STARTING_VARA = "starting"     # got ACK, starting VARA session
     TRANSFERRING = "transferring"  # payload in flight over VARA
@@ -162,6 +195,11 @@ class Message:
     t_state: float = 0.0           # monotonic time the state was entered
     error: str = ""
     offers: list = field(default_factory=list)   # ROUTE_OFFER sources during discovery
+    # Exact measurements attached to each received offer: S/N, timestamp and
+    # receiving frequency. This must not be reconstructed from a later frame.
+    offer_quality: dict[str, tuple[float | None, float, int | None]] = field(
+        default_factory=dict
+    )
     relayed: bool = False          # this station has already relayed this msg
     # The hop is a blind guess: discovery ran and nobody offered, so we are
     # trying the destination directly. Blind announces get one repeat fewer —
@@ -170,6 +208,9 @@ class Message:
     # Slow-keying PTT tail (ms) negotiated for the VARA payload phase: the
     # larger of what we and the peer asked for in HAVE_MSG/ACK_HAVE.
     ptt_delay_ms: int = 0
+    working_frequency_hz: int = 0
+    working_mode: str = ""
+    working_token: str = ""
 
 
 class Orchestrator:
@@ -233,6 +274,13 @@ class Orchestrator:
         # position off the air. Asked at beacon time so a change in Settings
         # needs no rebuild.
         self.position: Callable[[], str] | None = None
+        # Optional two-channel negotiation. The offer callback returns the
+        # locally configured payload channel for a peer. The accept callback
+        # returns that local channel only when its compact token matches.
+        self.working_channel_offer: Callable[[str], tuple[int, str] | None] | None = None
+        self.working_channel_accept: Callable[
+            [str, str], tuple[int, str] | None
+        ] | None = None
         # Broadcast alerts: what we have already seen (so a flood converges)
         # and what is waiting to go out (repeats and jittered relays).
         self.on_alert: Callable[[ControlFrame, bool], None] | None = None
@@ -487,6 +535,17 @@ class Orchestrator:
                 self.notify_payload_delivered(msg.msg_id, ok=True)
             elif msg.state is SessionState.ROUTE_DISCOVERY and elapsed > DISCOVERY_TIMEOUT:
                 self._discovery_timeout(msg)
+            elif (
+                msg.state is SessionState.NEGOTIATING_WORKING
+                and elapsed > self.start_timeout / MAX_WORKING_OFFERS
+            ):
+                if msg.attempts < MAX_WORKING_OFFERS:
+                    msg.attempts += 1
+                    msg.t_state = now
+                    self._send_working(FrameType.WORKING_OFFER, msg)
+                    self._emit(msg, "retrying working-channel agreement")
+                else:
+                    self._fail(msg, "working-channel agreement timed out")
             elif msg.state is SessionState.CONFIRMED and elapsed > CONFIRM_TIMEOUT:
                 # The next hop has the message; only the end-to-end receipt is
                 # missing. Close the session rather than count it as an active
@@ -503,7 +562,17 @@ class Orchestrator:
             hop = self._best_offer(msg)
             msg.next_hop = hop
             self._begin_announce(msg)
-            self._emit(msg, f"discovered route via {hop} (offers: {','.join(msg.offers)})")
+            quality = msg.offer_quality.get(hop)
+            signal = (
+                f", S/N {quality[0]:+.1f} dB"
+                if quality is not None and quality[0] is not None
+                else ", S/N unavailable"
+            )
+            self._emit(
+                msg,
+                f"discovered route via {hop}{signal} "
+                f"(offers: {','.join(msg.offers)})",
+            )
         else:
             # Nobody offered — try the destination directly as a last resort.
             # The query already went unanswered, so this is a blind guess and
@@ -514,15 +583,26 @@ class Orchestrator:
             self._emit(msg, f"no offers — trying {msg.final_dest} directly")
 
     def _best_offer(self, msg: Message) -> str:
-        # Prefer the destination itself (direct reach); else the most recently
-        # heard offerer.
+        # A directly heard destination avoids a relay. For relay offers, prefer
+        # an actual S/N measurement from this ROUTE_OFFER, then the strongest
+        # signal, freshness and finally callsign for deterministic ties.
         if msg.final_dest in msg.offers:
             return msg.final_dest
-        ranked = sorted(
-            msg.offers,
-            key=lambda c: (self.heard.get(c).last_heard if self.heard.get(c) else 0),
-            reverse=True,
-        )
+        def rank(callsign: str) -> tuple[int, float, float, str]:
+            quality = msg.offer_quality.get(callsign)
+            if quality is not None:
+                snr, heard_at, _frequency = quality
+            else:
+                station = self.heard.get(callsign)
+                snr, heard_at = None, station.last_heard if station else 0.0
+            return (
+                0 if snr is not None else 1,
+                -(snr if snr is not None else 0.0),
+                -heard_at,
+                callsign,
+            )
+
+        ranked = sorted(msg.offers, key=rank)
         return ranked[0]
 
     # ------------------------------------------------------------------ #
@@ -562,6 +642,8 @@ class Orchestrator:
             FrameType.BUSY: self._rx_busy,
             FrameType.ROUTE_QUERY: self._rx_route_query,
             FrameType.ROUTE_OFFER: self._rx_route_offer,
+            FrameType.WORKING_OFFER: self._rx_working_offer,
+            FrameType.WORKING_ACK: self._rx_working_ack,
             FrameType.START_VARA: self._rx_start,
             FrameType.RECEIVED: self._rx_received,
             FrameType.DELIVERED: self._rx_delivered,
@@ -699,6 +781,11 @@ class Orchestrator:
             if f.source not in msg.offers:
                 msg.offers.append(f.source)
                 self._emit(msg, f"route offer from {f.source}")
+            msg.offer_quality[f.source] = (
+                getattr(self.transport, "last_frame_snr", None),
+                self._now,
+                self._current_frequency(),
+            )
         # Note that this station can reach the destination.
         self.heard.record(f.source, self._now, frame="ROUTE_OFFER", reaches=f.destination)
 
@@ -744,14 +831,98 @@ class Orchestrator:
             # The responder answered with the negotiated hold-off (the larger
             # of the two requests); adopt it for our own keying too.
             msg.ptt_delay_ms = max(msg.ptt_delay_ms, decode_ptt_delay(f.flags))
-            self._enter(msg, SessionState.STARTING_VARA)
-            self._send(FrameType.START_VARA, msg)
-            self._emit(msg, f"{f.source} ready — starting VARA")
-            self._enter(msg, SessionState.TRANSFERRING)
-            if self.begin_transfer:
-                self.begin_transfer(msg)
-            if self.payload is not None:
-                self.payload.start_send(msg, lambda ok, m=msg: self._on_send_done(m, ok))
+            channel = None
+            if self.working_channel_offer is not None:
+                try:
+                    channel = self.working_channel_offer(msg.next_hop)
+                except Exception as exc:  # noqa: BLE001 - fail the session, not control RX
+                    self._send(FrameType.CANCEL, msg)
+                    self._fail(msg, f"working channel unavailable: {exc}")
+                    return
+            if channel is not None:
+                try:
+                    token = working_channel_token(*channel)
+                except ValueError:
+                    self._fail(msg, "working channel has an unsupported mode")
+                    return
+                msg.working_frequency_hz, msg.working_mode = channel
+                msg.working_token = token
+                msg.attempts = 1
+                self._enter(msg, SessionState.NEGOTIATING_WORKING)
+                self._send_working(FrameType.WORKING_OFFER, msg)
+                self._emit(
+                    msg,
+                    f"proposing payload channel {channel[0] / 1_000_000:.4f} MHz "
+                    f"{channel[1]}",
+                )
+                return
+            self._start_vara(msg, f.source)
+
+    def _start_vara(self, msg: Message, peer: str) -> None:
+        self._enter(msg, SessionState.STARTING_VARA)
+        self._send(FrameType.START_VARA, msg)
+        self._emit(msg, f"{peer} ready — starting VARA")
+        self._enter(msg, SessionState.TRANSFERRING)
+        if self.begin_transfer:
+            self.begin_transfer(msg)
+        if self.payload is not None:
+            self.payload.start_send(msg, lambda ok, m=msg: self._on_send_done(m, ok))
+
+    def _send_working(self, kind: FrameType, msg: Message) -> None:
+        self.transport.send(
+            ControlFrame(
+                type=kind,
+                source=self.callsign,
+                destination=msg.working_token,
+                next_hop=msg.next_hop if kind is FrameType.WORKING_OFFER else msg.source,
+                message_id=msg.msg_id,
+                priority=msg.priority,
+                ttl=msg.ttl,
+                flags=msg.flags,
+            )
+        )
+
+    def _rx_working_offer(self, f: ControlFrame) -> None:
+        if f.next_hop != self.callsign:
+            return
+        msg = self.sessions.get(f.message_id)
+        if not (
+            msg
+            and msg.direction == "in"
+            and msg.state is SessionState.ACKED
+            and msg.source == f.source
+        ):
+            return
+        channel = None
+        if self.working_channel_accept is not None:
+            try:
+                channel = self.working_channel_accept(f.source, f.destination)
+            except Exception:  # noqa: BLE001
+                channel = None
+        if channel is None:
+            self._send(FrameType.CANCEL, msg)
+            self._fail(msg, "working channel is disabled or does not match")
+            return
+        msg.working_frequency_hz, msg.working_mode = channel
+        msg.working_token = f.destination
+        # A repeated valid offer means our previous ACK was lost; keep the
+        # responder alive while the initiator retries within its bounded window.
+        msg.t_state = self._now
+        self._send_working(FrameType.WORKING_ACK, msg)
+        self._emit(msg, "working channel agreed; waiting for START_VARA")
+
+    def _rx_working_ack(self, f: ControlFrame) -> None:
+        msg = self.sessions.get(f.message_id)
+        if not (
+            msg
+            and msg.direction == "out"
+            and msg.state is SessionState.NEGOTIATING_WORKING
+            and f.source == msg.next_hop
+            and f.next_hop == self.callsign
+            and f.destination == msg.working_token
+        ):
+            return
+        self._start_vara(msg, f.source)
 
     def _rx_busy(self, f: ControlFrame) -> None:
         msg = self._mine(f, "out")

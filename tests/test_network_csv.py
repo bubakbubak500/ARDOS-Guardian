@@ -15,13 +15,16 @@ def test_export_is_semicolon_separated_utf8_with_bom(tmp_path: Path) -> None:
 
     assert raw.startswith(b"\xef\xbb\xbf")
     text = raw.decode("utf-8-sig")
-    assert text.splitlines()[0] == "destination;preferred;backup;frequency_mhz;mode"
-    assert "OK2IPW;;;145.2375;FM" in text
+    assert text.splitlines()[0] == (
+        "destination;preferred;backup;frequency_mhz;mode;"
+        "working_frequency_mhz;working_mode"
+    )
+    assert "OK2IPW;;;145.2375;FM;;" in text
 
 
 def test_round_trip_preserves_every_field(tmp_path: Path) -> None:
     routes = [
-        Route("OK2IPW", "", "", 145_237_500, "FM"),
+        Route("OK2IPW", "", "", 145_237_500, "FM", 145_550_000, "FM"),
         Route("OK1AAA", "OK2IPW", "ANY", 145_300_000, "FM"),
         Route("OSTRAVA", "OK1AAA", "", 0, ""),
     ]
@@ -30,11 +33,19 @@ def test_round_trip_preserves_every_field(tmp_path: Path) -> None:
     report = read_csv(path)
 
     assert report.problems == []
-    assert [(r.destination, r.preferred, r.backup, r.freq_hz, r.mode)
+    assert [(
+        r.destination,
+        r.preferred,
+        r.backup,
+        r.freq_hz,
+        r.mode,
+        r.working_freq_hz,
+        r.working_mode,
+    )
             for r in report.routes] == [
-        ("OK2IPW", "", "", 145_237_500, "FM"),
-        ("OK1AAA", "OK2IPW", "ANY", 145_300_000, "FM"),
-        ("OSTRAVA", "OK1AAA", "", 0, ""),
+        ("OK2IPW", "", "", 145_237_500, "FM", 145_550_000, "FM"),
+        ("OK1AAA", "OK2IPW", "ANY", 145_300_000, "FM", 0, ""),
+        ("OSTRAVA", "OK1AAA", "", 0, "", 0, ""),
     ]
 
 

@@ -245,11 +245,11 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     assert received.payload_bytes == b"bundle"
 
 
-def test_vara_qsy_happens_before_handoff_and_restore_after_release() -> None:
+def test_vara_qsy_happens_after_control_handoff_and_restores_before_release() -> None:
     events = []
     backend = VaraP2PBackend(
         FakeVara(),
-        on_qsy=lambda callsign: events.append(("qsy", callsign)),
+        on_qsy=lambda message: events.append(("qsy", message.next_hop)),
         on_acquire=lambda: events.append("acquire"),
         on_release=lambda: events.append("release"),
         on_unqsy=lambda: events.append("restore"),
@@ -260,8 +260,53 @@ def test_vara_qsy_happens_before_handoff_and_restore_after_release() -> None:
         lambda ok: events.append(("done", ok)),
     )
 
-    assert events[:2] == [("qsy", "OK1AAA"), "acquire"]
-    assert events[-3:] == ["release", "restore", ("done", True)]
+    assert events[:2] == ["acquire", ("qsy", "OK1AAA")]
+    assert events[-3:] == ["restore", "release", ("done", True)]
+
+
+def test_vara_receive_uses_the_agreed_channel_and_returns_before_confirmation() -> None:
+    events = []
+    incoming = FakeVara(encode_envelope(141, b"x"))
+    backend = VaraP2PBackend(
+        incoming,
+        on_receive_qsy=lambda message: events.append(("qsy", message.source)),
+        on_acquire=lambda: events.append("acquire"),
+        on_unqsy=lambda: events.append("restore"),
+        on_release=lambda: events.append("release"),
+    )
+
+    backend._receive(
+        Message(141, "OK7PS", "OK1AAA", "OK1AAA"),
+        lambda ok: events.append(("done", ok)),
+    )
+
+    assert events == [
+        "acquire",
+        ("qsy", "OK7PS"),
+        "restore",
+        "release",
+        ("done", True),
+    ]
+
+
+def test_failed_working_qsy_never_starts_vara() -> None:
+    vara = FakeVara()
+    events = []
+    backend = VaraP2PBackend(
+        vara,
+        on_qsy=lambda _message: False,
+        on_acquire=lambda: events.append("acquire"),
+        on_unqsy=lambda: events.append("restore"),
+        on_release=lambda: events.append("release"),
+    )
+
+    backend._send(
+        Message(142, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x"),
+        lambda ok: events.append(("done", ok)),
+    )
+
+    assert events == ["acquire", "restore", "release", ("done", False)]
+    assert not [command for command in vara.commands if command[0] == "connect"]
 
 
 def test_vara_send_keeps_codec_until_rf_transfer_finishes() -> None:

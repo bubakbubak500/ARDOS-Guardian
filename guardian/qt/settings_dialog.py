@@ -705,6 +705,18 @@ class SettingsDialog(QDialog):
             )
         )
         self.auto_qsy.setChecked(self.config.auto_qsy)
+        self.separate_working_channels = QCheckBox(
+            tr("settings.separate_working_channels")
+        )
+        self.separate_working_channels.setChecked(
+            self.config.separate_working_channels
+        )
+        self.separate_working_channels.setToolTip(
+            tr("settings.separate_working_channels_hint")
+        )
+        self.separate_working_channels.toggled.connect(
+            lambda enabled: self.auto_qsy.setChecked(True) if enabled else None
+        )
         self.beacon_enabled = QCheckBox(
             dual("Transmit presence beacons", "Vysílat majáky přítomnosti")
         )
@@ -716,6 +728,7 @@ class SettingsDialog(QDialog):
         form.addRow(self.auto_relay)
         form.addRow(self.auto_deliver)
         form.addRow(self.auto_qsy)
+        form.addRow(self.separate_working_channels)
         form.addRow(self.beacon_enabled)
         form.addRow(dual("Beacon interval (seconds)", "Interval majáku (sekundy)"), self.beacon_interval)
         form.addRow(dual("Channel scan dwell (seconds)", "Doba poslechu kanálu (sekundy)"), self.scan_dwell)
@@ -829,6 +842,7 @@ class SettingsDialog(QDialog):
         cfg.auto_relay = self.auto_relay.isChecked()
         cfg.auto_deliver = self.auto_deliver.isChecked()
         cfg.auto_qsy = self.auto_qsy.isChecked()
+        cfg.separate_working_channels = self.separate_working_channels.isChecked()
         cfg.beacon_enabled = self.beacon_enabled.isChecked()
         cfg.beacon_interval = float(self.beacon_interval.value())
         cfg.scan_dwell = float(self.scan_dwell.value())

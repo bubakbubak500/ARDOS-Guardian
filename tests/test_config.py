@@ -12,6 +12,7 @@ def test_config_round_trip_and_ignores_unknown_keys(tmp_path: Path) -> None:
         vara_mode="HF",
         vara_hf_cmd_port=8400,
         vara_hf_data_port=8401,
+        separate_working_channels=True,
     )
 
     original.save(path)
@@ -24,6 +25,7 @@ def test_config_round_trip_and_ignores_unknown_keys(tmp_path: Path) -> None:
     assert loaded.callsign == "ok7ps"
     assert loaded.operator_name == "Operator"
     assert loaded.vara_hf_cmd_port == 8400
+    assert loaded.separate_working_channels is True
     assert not hasattr(loaded, "future_setting")
 
 
@@ -35,6 +37,7 @@ def test_invalid_config_falls_back_to_defaults(tmp_path: Path) -> None:
 
     assert loaded.callsign == "NOCALL"
     assert loaded.radio_backend == "none"
+    assert loaded.separate_working_channels is False
 
 
 def test_vara_mode_remembers_independent_ports_and_selects_modem() -> None:

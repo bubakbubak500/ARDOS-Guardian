@@ -23,16 +23,14 @@ volbu další práce je rozhodující tento backlog.
 
 ## P1 — síťový provoz
 
-1. **Ověřit multi-hop relay na reálném tříuzlovém spoji.** Řetězec A→B→C,
-   TTL a loop avoidance jsou otestované deterministicky, ale chybí zaznamenaný
-   tříuzlový on-air test.
-2. **Oddělit calling a working frequency.** Současný auto-QSY předpokládá, že
-   control burst a pracovní spoj sdílejí aktuální/domovský kanál protistanice.
-   Navrhnout a implementovat samostatný volací a pracovní kanál.
-3. **Použít kvalitu signálu pro řazení relay kandidátů.** Evidence a zobrazení
-   S/N i kanálu fungují a jsou provozně ověřené. Otevřená je pouze routingová
-   politika: zapojit S/N do hodnocení kandidátů místo samotné čerstvosti záznamu.
-4. **Ověřit workflow z v0.6.46 v terénu.** Zaznamenat operátorský test mapových
+1. **Volitelné oddělení calling/working kanálu — vydáno v 0.6.48, čeká na
+   provozní ověření.** Výchozí jednokanálové chování zůstává beze změny a nová
+   pole UI jsou skrytá do zapnutí v Chování sítě. Dvě CAT stanice před QSY
+   ověří shodu pracovního kanálu, přeladí se až po `START_VARA` a před řídicím
+   potvrzením se vrátí. Neshoda, No-CAT a starší protistanice nemohou vyvolat
+   automatické QSY. **Ověřit na reálném rádiu:** shodu, odmítnutí neshody,
+   payload na pracovním kanálu a návrat obou stran po úspěchu i chybě.
+2. **Ověřit workflow z v0.6.46 v terénu.** Zaznamenat operátorský test mapových
    vazeb a bezpečného ručního No-CAT QSY na skutečném rádiu; automatické a
    softwarové testy jsou hotové.
 
@@ -64,6 +62,11 @@ volbu další práce je rozhodující tento backlog.
 
 ## Potvrzeně dokončeno 2026-08-01
 
+- Multi-hop relay byl provozně ověřen na reálném tříuzlovém spoji A→B→C;
+  předání zprávy, snižování TTL a ochrana proti relay smyčce fungují.
+- Relay kandidáti z `ROUTE_OFFER` se řadí podle přímého dosahu, přesného S/N
+  konkrétní nabídky, čerstvosti a deterministicky podle volací značky; ruční a
+  naučené trasy zůstávají nad dynamickým hledáním.
 - Evidence a zobrazení odhadovaného S/N a kanálu u slyšených stanic fungují v
   reálném provozu.
 - Čistá instalace na Windows bez Pythonu, upgrade-in-place a odinstalace byly

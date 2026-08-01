@@ -31,8 +31,12 @@ class Route:
     destination: str          # callsign or group name
     preferred: str            # next-hop callsign
     backup: str = ""          # backup next-hop ("" or "ANY")
-    freq_hz: int = 0          # optional working frequency for this station (VARA P2P QSY)
-    mode: str = ""            # optional mode at that frequency (FM/USB/...)
+    freq_hz: int = 0          # existing control/direct-QSY frequency
+    mode: str = ""            # mode at the existing control frequency
+    # Optional payload-only channel.  It is ignored unless the station enables
+    # separate working channels, so old route files retain their exact meaning.
+    working_freq_hz: int = 0
+    working_mode: str = ""
 
     def normalised(self) -> "Route":
         return Route(
@@ -41,6 +45,8 @@ class Route:
             backup=self.backup.strip().upper(),
             freq_hz=int(self.freq_hz or 0),
             mode=(self.mode or "").strip().upper(),
+            working_freq_hz=int(self.working_freq_hz or 0),
+            working_mode=(self.working_mode or "").strip().upper(),
         )
 
 
@@ -76,8 +82,16 @@ class RouteTable:
                 return r.freq_hz, r.mode
         return None
 
+    def working_for(self, callsign: str) -> tuple[int, str] | None:
+        """Return the opt-in payload channel configured for a direct peer."""
+        call = callsign.strip().upper()
+        for route in self._routes:
+            if route.destination == call and route.working_freq_hz:
+                return route.working_freq_hz, route.working_mode
+        return None
+
     def frequencies(self) -> list[tuple[int, str]]:
-        """Every distinct working frequency the table knows, in table order.
+        """Every distinct control/net frequency the table knows, in table order.
 
         The operator enters these per destination, but they are also the only
         record Guardian has of *where the net lives*: an alert sweep repeats a

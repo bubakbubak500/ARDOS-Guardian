@@ -19,7 +19,15 @@ from pathlib import Path
 
 from .route_table import Route
 
-COLUMNS = ("destination", "preferred", "backup", "frequency_mhz", "mode")
+COLUMNS = (
+    "destination",
+    "preferred",
+    "backup",
+    "frequency_mhz",
+    "mode",
+    "working_frequency_mhz",
+    "working_mode",
+)
 
 TEMPLATE_ROWS = (
     Route("OK2IPW", "", "", 145_237_500, "FM"),
@@ -55,6 +63,8 @@ def routes_to_csv(routes) -> str:
             route.backup,
             _format_mhz(route.freq_hz),
             route.mode,
+            _format_mhz(route.working_freq_hz),
+            route.working_mode,
         ])
     return buffer.getvalue()
 
@@ -127,6 +137,14 @@ def routes_from_csv(text: str) -> ImportReport:
                 f"{cell(row, 'frequency_mhz')!r}, imported without one"
             )
             freq_hz = 0
+        try:
+            working_freq_hz = _parse_mhz(cell(row, "working_frequency_mhz"))
+        except ValueError:
+            problems.append(
+                f"row {number}: {destination} has an unreadable working frequency "
+                f"{cell(row, 'working_frequency_mhz')!r}, imported without one"
+            )
+            working_freq_hz = 0
         routes.append(
             Route(
                 destination=destination,
@@ -134,6 +152,8 @@ def routes_from_csv(text: str) -> ImportReport:
                 backup=cell(row, "backup"),
                 freq_hz=freq_hz,
                 mode=cell(row, "mode"),
+                working_freq_hz=working_freq_hz,
+                working_mode=cell(row, "working_mode"),
             ).normalised()
         )
     return ImportReport(routes, problems)

@@ -732,6 +732,7 @@ class GuardianMainWindow(QMainWindow):
             applied_radio[0] = radio_now
 
             self.runtime.operations.configure_vara_host_ptt()
+            self.runtime.operations.apply_network_settings()
             self.theme_controller.set_preference(dialog.selected_theme)
             self._rebuild_translated_ui()
             self.runtime.refresh()

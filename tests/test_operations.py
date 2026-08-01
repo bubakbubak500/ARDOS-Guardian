@@ -23,7 +23,11 @@ from guardian.services import (
     WorkerPool,
 )
 from guardian.session import SessionState
-from guardian.session.orchestrator import ACK_TIMEOUT, START_TIMEOUT
+from guardian.session.orchestrator import (
+    ACK_TIMEOUT,
+    START_TIMEOUT,
+    working_channel_token,
+)
 
 
 def test_idle_operations_never_transmit_and_keep_mail_queued(tmp_path) -> None:
@@ -400,6 +404,152 @@ def test_direct_route_qsy_happens_before_message_announcement(
         assert operations._qsy_previous is None
     finally:
         operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_opt_in_working_channel_does_not_qsy_before_control_announcement(
+    tmp_path, monkeypatch
+) -> None:
+    config = StationConfig(
+        callsign="OK7PS",
+        radio_backend="hamlib",
+        rig_model=3073,
+        auto_qsy=True,
+        separate_working_channels=True,
+    )
+    workers = WorkerPool(max_workers=1)
+    mailstore = MessageStore(tmp_path / "mail-working")
+    message = MailMessage(
+        msg_id=mailstore.next_id(config.callsign),
+        source=config.callsign,
+        final_dest="OK1AAA",
+        created=time.time(),
+        folder=Folder.OUTBOX,
+        status=Status.QUEUED,
+    )
+    mailstore.add(message)
+    operations = Operations(
+        config,
+        EventBus(),
+        SnapshotStore(),
+        workers,
+        mailstore,
+        RouteTable(
+            [
+                Route(
+                    "OK1AAA",
+                    "",
+                    "",
+                    145_500_000,
+                    "FM",
+                    145_550_000,
+                    "FM",
+                )
+            ]
+        ),
+        HeardStations(),
+    )
+    operations.radio = _SweepRadio()
+    operations.audio_transport = SimpleNamespace(stop=lambda: None)
+    announced = []
+    monkeypatch.setattr(
+        operations.net,
+        "send_message",
+        lambda **kwargs: announced.append(kwargs["final_dest"]),
+    )
+    try:
+        assert operations.send_queued(message.msg_id)
+        assert announced == ["OK1AAA"]
+        assert operations.radio.commands == []
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_opt_in_payload_channel_is_matched_tuned_and_restored(
+    tmp_path, monkeypatch
+) -> None:
+    config = StationConfig(
+        callsign="OK7PS",
+        radio_backend="hamlib",
+        rig_model=3073,
+        auto_qsy=True,
+        separate_working_channels=True,
+        vara_mode="FM",
+    )
+    workers = WorkerPool(max_workers=1)
+    operations = Operations(
+        config,
+        EventBus(),
+        SnapshotStore(),
+        workers,
+        MessageStore(tmp_path / "mail-working-qsy"),
+        RouteTable(
+            [Route("OK1AAA", "", "", 145_500_000, "FM", 145_550_000, "FM")]
+        ),
+        HeardStations(),
+    )
+    operations.radio = _SweepRadio(145_500_000, "FM")
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda _seconds: None)
+    try:
+        channel = operations._working_channel_offer("OK1AAA")
+        assert channel == (145_550_000, "FM")
+        token = working_channel_token(*channel)
+        assert operations._working_channel_accept("OK1AAA", token) == channel
+        assert operations._working_channel_accept("OK1AAA", token + "X") is None
+
+        message = SimpleNamespace(
+            next_hop="OK1AAA",
+            source="OK1AAA",
+            working_frequency_hz=145_550_000,
+            working_mode="FM",
+        )
+        assert operations._payload_send_qsy(message)
+        assert operations.radio.commands[:2] == [
+            ("frequency", 145_550_000),
+            ("mode", "FM"),
+        ]
+        operations._payload_restore_calling()
+        assert operations.radio.commands[-2:] == [
+            ("frequency", 145_500_000),
+            ("mode", "FM"),
+        ]
+        assert operations._qsy_previous is None
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_separate_working_channel_refuses_no_cat_automation(tmp_path) -> None:
+    config = StationConfig(
+        callsign="OK7PS",
+        radio_backend="hamlib",
+        rig_model=1,
+        auto_qsy=True,
+        separate_working_channels=True,
+    )
+    workers = WorkerPool(max_workers=1)
+    operations = Operations(
+        config,
+        EventBus(),
+        SnapshotStore(),
+        workers,
+        MessageStore(tmp_path / "mail-working-nocat"),
+        RouteTable(
+            [Route("OK1AAA", "", "", 145_500_000, "FM", 145_550_000, "FM")]
+        ),
+        HeardStations(),
+    )
+    try:
+        try:
+            operations._working_channel_offer("OK1AAA")
+        except RuntimeError as exc:
+            assert "CAT" in str(exc)
+        else:
+            raise AssertionError("No-CAT working channel was accepted")
+    finally:
         operations.close()
         workers.close(wait=True)
 

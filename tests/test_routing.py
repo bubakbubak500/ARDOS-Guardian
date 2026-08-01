@@ -28,6 +28,20 @@ def test_route_table_round_trip_and_remove(tmp_path: Path) -> None:
     assert restored.lookup("OK1AAA") is None
 
 
+def test_separate_working_channel_is_independent_and_persistent(tmp_path: Path) -> None:
+    path = tmp_path / "routes.json"
+    table = RouteTable(
+        [Route("OK1AAA", "", "", 145_500_000, "FM", 145_550_000, "FM")]
+    )
+
+    table.save(path)
+    restored = RouteTable.load(path)
+
+    assert restored.freq_for("OK1AAA") == (145_500_000, "FM")
+    assert restored.working_for("OK1AAA") == (145_550_000, "FM")
+    assert restored.working_for("OK9ZZZ") is None
+
+
 def test_working_frequencies_are_listed_once_in_table_order() -> None:
     # The alert sweep tunes to these, so a frequency shared by three
     # destinations must not be keyed three times.

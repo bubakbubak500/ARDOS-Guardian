@@ -67,6 +67,22 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         dialog.close()
 
 
+def test_separate_working_channels_are_opt_in_and_enable_auto_qsy() -> None:
+    _application()
+    config = StationConfig(auto_qsy=False)
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        assert not dialog.separate_working_channels.isChecked()
+        dialog.separate_working_channels.setChecked(True)
+        assert dialog.auto_qsy.isChecked()
+        dialog.callsign.setText("OK7PS")
+        assert dialog.apply()
+        assert config.separate_working_channels is True
+        assert config.auto_qsy is True
+    finally:
+        dialog.close()
+
+
 def test_settings_radio_model_is_selected_by_name_not_typed_as_id() -> None:
     _application()
     config = StationConfig(

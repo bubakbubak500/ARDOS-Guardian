@@ -387,6 +387,11 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.mode_vara_fm": ("VARA FM (FM)", "VARA FM (FM)"),
     "network.mode_vara_hf": ("VARA HF (USB)", "VARA HF (USB)"),
     "network.mode": ("Mode", "Režim"),
+    "network.working_frequency": (
+        "VARA working frequency",
+        "Pracovní frekvence VARA",
+    ),
+    "network.working_mode": ("VARA working mode", "Pracovní režim VARA"),
     "network.add": ("Add or replace route", "Přidat nebo nahradit trasu"),
     "network.remove": ("Remove selected", "Odstranit vybranou"),
     "network.heard_hint": (
@@ -498,6 +503,18 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     ),
     "settings.vara": ("VARA & payload", "VARA a přenos"),
     "settings.network": ("Network behavior", "Chování sítě"),
+    "settings.separate_working_channels": (
+        "Use separate VARA working channels (advanced, CAT only)",
+        "Používat samostatné pracovní kanály VARA (pokročilé, pouze CAT)",
+    ),
+    "settings.separate_working_channels_hint": (
+        "Off by default. When enabled, extra working-channel fields appear in "
+        "Network routes. Both peers must configure the same channel; control "
+        "stays on the existing calling channel.",
+        "Ve výchozím stavu vypnuto. Po zapnutí se v trasách sítě zobrazí "
+        "další pole pracovního kanálu. Obě stanice musí nastavit stejný kanál; "
+        "řízení zůstává na stávajícím volacím kanálu.",
+    ),
     "settings.appearance": ("Appearance", "Vzhled"),
     "settings.language": ("Language", "Jazyk"),
     "language.english": ("English", "Angličtina"),

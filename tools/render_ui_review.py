@@ -21,6 +21,7 @@ from guardian.qt.readiness_dialog import ReadinessDialog
 from guardian.qt.runtime import ShellRuntime
 from guardian.qt.shell import GuardianMainWindow
 from guardian.qt.theme import ThemeController, ThemePreference
+from guardian.routing import Route
 
 
 def _save(widget, path: Path, application: QApplication) -> None:
@@ -58,6 +59,19 @@ def main() -> int:
     window.resize(1366, 768)
     window._show_workspace("network")
     _save(window, args.output / "dark-network-cs.png", application)
+
+    runtime.config.separate_working_channels = True
+    runtime.routes.add(
+        Route("OK2IPW", "", "", 145_500_000, "FM", 145_550_000, "FM")
+    )
+    working_window = GuardianMainWindow(runtime, settings)
+    working_window.resize(1366, 768)
+    working_window._show_workspace("network")
+    _save(
+        working_window,
+        args.output / "dark-network-working-cs.png",
+        application,
+    )
 
     theme = ThemeController(settings)
     compose = ComposeDialog(runtime)

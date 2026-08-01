@@ -158,6 +158,10 @@ class StationConfig:
     # control frame holds the scanner on a channel.
     scan_signal_threshold: int | None = None
     auto_qsy: bool = True      # VARA P2P: tune the radio to the station's freq before connecting
+    # Opt-in two-channel sessions.  False deliberately preserves the original
+    # single-channel handshake/QSY behaviour and keeps the extra route fields
+    # out of the production UI until the operator asks for them.
+    separate_working_channels: bool = False
 
     # Control burst behaviour
     default_ttl: int = 5

@@ -6,6 +6,7 @@ from guardian.session.orchestrator import (
     CONFIRM_TIMEOUT,
     TRANSFER_TIMEOUT,
     session_transfer_timeout_for,
+    working_channel_token,
 )
 
 
@@ -38,6 +39,136 @@ def test_direct_session_reaches_delivered_without_changing_payload_contract() ->
     assert message.state is SessionState.DELIVERED
     assert receiver.sessions[100].state is SessionState.DELIVERED
     assert sender.learned_paths["OK1AAA"] == "OK1AAA"
+
+
+def test_default_session_emits_no_working_channel_negotiation() -> None:
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    receiver = Orchestrator(
+        "OK1AAA", bus.endpoint("receiver"), auto_complete=True, auto_route=False
+    )
+    sent = _spy(sender)
+
+    message = sender.send_message(
+        "OK1AAA", "hello", msg_id=101, next_hop="OK1AAA"
+    )
+    _drain(bus, sender, receiver)
+
+    assert message.state is SessionState.DELIVERED
+    assert not [
+        frame
+        for frame in sent
+        if frame.type in (FrameType.WORKING_OFFER, FrameType.WORKING_ACK)
+    ]
+
+
+def test_opt_in_peers_agree_working_channel_before_starting_vara() -> None:
+    channel = (145_550_000, "FM")
+    token = working_channel_token(*channel)
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    receiver = Orchestrator(
+        "OK1AAA", bus.endpoint("receiver"), auto_complete=True, auto_route=False
+    )
+    sender.working_channel_offer = lambda peer: channel if peer == "OK1AAA" else None
+    receiver.working_channel_accept = (
+        lambda peer, offered: channel
+        if peer == "OK7PS" and offered == token
+        else None
+    )
+    sent = _spy(sender)
+
+    message = sender.send_message(
+        "OK1AAA", "hello", msg_id=102, next_hop="OK1AAA"
+    )
+    _drain(bus, sender, receiver)
+
+    assert message.state is SessionState.DELIVERED
+    assert (message.working_frequency_hz, message.working_mode) == channel
+    assert message.working_token == token
+    assert receiver.sessions[102].working_token == token
+    kinds = [frame.type for frame in sent]
+    assert kinds.index(FrameType.WORKING_OFFER) < kinds.index(FrameType.START_VARA)
+
+
+def test_mismatched_working_channels_cancel_without_starting_vara() -> None:
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    receiver = Orchestrator("OK1AAA", bus.endpoint("receiver"), auto_route=False)
+    sender.working_channel_offer = lambda _peer: (145_550_000, "FM")
+    receiver.working_channel_accept = lambda _peer, _token: None
+    sent = _spy(sender)
+
+    message = sender.send_message(
+        "OK1AAA", "hello", msg_id=103, next_hop="OK1AAA"
+    )
+    _drain(bus, sender, receiver)
+
+    assert message.state is SessionState.CANCELLED
+    assert receiver.sessions[103].state is SessionState.FAILED
+    assert FrameType.START_VARA not in [frame.type for frame in sent]
+
+
+def test_relay_offer_ranking_uses_signal_then_freshness_then_callsign() -> None:
+    station = Orchestrator("OK7PS", LoopbackBus().endpoint("a"), auto_route=True)
+    message = Message(
+        104,
+        "OK7PS",
+        "OK9ZZZ",
+        "",
+        offers=["OK1WEAK", "OK2STRONG", "OK3UNKNOWN"],
+        offer_quality={
+            "OK1WEAK": (2.0, 12.0, 145_500_000),
+            "OK2STRONG": (11.5, 10.0, 145_500_000),
+            "OK3UNKNOWN": (None, 14.0, 145_500_000),
+        },
+    )
+
+    assert station._best_offer(message) == "OK2STRONG"
+
+    message.offers = ["OK2BBB", "OK1AAA"]
+    message.offer_quality = {
+        "OK2BBB": (8.0, 20.0, 145_500_000),
+        "OK1AAA": (8.0, 20.0, 145_500_000),
+    }
+    assert station._best_offer(message) == "OK1AAA"
+
+
+def test_direct_destination_offer_still_beats_a_stronger_relay() -> None:
+    station = Orchestrator("OK7PS", LoopbackBus().endpoint("a"), auto_route=True)
+    message = Message(
+        105,
+        "OK7PS",
+        "OK9ZZZ",
+        "",
+        offers=["OK1RELAY", "OK9ZZZ"],
+        offer_quality={
+            "OK1RELAY": (18.0, 10.0, 145_500_000),
+            "OK9ZZZ": (-2.0, 10.0, 145_500_000),
+        },
+    )
+
+    assert station._best_offer(message) == "OK9ZZZ"
+
+
+def test_route_offer_captures_its_own_signal_and_channel_measurement() -> None:
+    station = Orchestrator("OK7PS", LoopbackBus().endpoint("a"), auto_route=True)
+    station.channel_frequency = lambda: 145_500_000
+    station.tick(25.0)
+    message = station.send_message("OK9ZZZ", "hello", msg_id=106)
+    station.transport.last_frame_snr = 7.25
+
+    station._on_frame(
+        ControlFrame(
+            FrameType.ROUTE_OFFER,
+            source="OK1AAA",
+            destination="OK9ZZZ",
+            next_hop="OK7PS",
+            message_id=106,
+        )
+    )
+
+    assert message.offer_quality["OK1AAA"] == (7.25, 25.0, 145_500_000)
 
 
 def test_session_and_payload_agree_on_the_envelope_floor() -> None:

@@ -39,6 +39,7 @@ from .services import (
     WorkerPool,
 )
 from .session import NullTransport, Orchestrator, SessionState
+from .session.orchestrator import working_channel_token
 from .vara import VaraClient
 
 
@@ -138,6 +139,7 @@ class Operations:
         self._last_radio_poll = 0.0
         self._stored_inbound: set[int] = set()
         self._qsy_previous: int | None = None
+        self._qsy_previous_mode: str = ""
         self._last_beacon = 0.0
         self._last_auto_deliver = 0.0
         # Sent once per run so a peer that stays heard is not hammered.
@@ -195,8 +197,20 @@ class Operations:
         net.channel_frequency = self.current_frequency
         net.ptt_delay_request = self._vara_keying_delay_request
         net.position = self.beacon_position
+        net.working_channel_offer = self._working_channel_offer
+        net.working_channel_accept = self._working_channel_accept
         self._scale_session_timeouts(net, transport)
         return net
+
+    def apply_network_settings(self) -> None:
+        """Apply saved routing/channel behaviour without restarting control RX."""
+        self.net.auto_route = self.config.auto_route
+        self.net.relay = self.config.auto_relay
+        self.net.working_channel_offer = self._working_channel_offer
+        self.net.working_channel_accept = self._working_channel_accept
+        # A backend already executing owns its own reference. Replacing this
+        # one therefore affects the next session without disrupting RF now.
+        self.net.payload = self._make_payload_backend()
 
     def beacon_position(self) -> str:
         """The locator our beacons carry, or "" to keep it off the air."""
@@ -762,10 +776,20 @@ class Operations:
             self.config.payload_backend,
             vara=self.vara,
             on_log=lambda value: self._log(value, source="payload"),
-            on_qsy=self._qsy_to,
-            # Keep the radio on the peer's channel until the control-layer
-            # RECEIVED/DELIVERED confirmation arrives.
-            on_unqsy=None,
+            on_qsy=self._payload_send_qsy,
+            on_receive_qsy=(
+                self._payload_receive_qsy
+                if self.config.separate_working_channels
+                else None
+            ),
+            # The legacy single-channel path stays tuned until its control
+            # confirmation. Opt-in working sessions restore both peers before
+            # control audio resumes and RECEIVED/DELIVERED is transmitted.
+            on_unqsy=(
+                self._payload_restore_calling
+                if self.config.separate_working_channels
+                else None
+            ),
             on_acquire=self._suspend_control,
             on_release=self._resume_control,
         )
@@ -1250,7 +1274,12 @@ class Operations:
         direct_route = route is not None and (
             not route.preferred or route.preferred == mail.final_dest.strip().upper()
         )
-        if direct_route and route.freq_hz and self.config.auto_qsy:
+        if (
+            direct_route
+            and route.freq_hz
+            and self.config.auto_qsy
+            and not self.config.separate_working_channels
+        ):
             if not self._qsy_to(mail.final_dest):
                 self._log(
                     dual(
@@ -1658,6 +1687,97 @@ class Operations:
             self._payload_active.clear()
             self.request_radio_poll(force=True)
 
+    def _working_channel_offer(self, callsign: str) -> tuple[int, str] | None:
+        """Return an opt-in payload channel, refusing unsafe automation."""
+        if not self.config.separate_working_channels:
+            return None
+        target = self.routes.working_for(callsign)
+        if target is None:
+            return None
+        if not self.config.auto_qsy:
+            raise RuntimeError("automatic QSY is disabled")
+        if self.config.radio_backend != "hamlib" or self.is_no_cat_radio():
+            raise RuntimeError("separate working channels require a real CAT radio")
+        frequency, mode = target
+        vara_mode = (self.config.vara_mode or "FM").strip().upper()
+        if vara_mode == "HF":
+            compatible = (mode or "").strip().upper().replace("-", "") in {
+                "USB", "LSB", "PKTUSB", "PKTLSB", "DATAUSB", "DATALSB"
+            }
+        else:
+            compatible = (mode or "").strip().upper().replace("-", "") in {
+                "FM", "NFM", "PKTFM", "DATAFM"
+            }
+        if not compatible:
+            raise RuntimeError(
+                f"working mode {mode or '?'} is incompatible with VARA {vara_mode}"
+            )
+        return int(frequency), (mode or "").strip().upper()
+
+    def _working_channel_accept(
+        self, callsign: str, token: str
+    ) -> tuple[int, str] | None:
+        """Accept only the exact payload channel independently configured here."""
+        try:
+            channel = self._working_channel_offer(callsign)
+        except RuntimeError as exc:
+            self._log(
+                dual(
+                    f"Working channel from {callsign} rejected: {exc}.",
+                    f"Pracovní kanál od {callsign} odmítnut: {exc}.",
+                ),
+                LogLevel.WARNING,
+                source="session",
+            )
+            return None
+        if channel is None:
+            return None
+        try:
+            matches = working_channel_token(*channel) == token
+        except ValueError:
+            matches = False
+        if not matches:
+            self._log(
+                dual(
+                    f"Working channel from {callsign} does not match this route.",
+                    f"Pracovní kanál od {callsign} neodpovídá místní trase.",
+                ),
+                LogLevel.WARNING,
+                source="session",
+            )
+            return None
+        return channel
+
+    def _payload_send_qsy(self, message) -> bool:
+        if self.config.separate_working_channels:
+            if not message.working_frequency_hz:
+                return True
+            return self._qsy_to_channel(
+                message.next_hop,
+                message.working_frequency_hz,
+                message.working_mode,
+                allow_manual=False,
+                settle=True,
+            )
+        # Preserve the old behaviour: absence of a route frequency simply
+        # means that payload and control share the current channel.
+        self._qsy_to(message.next_hop)
+        return True
+
+    def _payload_receive_qsy(self, message) -> bool:
+        if not message.working_frequency_hz:
+            return True
+        return self._qsy_to_channel(
+            message.source,
+            message.working_frequency_hz,
+            message.working_mode,
+            allow_manual=False,
+            settle=True,
+        )
+
+    def _payload_restore_calling(self) -> None:
+        self._qsy_restore(settle=True)
+
     def _qsy_to(self, callsign: str) -> bool:
         if not self.config.auto_qsy:
             return False
@@ -1665,7 +1785,30 @@ class Operations:
         if target is None:
             return False
         frequency, mode = target
+        return self._qsy_to_channel(
+            callsign, frequency, mode, allow_manual=True, settle=False
+        )
+
+    def _qsy_to_channel(
+        self,
+        callsign: str,
+        frequency: int,
+        mode: str,
+        *,
+        allow_manual: bool,
+        settle: bool,
+    ) -> bool:
         if self.is_no_cat_radio():
+            if not allow_manual:
+                self._log(
+                    dual(
+                        "Automatic working-channel QSY requires a real CAT radio.",
+                        "Automatické QSY na pracovní kanál vyžaduje skutečné CAT rádio.",
+                    ),
+                    LogLevel.WARNING,
+                    source="radio",
+                )
+                return False
             here = int(self.config.manual_frequency_hz or 0)
             if here == frequency:
                 return True
@@ -1698,11 +1841,16 @@ class Operations:
             )
             return True
         try:
-            if self._qsy_previous is None:
-                self._qsy_previous = self.radio.get_state().frequency_hz
-            self.radio.set_frequency(frequency)
-            if mode:
-                self.radio.set_mode(mode)
+            with self._radio_lock:
+                if self._qsy_previous is None:
+                    previous = self.radio.get_state()
+                    self._qsy_previous = previous.frequency_hz
+                    self._qsy_previous_mode = getattr(previous, "mode", "") or ""
+                self.radio.set_frequency(frequency)
+                if mode:
+                    self.radio.set_mode(mode)
+            if settle:
+                time.sleep(ALERT_SWEEP_SETTLE)
             self._log(
                 dual(
                     f"Direct QSY for {callsign}: {frequency / 1_000_000:.4f} MHz"
@@ -1722,13 +1870,26 @@ class Operations:
             )
             return False
 
-    def _qsy_restore(self) -> None:
-        if self.config.auto_qsy and self._qsy_previous is not None:
+    def _qsy_restore(self, *, settle: bool = False) -> None:
+        if self._qsy_previous is not None:
             try:
-                self.radio.set_frequency(self._qsy_previous)
-            except Exception:
-                pass
+                with self._radio_lock:
+                    self.radio.set_frequency(self._qsy_previous)
+                    if self._qsy_previous_mode:
+                        self.radio.set_mode(self._qsy_previous_mode)
+                if settle:
+                    time.sleep(ALERT_SWEEP_SETTLE)
+            except Exception as exc:
+                self._log(
+                    dual(
+                        f"Return to the calling channel failed: {exc}",
+                        f"Návrat na volací kanál selhal: {exc}",
+                    ),
+                    LogLevel.ERROR,
+                    source="radio",
+                )
         self._qsy_previous = None
+        self._qsy_previous_mode = ""
 
     def close(self) -> None:
         self.stop_scanner(restore=False, log=False)

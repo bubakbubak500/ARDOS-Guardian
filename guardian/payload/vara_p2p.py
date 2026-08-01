@@ -88,13 +88,16 @@ def encode_envelope(msg_id: int, body: bytes) -> bytes:
 class VaraP2PBackend(PayloadBackend):
     name = "vara_p2p"
 
-    def __init__(self, vara=None, on_log=None, on_qsy=None, on_unqsy=None,
-                 on_acquire=None, on_release=None):
+    def __init__(self, vara=None, on_log=None, on_qsy=None, on_receive_qsy=None,
+                 on_unqsy=None, on_acquire=None, on_release=None):
         self.vara = vara
         self.on_log = on_log or (lambda m: None)
-        # Optional QSY hooks: on_qsy(callsign) tunes the radio to that station's
-        # frequency before connecting; on_unqsy() restores the previous channel.
+        # Optional QSY hooks receive the session message.  Send and receive are
+        # distinct because the original single-channel setup only retuned the
+        # initiator. Opt-in working channels retune both peers and restore them
+        # before control audio resumes.
         self.on_qsy = on_qsy
+        self.on_receive_qsy = on_receive_qsy
         self.on_unqsy = on_unqsy
         # Soundcard handoff hooks: on_air with one codec (e.g. an IC-705), the
         # control modem and VARA share a single device. on_acquire() frees the
@@ -116,12 +119,12 @@ class VaraP2PBackend(PayloadBackend):
         acquired = False
         link_started = False
         with self._transfer_lock:
-            if self.on_qsy:
-                self._safe(lambda: self.on_qsy(msg.next_hop))
             try:
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
+                if self.on_qsy and self.on_qsy(msg) is False:
+                    raise RuntimeError("working-channel QSY failed")
                 self.on_log(
                     "VARA P2P: using persistent TCP pair 8300/8301 "
                     f"(generation {self.vara.state.data_socket_generation})"
@@ -219,10 +222,10 @@ class VaraP2PBackend(PayloadBackend):
                 if link_started:
                     self._abort_link()
             finally:
-                if acquired and self.on_release:
-                    self._safe(self.on_release)
                 if self.on_unqsy:
                     self._safe(self.on_unqsy)
+                if acquired and self.on_release:
+                    self._safe(self.on_release)
         # done() may immediately send RECEIVED/CANCEL over AFSK, so it must run
         # only after the shared soundcard has been returned to that modem.
         done(success)
@@ -314,6 +317,8 @@ class VaraP2PBackend(PayloadBackend):
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
+                if self.on_receive_qsy and self.on_receive_qsy(msg) is False:
+                    raise RuntimeError("working-channel QSY failed")
                 self.on_log(
                     "VARA P2P: using persistent TCP pair 8300/8301 "
                     f"(generation {self.vara.state.data_socket_generation})"
@@ -389,6 +394,8 @@ class VaraP2PBackend(PayloadBackend):
                         self._abort_link()
                 else:
                     self._abort_link()
+                if self.on_unqsy:
+                    self._safe(self.on_unqsy)
                 if acquired and self.on_release:
                     self._safe(self.on_release)
         done(success)
