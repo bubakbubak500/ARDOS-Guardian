@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..config import StationConfig
+from ..config import StationConfig, radio_profile_name
 from ..i18n import Language, dual, language, set_language, tr
 from ..modem.audio import match_device_name, scan_audio_devices
 from ..protocol import MAX_PTT_DELAY_MS, PTT_DELAY_STEP_MS
@@ -73,6 +73,9 @@ class PathField(QWidget):
 
     def text(self) -> str:
         return self.edit.text().strip()
+
+    def setText(self, value: str) -> None:  # noqa: N802 - mirrors QLineEdit
+        self.edit.setText(str(value or ""))
 
 
 class SettingsDialog(QDialog):
@@ -326,14 +329,184 @@ class SettingsDialog(QDialog):
         self.ptt_status = QLabel(tr("settings.ptt_test_hint"))
         self.ptt_status.setObjectName("Metadata")
         self.ptt_status.setWordWrap(True)
+        # A station used with more than one rig or cable re-entered nine fields
+        # from memory every time it swapped. A profile is those fields under a
+        # short name -- this page only, so picking one can never carry a
+        # callsign, an audio device or a VARA port along with it.
+        self.save_profile_button = QPushButton(
+            dual("Save profile…", "Uložit profil…")
+        )
+        self.save_profile_button.setToolTip(
+            dual(
+                "Store the radio settings shown here under a short name.",
+                "Uloží zde zobrazené nastavení rádia pod krátkým názvem.",
+            )
+        )
+        self.save_profile_button.clicked.connect(self._save_radio_profile)
+        self.radio_profile_picker = QComboBox()
+        self.radio_profile_picker.setMinimumWidth(160)
+        self.radio_profile_picker.setToolTip(
+            dual(
+                "Load a saved radio profile into the fields above. Nothing "
+                "reaches the radio until Save or Apply.",
+                "Načte uložený profil rádia do polí výše. Do rádia se nic "
+                "nedostane, dokud nedáte Uložit nebo Použít.",
+            )
+        )
+        self.radio_profile_picker.currentIndexChanged.connect(
+            self._radio_profile_picked
+        )
+        self.delete_profile_button = QPushButton(tr("common.delete"))
+        self.delete_profile_button.setToolTip(
+            dual("Delete the selected profile.", "Odstraní vybraný profil.")
+        )
+        self.delete_profile_button.clicked.connect(self._delete_radio_profile)
+        self._refresh_radio_profiles()
+
         test_row = QWidget()
         test_layout = QHBoxLayout(test_row)
         test_layout.setContentsMargins(0, 0, 0, 0)
         test_layout.setSpacing(6)
         test_layout.addWidget(self.ptt_test_button)
+        test_layout.addWidget(self.save_profile_button)
+        test_layout.addWidget(self.radio_profile_picker)
+        test_layout.addWidget(self.delete_profile_button)
         test_layout.addStretch(1)
         form.addRow("", test_row)
         form.addRow("", self.ptt_status)
+
+    # --- radio profiles --------------------------------------------------- #
+    def _refresh_radio_profiles(self, selected: str = "") -> None:
+        """Rebuild the picker, keeping a name selected when there is one."""
+        names = self.config.radio_profile_names()
+        self.radio_profile_picker.blockSignals(True)
+        self.radio_profile_picker.clear()
+        self.radio_profile_picker.addItem(
+            dual("Saved profiles…", "Uložené profily…"), ""
+        )
+        for name in names:
+            self.radio_profile_picker.addItem(name, name)
+        index = self.radio_profile_picker.findData(selected) if selected else 0
+        self.radio_profile_picker.setCurrentIndex(max(0, index))
+        self.radio_profile_picker.blockSignals(False)
+        self.delete_profile_button.setEnabled(bool(names))
+        self.radio_profile_picker.setEnabled(bool(names))
+
+    def _radio_form_values(self) -> dict:
+        """The radio settings as the fields currently read them."""
+        backend = self.radio_backend.currentData()
+        hamlib = backend == "hamlib"
+        return {
+            "radio_backend": backend,
+            "radio": self.radio_model.currentText() if hamlib else "",
+            "rig_model": int(self.radio_model.currentData() or 0) if hamlib else 0,
+            "cat_port": self.selected_cat_port(),
+            "cat_baud": self.cat_baud.value(),
+            "rigctld_host": self.rigctld_host.text().strip(),
+            "rigctld_port": self.rigctld_port.value(),
+            "rigctld_path": self.rigctld_path.text() or "rigctld",
+            "ptt_type": self.ptt_type.currentData(),
+            "ptt_line": self.ptt_line.currentText(),
+            "vara_ptt_delay_ms": self.vara_ptt_delay.value(),
+        }
+
+    def _load_radio_form(self, values: dict) -> None:
+        """Show a stored profile in the fields, leaving every other page alone."""
+        backend = str(values.get("radio_backend", "none"))
+        self.radio_backend.setCurrentIndex(
+            max(0, self.radio_backend.findData(backend))
+        )
+        model = int(values.get("rig_model", 0) or 0)
+        if model:
+            index = self.radio_model.findData(model)
+            if index < 0:
+                # A radio picked from the full Hamlib list is not in the
+                # curated combo; the profile carries its label for exactly this.
+                self.radio_model.addItem(
+                    str(values.get("radio") or model), model
+                )
+                index = self.radio_model.count() - 1
+            self.radio_model.setCurrentIndex(index)
+        else:
+            self.radio_model.setCurrentIndex(0)
+        port = port_device(str(values.get("cat_port", "")))
+        labels = [
+            self.cat_port.itemText(row) for row in range(self.cat_port.count())
+        ]
+        self.cat_port.setCurrentText(
+            next((label for label in labels if port_device(label) == port), port)
+        )
+        self.cat_baud.setValue(int(values.get("cat_baud", 0) or 0))
+        self.rigctld_host.setText(str(values.get("rigctld_host", "127.0.0.1")))
+        self.rigctld_port.setValue(int(values.get("rigctld_port", 4532) or 4532))
+        self.rigctld_path.setText(str(values.get("rigctld_path", "rigctld")))
+        self.ptt_type.setCurrentIndex(
+            max(0, self.ptt_type.findData(str(values.get("ptt_type", "RIG")).upper()))
+        )
+        self.ptt_line.setCurrentText(str(values.get("ptt_line", "RTS")))
+        self.vara_ptt_delay.setValue(
+            max(0, min(int(values.get("vara_ptt_delay_ms", 0) or 0), MAX_PTT_DELAY_MS))
+        )
+
+    def _save_radio_profile(self) -> None:
+        suggestion = str(self.radio_profile_picker.currentData() or "")
+        if not suggestion and self.radio_backend.currentData() == "hamlib":
+            suggestion = self.radio_model.currentText()
+        name, accepted = QInputDialog.getText(
+            self,
+            dual("Save radio profile", "Uložit profil rádia"),
+            dual("Short name:", "Krátký název:"),
+            text=radio_profile_name(str(suggestion)),
+        )
+        if not accepted:
+            return
+        key = radio_profile_name(name)
+        if not key:
+            self.ptt_status.setText(
+                dual(
+                    "A radio profile needs a name.",
+                    "Profil rádia potřebuje název.",
+                )
+            )
+            return
+        known = key in self.config.radio_profiles
+        self.config.radio_profiles[key] = dict(self._radio_form_values())
+        # Saved on the spot: a profile the operator has just named must not
+        # depend on them also pressing Save on the way out.
+        self.config.save()
+        self._refresh_radio_profiles(selected=key)
+        self.ptt_status.setText(
+            dual(
+                f"Radio profile '{key}' {'replaced' if known else 'saved'}.",
+                f"Profil rádia „{key}“ byl {'nahrazen' if known else 'uložen'}.",
+            )
+        )
+
+    def _radio_profile_picked(self, _index: int) -> None:
+        name = str(self.radio_profile_picker.currentData() or "")
+        stored = self.config.radio_profiles.get(name)
+        if not name or not isinstance(stored, dict):
+            return
+        self._load_radio_form(stored)
+        self.ptt_status.setText(
+            dual(
+                f"Radio profile '{name}' loaded. Save or Apply to use it.",
+                f"Profil rádia „{name}“ načten. Použijte Uložit nebo Použít.",
+            )
+        )
+
+    def _delete_radio_profile(self) -> None:
+        name = str(self.radio_profile_picker.currentData() or "")
+        if not name or not self.config.delete_radio_profile(name):
+            return
+        self.config.save()
+        self._refresh_radio_profiles()
+        self.ptt_status.setText(
+            dual(
+                f"Radio profile '{name}' deleted.",
+                f"Profil rádia „{name}“ byl odstraněn.",
+            )
+        )
 
     def _refresh_serial_ports(self) -> None:
         """List the COM ports that exist, keeping whatever is configured."""
@@ -808,21 +981,10 @@ class SettingsDialog(QDialog):
         cfg = self.config
         cfg.callsign = self.callsign.text().strip().upper() or "NOCALL"
         cfg.operator_name = self.operator_name.text().strip()
-        cfg.radio_backend = self.radio_backend.currentData()
-        if cfg.radio_backend == "hamlib":
-            cfg.radio = self.radio_model.currentText()
-            cfg.rig_model = int(self.radio_model.currentData())
-        else:
-            cfg.radio = ""
-            cfg.rig_model = 0
-        cfg.cat_port = self.selected_cat_port()
-        cfg.cat_baud = self.cat_baud.value()
-        cfg.rigctld_host = self.rigctld_host.text().strip()
-        cfg.rigctld_port = self.rigctld_port.value()
-        cfg.rigctld_path = self.rigctld_path.text() or "rigctld"
-        cfg.ptt_line = self.ptt_line.currentText()
-        cfg.ptt_type = self.ptt_type.currentData()
-        cfg.vara_ptt_delay_ms = self.vara_ptt_delay.value()
+        # The same reading of the radio page a profile stores, so what gets
+        # saved under a name and what reaches the station cannot drift apart.
+        for field_name, value in self._radio_form_values().items():
+            setattr(cfg, field_name, value)
         cfg.audio_input = self.audio_input.currentText().strip()
         cfg.audio_output = self.audio_output.currentText().strip()
         cfg.vara_host = self.vara_host.text().strip()

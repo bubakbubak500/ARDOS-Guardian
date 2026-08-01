@@ -136,6 +136,14 @@ def help_topics() -> list[HelpTopic]:
             or DTR. The dummy model never opens the port on its own, so with
             the default CAT command nothing would ever be keyed. Use
             <b>Test PTT</b> to prove the wiring.</p>
+            <p><b>Save profile…</b> beside Test PTT stores the radio page under
+            a short name, and the picker next to it loads one back. A profile
+            carries the radio page only — control method, model, port, baud,
+            rigctld host/port/executable, PTT method and line, keying delay —
+            so a station that swaps between a CAT radio and a handheld on a
+            cable is one pick away from either. Nothing reaches the radio until
+            Save or Apply, and no callsign, audio device or VARA port travels
+            with a profile. Saving under an existing name replaces it.</p>
             <p><b>VARA & payload</b> stores separate FM and HF command/data
             ports and executable paths. VARA P2P lets Guardian transfer the
             bundle. Manual Winlink hand-off pauses at an operator confirmation.</p>
@@ -160,6 +168,15 @@ def help_topics() -> list[HelpTopic]:
             <b>PTT přes (Hamlib)</b> nastavte na RTS nebo DTR. Model Dummy sám
             port nikdy neotevírá, takže s výchozím povelem CAT by se nikdy nic
             nezaklíčovalo. Zapojení ověřte tlačítkem <b>Test PTT</b>.</p>
+            <p><b>Uložit profil…</b> vedle Testu PTT uloží stránku rádia pod
+            krátkým názvem a rozbalovací seznam vedle jej zase načte. Profil
+            nese jen stránku rádia — způsob řízení, model, port, rychlost,
+            adresu/port/program rigctld, způsob a linku PTT a zpoždění
+            klíčování — takže stanice, která střídá rádio s CAT a ruční
+            stanici na kabelu, je od každého z nich na jedno kliknutí. Do rádia
+            se nic nedostane, dokud nedáte Uložit nebo Použít, a s profilem
+            nikdy neputuje volací značka, zvukové zařízení ani port VARA.
+            Uložení pod existujícím názvem jej nahradí.</p>
             <p><b>VARA a přenos</b> uchovává oddělené příkazové/datové porty a
             cesty k programům pro FM a HF. VARA P2P přenáší balíček přímo.
             Ruční Winlink se zastaví na potvrzení operátora.</p>

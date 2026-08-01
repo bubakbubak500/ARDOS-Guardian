@@ -39,6 +39,29 @@ def config_dir() -> Path:
 
 DEFAULT_CONFIG_PATH = config_dir() / "config.json"
 
+# What a radio profile carries: exactly the fields the Radio page edits. The
+# keying delay belongs to the cable and the rig behind it, so it travels with
+# them; everything else on other pages stays where the operator left it.
+RADIO_PROFILE_FIELDS = (
+    "radio_backend",
+    "radio",
+    "rig_model",
+    "cat_port",
+    "cat_baud",
+    "rigctld_host",
+    "rigctld_port",
+    "rigctld_path",
+    "ptt_type",
+    "ptt_line",
+    "vara_ptt_delay_ms",
+)
+MAX_RADIO_PROFILE_NAME = 24
+
+
+def radio_profile_name(name: str) -> str:
+    """Normalise a profile name: trimmed, single-line and short enough to show."""
+    return " ".join(str(name or "").split())[:MAX_RADIO_PROFILE_NAME]
+
 
 @dataclass
 class StationConfig:
@@ -169,6 +192,12 @@ class StationConfig:
     # Theme
     appearance: str = "System"    # "System" | "Dark" | "Light"
 
+    # Named snapshots of the radio page, so a station used with more than one
+    # rig or cable is one pick away from each of them instead of nine fields
+    # re-entered from memory. Radio settings only: a profile must never carry
+    # a callsign, an audio device or a VARA port from one setup to another.
+    radio_profiles: dict[str, dict] = field(default_factory=dict)
+
     @classmethod
     def load(cls, path: Path | str | None = None) -> "StationConfig":
         path = Path(path) if path else DEFAULT_CONFIG_PATH
@@ -187,6 +216,17 @@ class StationConfig:
         # config still selects it must not be left without a transport.
         if clean.get("payload_backend") != "vara_p2p":
             clean["payload_backend"] = "vara_p2p"
+        # A hand-edited or truncated file must not leave the profile picker
+        # holding something that is not a profile.
+        profiles = clean.get("radio_profiles")
+        if isinstance(profiles, dict):
+            clean["radio_profiles"] = {
+                radio_profile_name(key): value
+                for key, value in profiles.items()
+                if radio_profile_name(key) and isinstance(value, dict)
+            }
+        else:
+            clean.pop("radio_profiles", None)
         return cls(**clean)
 
     def save(self, path: Path | str | None = None) -> Path:
@@ -194,6 +234,39 @@ class StationConfig:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
         return path
+
+    # --- Radio profiles --------------------------------------------------
+    def radio_profile(self) -> dict:
+        """This station's current radio settings, as a profile would store them."""
+        return {name: getattr(self, name) for name in RADIO_PROFILE_FIELDS}
+
+    def save_radio_profile(self, name: str) -> str:
+        """Store the current radio settings under a short name, replacing any."""
+        key = radio_profile_name(name)
+        if not key:
+            raise ValueError("a radio profile needs a name")
+        self.radio_profiles[key] = self.radio_profile()
+        return key
+
+    def apply_radio_profile(self, name: str) -> bool:
+        """Load a stored profile into the radio fields. Unknown names do nothing.
+
+        Only the fields the profile actually carries are written, so a profile
+        saved by an older build cannot blank a setting it never knew about.
+        """
+        stored = self.radio_profiles.get(radio_profile_name(name))
+        if not isinstance(stored, dict):
+            return False
+        for field_name in RADIO_PROFILE_FIELDS:
+            if field_name in stored:
+                setattr(self, field_name, stored[field_name])
+        return True
+
+    def delete_radio_profile(self, name: str) -> bool:
+        return self.radio_profiles.pop(radio_profile_name(name), None) is not None
+
+    def radio_profile_names(self) -> list[str]:
+        return sorted(self.radio_profiles, key=str.casefold)
 
     # --- VARA mode helpers ----------------------------------------------
     def apply_vara_mode(self, mode: str) -> None:

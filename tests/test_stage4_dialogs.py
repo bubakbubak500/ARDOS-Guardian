@@ -67,6 +67,86 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         dialog.close()
 
 
+def test_radio_profile_is_saved_from_the_page_and_restored_by_the_picker(
+    monkeypatch,
+) -> None:
+    # Swapping between a CAT radio and a handheld on an AIOC cable is nine
+    # fields re-entered from memory. One name, one pick.
+    _application()
+    config = StationConfig(callsign="OK7PS", audio_input="USB Audio CODEC RX")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        dialog.radio_backend.setCurrentIndex(
+            dialog.radio_backend.findData("hamlib")
+        )
+        dialog.radio_model.setCurrentIndex(dialog.radio_model.findData(3085))
+        dialog.cat_port.setCurrentText("COM4")
+        dialog.ptt_type.setCurrentIndex(dialog.ptt_type.findData("RIG"))
+        dialog.vara_ptt_delay.setValue(0)
+        monkeypatch.setattr(
+            "guardian.qt.settings_dialog.QInputDialog.getText",
+            lambda *args, **kwargs: ("IC-705", True),
+        )
+        dialog._save_radio_profile()
+        assert config.radio_profile_names() == ["IC-705"]
+
+        # The handheld: different rig, different keying, a keying tail.
+        dialog.radio_model.setCurrentIndex(dialog.radio_model.findData(1))
+        dialog.cat_port.setCurrentText("COM9")
+        dialog.ptt_type.setCurrentIndex(dialog.ptt_type.findData("RTS"))
+        dialog.vara_ptt_delay.setValue(120)
+        monkeypatch.setattr(
+            "guardian.qt.settings_dialog.QInputDialog.getText",
+            lambda *args, **kwargs: ("AIOC", True),
+        )
+        dialog._save_radio_profile()
+        assert config.radio_profile_names() == ["AIOC", "IC-705"]
+
+        picker = dialog.radio_profile_picker
+        picker.setCurrentIndex(picker.findData("IC-705"))
+
+        assert dialog.radio_model.currentData() == 3085
+        assert dialog.selected_cat_port() == "COM4"
+        assert dialog.ptt_type.currentData() == "RIG"
+        assert dialog.vara_ptt_delay.value() == 0
+        # Nothing reaches the station until the operator says so.
+        assert config.rig_model == 0
+        assert dialog.apply()
+        assert (config.rig_model, config.cat_port) == (3085, "COM4")
+        # And a profile is a radio, not a station.
+        assert config.callsign == "OK7PS"
+        assert config.audio_input == "USB Audio CODEC RX"
+
+        picker.setCurrentIndex(picker.findData("AIOC"))
+        assert dialog.vara_ptt_delay.value() == 120
+        dialog._delete_radio_profile()
+        assert config.radio_profile_names() == ["IC-705"]
+    finally:
+        dialog.close()
+
+
+def test_an_unnamed_radio_profile_is_refused(monkeypatch) -> None:
+    _application()
+    config = StationConfig(callsign="OK7PS")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        monkeypatch.setattr(
+            "guardian.qt.settings_dialog.QInputDialog.getText",
+            lambda *args, **kwargs: ("   ", True),
+        )
+        dialog._save_radio_profile()
+        assert config.radio_profiles == {}
+
+        monkeypatch.setattr(
+            "guardian.qt.settings_dialog.QInputDialog.getText",
+            lambda *args, **kwargs: ("Cancelled", False),
+        )
+        dialog._save_radio_profile()
+        assert config.radio_profiles == {}
+    finally:
+        dialog.close()
+
+
 def test_separate_working_channels_are_opt_in_and_enable_auto_qsy() -> None:
     _application()
     config = StationConfig(auto_qsy=False)

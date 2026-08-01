@@ -734,6 +734,25 @@ Two defects, both in what 0.6.49 added.
   end. Still to prove on air: the retune to a followed channel, the restore
   afterwards, and the calling-channel fallback.
 
+## Named radio profiles (0.6.51)
+
+- **Save profile… / picker / Delete beside Test PTT.** A station used with more
+  than one rig or cable re-entered nine fields from memory on every swap.
+  A profile is the radio page under a short name: control method, model,
+  CAT/PTT port, baud, rigctld host/port/executable, PTT method and line, and
+  the VARA FM keying delay.
+- **The radio page only.** No callsign, audio device, VARA port or network
+  setting is stored or changed by loading one. Loading fills the fields; the
+  radio is reached only through Save or Apply.
+- **Stored in `config.json`** (`radio_profiles`) the moment they are named, so
+  a profile does not depend on the operator also pressing Save. Names are
+  trimmed to one line and 24 characters; saving under an existing name
+  replaces it. A damaged block is dropped on load, and a profile from an older
+  build cannot blank a field it never knew about.
+- Apply and the profile read the page through one function, so what is stored
+  under a name and what reaches the station cannot drift apart.
+- **Software verification:** 330 tests pass.
+
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,
   reported from the air 2026-07-30, HF and FM; the alert itself arrived and
