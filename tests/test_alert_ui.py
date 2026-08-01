@@ -217,8 +217,8 @@ def test_the_sweep_offer_follows_the_route_table_and_the_urgency() -> None:
     # this station was started with.
     runtime.operations.routes = RouteTable(
         [
-            Route("OK1AAA", "", "", 7_100_000, "USB"),
-            Route("OK1BBB", "", "", 14_105_000, "USB"),
+            Route("OK1AAA", "", "", 145_500_000, "FM"),
+            Route("OK1BBB", "", "", 145_550_000, "FM"),
         ]
     )
     dialog = AlertDialog(runtime)
@@ -254,7 +254,7 @@ def test_the_confirmation_says_the_radio_will_be_retuned(monkeypatch) -> None:
     _application()
     runtime = ShellRuntime()
     runtime.operations.routes = RouteTable(
-        [Route("OK1AAA", "", "", 7_100_000, "USB")]
+        [Route("OK1AAA", "", "", 145_550_000, "FM")]
     )
     dialog = AlertDialog(runtime)
     asked: list[str] = []

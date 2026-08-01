@@ -361,6 +361,25 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.title": ("Network", "Síť"),
     "network.routes": ("Routes", "Trasy"),
     "network.heard": ("Heard stations", "Slyšené stanice"),
+    "network.scanner": ("Channel scanner", "Scanner kanálů"),
+    "network.scanner_hint": (
+        "The scanner uses this station's current channel plus compatible route "
+        "frequencies. It never mixes FM and HF control modems.",
+        "Scanner používá aktuální kanál stanice a kompatibilní frekvence tras. "
+        "Nikdy nemíchá řídicí modemy pro FM a HF.",
+    ),
+    "network.scanner_status": ("Status", "Stav"),
+    "network.scanner_stopped": ("Stopped", "Zastaven"),
+    "network.scanner_scanning": ("Scanning", "Skenuje"),
+    "network.scanner_holding": ("Holding on activity", "Drží kvůli aktivitě"),
+    "network.scanner_paused": ("Paused for a session", "Pozastaven kvůli relaci"),
+    "network.scanner_current": ("Current scan channel", "Aktuální skenovaný kanál"),
+    "network.scanner_channels": ("Compatible channels", "Kompatibilní kanály"),
+    "network.scanner_dwell": ("Dwell (seconds)", "Doba poslechu (sekundy)"),
+    "network.scanner_use_signal": ("Hold above S-meter value", "Držet nad hodnotou S-metru"),
+    "network.scanner_threshold": ("S-meter threshold", "Práh S-metru"),
+    "network.scanner_start": ("Start scanner", "Spustit scanner"),
+    "network.scanner_stop": ("Stop and return home", "Zastavit a vrátit domů"),
     "network.destination": ("Destination", "Cíl"),
     "network.preferred": ("Preferred hop", "Upřednostněný mezilehlý bod"),
     "network.backup": ("Backup", "Záložní bod"),
@@ -553,6 +572,14 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "alert.no_control": (
         "Start the control channel before sending an alert.",
         "Před odesláním výstrahy spusťte řídicí kanál.",
+    ),
+    "alert.stop_scanner": (
+        "Stop the channel scanner before sending an alert.",
+        "Před odesláním výstrahy zastavte scanner kanálů.",
+    ),
+    "mail.stop_scanner": (
+        "Stop the channel scanner before sending this message.",
+        "Před odesláním této zprávy zastavte scanner kanálů.",
     ),
     # Dialogs/help
     "help.title": ("Guardian help", "Nápověda Guardianu"),

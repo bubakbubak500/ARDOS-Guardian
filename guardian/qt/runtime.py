@@ -72,6 +72,11 @@ class ShellRuntime:
                 heard_stations=len(self.heard.active(time.monotonic())),
                 control_channel_active=current_network.control_channel_active,
                 scanner_active=current_network.scanner_active,
+                scanner_holding=current_network.scanner_holding,
+                scanner_paused=current_network.scanner_paused,
+                scanner_channel=current_network.scanner_channel,
+                scanner_frequency_hz=current_network.scanner_frequency_hz,
+                scanner_channels=current_network.scanner_channels,
             ),
         )
         self._refreshed_at = time.monotonic()

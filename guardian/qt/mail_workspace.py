@@ -716,6 +716,13 @@ class MailWorkspace(QWidget):
                 tr("mail.send_requires_control"),
             )
             return
+        if self.runtime.operations.scanner is not None:
+            QMessageBox.information(
+                self,
+                tr("mail.send_queued"),
+                tr("mail.stop_scanner"),
+            )
+            return
         if not self.runtime.operations.send_queued(self.selected_id):
             self.runtime.refresh()
             self.refresh()

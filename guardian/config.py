@@ -154,6 +154,9 @@ class StationConfig:
     # has already looked at stays available with no network.
     map_background: bool = True
     scan_dwell: float = 3.0    # seconds per channel when scanning
+    # Optional raw Hamlib STRENGTH value. None means that only a decoded
+    # control frame holds the scanner on a channel.
+    scan_signal_threshold: int | None = None
     auto_qsy: bool = True      # VARA P2P: tune the radio to the station's freq before connecting
 
     # Control burst behaviour

@@ -61,6 +61,11 @@ class NetworkSnapshot:
     heard_stations: int = 0
     control_channel_active: bool = False
     scanner_active: bool = False
+    scanner_holding: bool = False
+    scanner_paused: bool = False
+    scanner_channel: str = ""
+    scanner_frequency_hz: int | None = None
+    scanner_channels: int = 0
 
 
 @dataclass(frozen=True, slots=True)

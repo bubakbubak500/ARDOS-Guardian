@@ -8,6 +8,7 @@ from guardian.operations import (
     ALERT_SWEEP_MAX_CHANNELS,
     PTT_TEST_MAX_SECONDS,
     Operations,
+    control_mode_compatible,
     _ALERT_HISTORY,
 )
 from guardian.modem import make_modem
@@ -643,6 +644,8 @@ def test_alert_history_is_bounded(tmp_path) -> None:
 class _SweepRadio:
     """A rig that records what it was told, and can fail on chosen channels."""
 
+    name = "test-radio"
+
     def __init__(
         self,
         frequency_hz: int = 145_500_000,
@@ -726,6 +729,124 @@ def _alert(code: int = 0x01, note: str = "POZAR") -> ControlFrame:
         priority=Priority.EMERGENCY,
         ttl=3,
     )
+
+
+def _wait_for_worker(operations: Operations, name: str) -> None:
+    deadline = time.monotonic() + 2.0
+    while operations.workers.is_active(name) and time.monotonic() < deadline:
+        time.sleep(0.001)
+    operations.workers.drain()
+
+
+def _scanning_operations(tmp_path):
+    routes = RouteTable(
+        [
+            Route("OK1FM", "", "", 145_550_000, "FM"),
+            Route("OK1HF", "", "", 7_100_000, "USB"),
+        ]
+    )
+    operations, workers, transport = _sweeping_operations(tmp_path, routes)
+    operations.config.radio_backend = "hamlib"
+    operations.config.rig_model = 3073
+    operations.snapshots.update(
+        radio=RadioSnapshot(
+            connected=True,
+            name="hamlib",
+            frequency_hz=145_500_000,
+            mode="FM",
+            signal=-110,
+        )
+    )
+    return operations, workers, transport
+
+
+def test_scanner_uses_only_channels_compatible_with_the_live_modem(tmp_path) -> None:
+    operations, workers, _transport = _scanning_operations(tmp_path)
+    try:
+        assert control_mode_compatible("afsk1200", "FM")
+        assert not control_mode_compatible("afsk1200", "USB")
+        assert control_mode_compatible("mfsk16", "USB")
+        assert not control_mode_compatible("mfsk16", "FM")
+        assert [channel.freq_hz for channel in operations.scanner_channels()] == [
+            145_500_000,
+            145_550_000,
+        ]
+        assert operations.alert_sweep_channels() == [(145_550_000, "FM")]
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_scanner_tunes_off_thread_reports_state_and_returns_home(tmp_path) -> None:
+    operations, workers, _transport = _scanning_operations(tmp_path)
+    operations.config.scan_dwell = 1.0
+    try:
+        assert operations.start_scanner()
+        snapshot = operations.snapshots.read().network
+        assert snapshot.scanner_active
+        assert snapshot.scanner_channels == 2
+        assert snapshot.scanner_frequency_hz == 145_500_000
+
+        operations._tick_scanner(operations.scanner.last_change + 1.0)
+        _wait_for_worker(operations, "scanner-tune")
+        assert operations.radio.frequency_hz == 145_550_000
+        assert operations.snapshots.read().network.scanner_frequency_hz == 145_550_000
+
+        assert operations.stop_scanner()
+        _wait_for_worker(operations, "scanner-home")
+        assert operations.radio.frequency_hz == 145_500_000
+        assert not operations.snapshots.read().network.scanner_active
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_scanner_pauses_for_payload_and_blocks_unsynchronised_transmit(tmp_path) -> None:
+    operations, workers, transport = _scanning_operations(tmp_path)
+    try:
+        assert operations.start_scanner()
+        operations._payload_active.set()
+        operations._tick_scanner(operations.scanner.last_change + 60.0)
+        operations._update_network_snapshot()
+        assert operations.snapshots.read().network.scanner_paused
+        assert operations.radio.commands == []
+        operations._payload_active.clear()
+
+        assert not operations.send_alert(0x01, "POZAR")
+        assert transport.sent == []
+    finally:
+        operations._payload_active.clear()
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_scanner_refuses_no_cat_and_survives_one_failed_qsy(tmp_path) -> None:
+    operations, workers, _transport = _scanning_operations(tmp_path)
+    try:
+        operations.config.rig_model = 1  # Hamlib Dummy
+        assert not operations.start_scanner()
+
+        operations.config.rig_model = 3073
+        operations.radio.failing.add(145_550_000)
+        operations.config.scan_dwell = 1.0
+        assert operations.start_scanner()
+        operations._tick_scanner(operations.scanner.last_change + 1.0)
+        _wait_for_worker(operations, "scanner-tune")
+
+        assert operations.scanner is not None
+        assert operations.scanner.enabled
+        assert operations.scanner.current.freq_hz == 145_550_000
+        assert any(
+            "could not tune" in event.message
+            for event in operations.events.history()
+        )
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
 
 
 def test_alert_sweep_repeats_the_same_alert_on_every_known_frequency(
@@ -830,19 +951,19 @@ def test_the_sweep_stops_when_the_control_channel_goes_away(
 def test_the_sweep_skips_the_current_frequency_and_stays_bounded(tmp_path) -> None:
     routes = RouteTable(
         [
-            Route(f"OK1A{index:02d}", "", "", 7_000_000 + index * 1_000, "USB")
+            Route(f"OK1A{index:02d}", "", "", 145_000_000 + index * 1_000, "FM")
             for index in range(ALERT_SWEEP_MAX_CHANNELS + 5)
         ]
     )
     operations, workers, transport = _sweeping_operations(tmp_path, routes)
     try:
         operations.snapshots.update(
-            radio=RadioSnapshot(connected=True, frequency_hz=7_001_000)
+            radio=RadioSnapshot(connected=True, frequency_hz=145_001_000, mode="FM")
         )
         channels = operations.alert_sweep_channels()
 
         assert len(channels) == ALERT_SWEEP_MAX_CHANNELS
-        assert 7_001_000 not in [freq for freq, _mode in channels]
+        assert 145_001_000 not in [freq for freq, _mode in channels]
     finally:
         operations.audio_transport = None
         operations.close()
@@ -896,7 +1017,7 @@ def test_the_sweep_waits_for_the_home_repeats_before_tuning_away(
 
 def test_sending_an_alert_hands_the_sweep_to_a_worker(tmp_path) -> None:
     # The operator's dialog must not block on ten QSYs and twenty bursts.
-    routes = RouteTable([Route("OK1AAA", "", "", 7_100_000, "USB")])
+    routes = RouteTable([Route("OK1AAA", "", "", 145_550_000, "FM")])
     operations, workers, transport = _sweeping_operations(tmp_path, routes)
     swept: list[tuple] = []
     operations._alert_sweep = (
@@ -910,7 +1031,7 @@ def test_sending_an_alert_hands_the_sweep_to_a_worker(tmp_path) -> None:
 
         assert len(swept) == 1
         frame, channels = swept[0]
-        assert channels == [(7_100_000, "USB")]
+        assert channels == [(145_550_000, "FM")]
         assert frame.type is FrameType.ALERT
         assert operations.alerts[0].note == "POZAR"
     finally:

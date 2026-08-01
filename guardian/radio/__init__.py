@@ -10,6 +10,7 @@ from .base import RadioDriver, RadioState, NullRadio
 from .hamlib import HamlibRadio
 from .generic_vox import VoxRadio
 from .presets import DUMMY_MODEL
+from .scanner import Channel, ChannelPlan, ChannelScanner
 
 
 def make_driver(cfg) -> RadioDriver:
@@ -41,5 +42,8 @@ __all__ = [
     "NullRadio",
     "HamlibRadio",
     "VoxRadio",
+    "Channel",
+    "ChannelPlan",
+    "ChannelScanner",
     "make_driver",
 ]

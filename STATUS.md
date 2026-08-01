@@ -28,27 +28,25 @@ RTS/DTR VOX fallback — no per-radio CAT reverse-engineering.
 |------:|------|--------|
 | 1 | UI, station config, control-burst protocol, radio drivers | ✅ done |
 | 2 | VARA handshake state-machine (orchestrator) | ✅ done |
-| 3 | Control modem (AFSK + MFSK) + payload backend + audio channel | ✅ done* |
+| 3 | Control modem (AFSK + MFSK) + payload backend + audio channel | ✅ done |
 | 4 | Smart routing / heard-stations | ✅ done |
 | 5 | Multi-channel scanning / mesh | ✅ done* |
 | 6 | Mail layer: store-and-forward + attachments | ✅ done |
 
-**Phases 4 & 5 done in software.** Heard-stations registry (populated from every
-RX frame), ROUTE_QUERY/ROUTE_OFFER route discovery, learned-path memory,
-multi-hop auto-relay (TTL decrement + loop avoidance), and tick-driven channel
-scanning (dwell + activity hold). Tested over the loopback bus: A discovers a
-route to C with no manual entry; A→B→C relay chain delivers end-to-end; TTL=1
-correctly stops relaying. (*) Channel scanning needs a real radio to tune.
+**Phases 4 and 5 are done in software.** The
+heard-stations registry, ROUTE_QUERY/ROUTE_OFFER discovery, learned paths and
+multi-hop auto-relay are tested over the loopback bus. The production channel
+scanner has explicit Network UI, snapshot state, worker-based CAT tuning,
+activity/S-meter hold and safety pauses around sessions and payloads. (*) A
+physical-radio scanner pass is still required.
 
-**Phase 3 done in software.** Built + tested: AFSK 1200 modem, MFSK-16 HF modem
+**Phase 3 done.** Built + tested: AFSK 1200 modem, MFSK-16 HF modem
 (decodes to ~0 dB SNR in loopback), rate-1/2 K=7 convolutional FEC + Viterbi,
 the VARA P2P payload backend, audio device pickers, and a loopback↔audio control-channel
-selector (the audio transport starts/stops cleanly with real devices). Only
-remaining (*needs hardware*):
-- **On-air verification** — AFSK/MFSK over the real USB codec + PTT on a rig
-  (loopback-cable test, then on-air). Audio I/O path is wired and starts, but
-  not yet round-tripped through a radio.
-- MFSK bit-sync is tuned for clean audio; real fading may want a PLL/soft-decision.
+selector. AFSK/MFSK control and VARA FM/HF payload operation are confirmed on
+air. Full-window MFSK preamble search, AFC and soft-decision Viterbi are present;
+additional PLL/transition tracking is conditional future hardening, not an open
+Phase 3 requirement.
 
 ---
 
@@ -107,16 +105,16 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
-**Built but not yet flown (0.6.35–0.6.45):** the alert frequency sweep (an
+**Built but not yet flown:** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
-goes back), the heard-stations S/N estimate + channel column, and the
-negotiated VARA FM slow-keying gap. **Confirmed working in the field:** Test PTT and no-CAT keying via Hamlib
+goes back) and the production channel scanner (0.6.47). **Confirmed working in the field:** the heard-stations S/N estimate
+and channel column (operator-confirmed 2026-08-01); Test PTT and no-CAT keying via Hamlib
 dummy + serial PTT (AIOC, 0.6.38, 2026-07-30); audio devices on Windows on
 ARM (0.6.42) and the AFSK control channel there, handshake both ways at
 39–48 dB (2026-07-31); the negotiated VARA FM slow-keying tail (0.6.40) —
 "funguje výborně".
 
-**Needs real hardware/peers to verify:**
+**HF control-channel bring-up history (completed):**
 - **VARA HF control channel — WORKING as of 0.6.32, confirmed on air
   2026-07-29 evening** (21.189 MHz USB, IC-705 both ends). Five faults, all
   found from operator captures against known frame contents:
@@ -155,21 +153,12 @@ ARM (0.6.42) and the AFSK control channel there, handshake both ways at
   | symbols wrong after correcting it | 4 of 157 |
   | decision margin, best/second tone | median 30.3, min 1.13 |
 
-  Three things follow, none of them yet implemented:
+  Three fixes identified from that capture were subsequently implemented in
+  0.6.31:
 
-  1. **The timing search only probes the first two symbols of the RX window.**
-     The window is 8.8 s and a burst can start anywhere in it — this one was at
-     3.5 s. It has been finding frames by luck. A full-window preamble search
-     scores 0.972 and is cheap if it correlates only tones 0 and M-1.
-  2. **There is no AFC.** Two IC-705s each inside a +-0.5 ppm TCXO spec differ
-     by ~21 Hz at 21 MHz, against 31.25 Hz tone spacing. This is a design gap,
-     not a tuning error: it cannot be fixed by aligning dials. Correcting the
-     measured -8.50 Hz cuts the errors but leaves 4 symbols wrong.
-  3. **Demodulation is hard-decision.** The margin profile is the giveaway:
-     almost every symbol is decided 30:1, and two are near coin flips at 1.13.
-     `argmax` throws that confidence away before the Viterbi ever sees it.
-     Soft-decision input is the standard answer to exactly this profile and is
-     the change most likely to close the gap.
+  1. Full-window preamble search locates a burst anywhere in the RX window.
+  2. AFC measures and corrects the tone-grid frequency offset.
+  3. Soft-decision input preserves confidence for the Viterbi decoder.
 
   Four fixes were attempted on 2026-07-29 and **all reverted**: none made the
   capture decode, because the frame could not be located in the window and the
@@ -177,21 +166,12 @@ ARM (0.6.42) and the AFSK control channel there, handshake both ways at
   what makes the next attempt verifiable against real audio rather than
   simulation.
 
-- **VARA HF payload transfer.** Never run on air. The path is the same as FM, and 0.6.24 adds
-  the one command the reference marks as required for peer-to-peer work
-  (`P2P SESSION`, HF/SAT only — without it VARA HF keeps the 4.0 s Winlink
-  gateway retry cycle). Note both HF and FM ports default to 8300/8301, so the
-  two VARA flavours cannot run at once until one pair is changed.
+**Remaining real hardware/peer verification:**
+
 - **Multi-hop relay on air.** Only the two-station direct case has flown; the
   A→B→C chain is loopback-tested only.
-- **Presence beacon and auto-delivery.** Both were dead switches until 0.6.27
-  (`send_beacon()` had no caller; `auto_deliver` had no consumer at all despite
-  defaulting to on). Now wired and unit-tested, never run on air. They are the
-  only two behaviours that key the radio without an operator asking, so they
-  are gated on a live control channel, no session in flight and no payload
-  transfer holding the codec.
-- Channel scanning against a physical radio (tune/mode via rigctld).
-- MFSK-16 over a real HF path (bit-sync is tuned for clean audio).
+- Alert frequency sweep on HF and FM.
+- Channel scanning on a physical CAT-controlled radio.
 
 ---
 
@@ -301,6 +281,9 @@ import) — NOT `guardian/__main__.py`, whose relative import breaks the frozen
 build. `dist/` and `build/` are git-ignored, so each machine builds its own exe
 (or you zip and copy `dist\Guardian\`).
 
+**Installer field status (confirmed 2026-08-01):** clean installation on Windows
+without system Python, upgrade-in-place and uninstall all passed.
+
 Per-station state lives in `%APPDATA%\Guardian\`:
 `config.json`, `routes.json`, `guardian.ico`, and `hamlib\` if installed.
 
@@ -319,64 +302,15 @@ Dev note (this machine): venv at `.venv`, Python at
 
 ---
 
-## 7. Future plans
+## 7. Prioritized development backlog
 
-All five planned phases are software-complete. What remains is hardware bring-up
-and polish.
+The single current work list, including priorities, acceptance notes and items
+confirmed complete on 2026-08-01, is maintained in
+[`docs/DEVELOPMENT_BACKLOG.md`](docs/DEVELOPMENT_BACKLOG.md).
 
-**Hardware bring-up (the big remaining gap)**
-1. **On-air control channel** — Net tab → audio devices + control channel
-   "audio": loopback-cable test (TX into RX), then on-air with a real rig. Add
-   RX level/squelch meters; confirm PTT keys via the radio driver.
-2. ~~**Live `vara_p2p`**~~ — **DONE 2026-07-28.** First successful two-station
-   on-air transfer, OK7PS ↔ OK2IPW on 145.2375 MHz FM, IC-705 both ends. A
-   370-byte message went out in 14 s over the primary `BUFFER`-drain path
-   (`RF queue drained` → `transmitted and VARA link closed` → end-to-end
-   `DELIVERED`), and OK2IPW's 362-byte reply came back the same way. VARA
-   stepped 566 → 1188 → 2390 bps as it moved real data.
-
-   What had blocked it was Guardian's VARA session setup, not RF. Checked
-   against *VARA Protocol Native TNC Commands* (EA5HVK, 2025-10-10): Guardian
-   sent `LISTEN OFF` immediately before `CONNECT`, which the reference warns
-   "will cause a disconnection if it is received in the middle of a VARA
-   connection". The link came up at RF level but the port 8301 bridge never
-   attached — no `BUFFER` notification ever arrived, and VARA idled at a fixed
-   1.87 s keying cycle with nothing to send. Fixed in 0.6.20 together with
-   `CHAT OFF` (bounds VARA's idle loops) and re-enabled `COMPRESSION TEXT`;
-   the three went out at once, so the individual contribution is not isolated.
-
-   Diagnostics gained `buffer_reports`, `ptt_keyings`, `tx_bitrate_bps`,
-   `rejected_commands`, `transport_lost` and data-socket health — a zero
-   `buffer_reports` is the fastest way to spot this class of fault again.
-3. **Channel scanning on a real radio** — verify tune/mode via rigctld; wire an
-   activity threshold from the S-meter.
-
-**Open, deliberately not built yet** (each needs an operator decision first)
-- **Topology import for mesh routing.** The 0.6.26 CSV imports *routes*, which
-  are directional and therefore only correct at one station. Importing *links*
-  instead and deriving each station's table locally makes one shared file
-  correct everywhere. Written up in `docs/MESH_ROUTING.md`; worth building at
-  four or five stations, not at two.
-- **`COMPRESSION FILES` for binary attachments.** The reference marks it
-  "designed for File transfers" against `TEXT`'s Huffman. Unmeasured, and a
-  JPEG is already compressed, so the gain may be nil. Whether the setting is
-  sender-side only or must match at both ends is **not established** — verify
-  before shipping it.
-- **`CLEANTXBUFFER`** — rejected 2026-07-28. Registered-user only, so it
-  cannot be relied on across a net of mixed licences.
-
-**Robustness / polish**
-- MFSK soft-decision Viterbi + PLL bit-sync for real fading (current sync is
-  tuned for clean audio).
-- Heard-station signal quality from the modem (SNR) to rank relay candidates.
-- Sanity-check an imported route table against heard stations and warn on a
-  next hop this station has never heard (see `docs/MESH_ROUTING.md`).
-
-**Cross-cutting TODO**
-- Persist session history / message log to disk.
-- Encryption/compression flags are defined in the frame but not yet applied.
-- Config validation + first-run wizard.
-- Unit tests promoted into a real `tests/` suite + CI.
+Session/event-history persistence is intentionally not a development target.
+The current bounded live history, structured diagnostics and diagnostic export
+are considered sufficient for operations.
 
 ---
 
@@ -454,6 +388,9 @@ table's `freq_hz` entries are reused as an alert channel list.
   skipped. Each channel is attempted independently — a failed QSY costs that
   channel and is logged with its frequency. Stops early (and still restores) if
   the control channel is stopped or VARA takes the codec.
+- Since 0.6.47 only channels compatible with the live control modem are used:
+  AFSK stays on FM-family modes and MFSK stays on SSB/data modes. Retuning does
+  not silently put the wrong waveform on another band.
 - Runs on a worker (`alert-sweep`), so the UI never blocks. In the send dialog
   a checkbox is ticked by default for EMERGENCY/PRIORITY codes only, and the
   confirmation says the radio will be retuned.
@@ -659,6 +596,9 @@ A `Heard on` column records the CAT frequency at reception
 (`Orchestrator.channel_frequency`), which after a QSY or a sweep says which
 channel the contact was on.
 
+**Field status:** S/N estimation and heard-channel recording were confirmed
+working by the operator on 2026-08-01.
+
 ## Map operations and safe no-CAT tuning (0.6.46)
 
 The first map-background field capture exposed that the original one-pixel
@@ -689,31 +629,44 @@ alert sweeps are suppressed for no-CAT, because issuing `F` commands to the
 Dummy model changes only the simulator and would put every supposed channel on
 the same real frequency.
 
-Software verification: 289 tests pass, including pixel-level contrast,
+Software verification for 0.6.46: 289 tests pass, including pixel-level contrast,
 station hit testing, mail-link selection, compose prefill, independent map
 ownership, a no-CAT poll that sends only `t` (never `f/m/l`), and both QSY
 branches proving Cancel emits no announcement while OK updates the dial before
 the announcement.
 
+## P0 operational hardening (0.6.47 — software complete, field pass pending)
+
+- **Production channel scanner:** the current channel plus compatible route
+  frequencies form a frozen plan. Network UI exposes Start/Stop, dwell,
+  optional S-meter threshold and Scanning/Holding/Paused state. CAT work runs on
+  a worker under the radio lock; decoded activity holds the channel, sessions
+  and payloads pause it, and Stop restores the home frequency/mode. No-CAT is
+  rejected and outbound mail/alerts/PTT tests require scanning to stop first.
+- **Modem-compatible movement:** both scanner and alert sweep keep AFSK on
+  FM-family modes and MFSK on SSB/data modes. Retuning never pretends to replace
+  the live audio modem.
+- **Rejected candidate evidence:** an invalid modem candidate is classified
+  before the orchestrator and stored as `last-bad-control.json` beside the WAV,
+  including reason, modem, S/N, length and payload hex. Diagnostics exposes the
+  record and a session counter.
+- **Software verification:** 299 tests pass. Remaining P0 evidence is explicitly
+  operational: scanner CAT movement/hold/home return, alert timing and copy count
+  on air, and classification of the next naturally occurring rejected frame.
+
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,
   reported from the air 2026-07-30, HF and FM; the alert itself arrived and
-  displayed correctly every time). Logs pending from OK7PS. Cosmetic so far,
-  but worth chasing because the message means the demodulator handed
-  `_handle_payload` (`modem/audio.py`) bytes that its own
-  `_is_valid_control_payload` validator should already have rejected. Two
+  displayed correctly every time). Since 0.6.47 rejected candidates are kept
+  outside the orchestrator and captured as JSON + WAV with their exact bytes,
+  reason, modem and S/N. The next natural capture should distinguish two
   leads: (a) alerts are the longest frames we transmit (48 B vs 34 B for a
   HAVE_MSG) and there are simply more of them on air — 3 repeats plus relays —
   so a demod window is more likely to catch a truncated burst; (b) a relay and
   a source repeat can overlap despite the jitter, and a collided burst
   decodes to garbage. Check whether the offending payload is a prefix of a
   good frame before assuming a decoder bug.
-- Taskbar/tray icon required an AppUserModelID + forced re-apply to override the
-  pythonw default — verify it sticks after CustomTkinter theme changes.
 - `rigctl -l` model ids change between Hamlib versions — the live "Browse all"
   picker is authoritative; curated ids were verified against Hamlib 4.7.1.
-- AFSK bit-sync uses a phase search tuned for clean audio; real fading channels
-  may need a PLL/transition-tracking sync (revisit during on-air bring-up).
 - Station-hash id prefix is 12-bit, so a rare hash collision between two
   callsigns is possible; identity is really (source, msg_id) if ever needed.
-```

@@ -43,6 +43,8 @@ Completed: 2026-07-24
 - Installer SHA-256:
   `ca5af20699d01624db65a039896397718ed90ca625217a62442b3bd81bad2478`
 - Signature status: unsigned (expected for this development build)
+- Field verification confirmed 2026-08-01: clean Windows installation without
+  system Python, upgrade-in-place and uninstall all passed.
 
 The hardware-safe smoke test verifies that startup and background ticks do not
 start the audio transport, key PTT or transmit queued mail. A message remains

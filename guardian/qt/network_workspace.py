@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QHBoxLayout,
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTabWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -36,6 +38,7 @@ class NetworkWorkspace(QWidget):
         tabs = QTabWidget()
         tabs.addTab(self._routes_page(), tr("network.routes"))
         tabs.addTab(self._heard_page(), tr("network.heard"))
+        tabs.addTab(self._scanner_page(), tr("network.scanner"))
         outer.addWidget(tabs, 1)
         self.refresh()
 
@@ -116,6 +119,57 @@ class NetworkWorkspace(QWidget):
         )
         layout.addWidget(self.heard_table, 1)
         return page
+
+    def _scanner_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        hint = QLabel(tr("network.scanner_hint"))
+        hint.setWordWrap(True)
+        hint.setObjectName("Metadata")
+        layout.addWidget(hint)
+        form = QFormLayout()
+        self.scanner_status = QLabel()
+        self.scanner_current = QLabel("—")
+        self.scanner_channels = QLabel("0")
+        self.scanner_dwell = QSpinBox()
+        self.scanner_dwell.setRange(1, 300)
+        self.scanner_dwell.setValue(max(1, int(self.runtime.config.scan_dwell)))
+        self.scanner_use_signal = QCheckBox(tr("network.scanner_use_signal"))
+        self.scanner_threshold = QSpinBox()
+        self.scanner_threshold.setRange(-200, 200)
+        threshold = self.runtime.config.scan_signal_threshold
+        self.scanner_use_signal.setChecked(threshold is not None)
+        self.scanner_threshold.setValue(int(threshold or 0))
+        self.scanner_threshold.setEnabled(threshold is not None)
+        self.scanner_use_signal.toggled.connect(self.scanner_threshold.setEnabled)
+        form.addRow(tr("network.scanner_status"), self.scanner_status)
+        form.addRow(tr("network.scanner_current"), self.scanner_current)
+        form.addRow(tr("network.scanner_channels"), self.scanner_channels)
+        form.addRow(tr("network.scanner_dwell"), self.scanner_dwell)
+        form.addRow(self.scanner_use_signal)
+        form.addRow(tr("network.scanner_threshold"), self.scanner_threshold)
+        layout.addLayout(form)
+        self.scanner_toggle = QPushButton()
+        self.scanner_toggle.setObjectName("primaryAction")
+        self.scanner_toggle.clicked.connect(self._toggle_scanner)
+        layout.addWidget(self.scanner_toggle)
+        layout.addStretch()
+        return page
+
+    def _toggle_scanner(self) -> None:
+        operations = self.runtime.operations
+        if operations.scanner is not None:
+            operations.stop_scanner()
+        else:
+            self.runtime.config.scan_dwell = float(self.scanner_dwell.value())
+            self.runtime.config.scan_signal_threshold = (
+                int(self.scanner_threshold.value())
+                if self.scanner_use_signal.isChecked()
+                else None
+            )
+            self.runtime.config.save()
+            operations.start_scanner()
+        self.refresh()
 
     def _selected_route(self) -> Route | None:
         row = self.routes_table.currentRow()
@@ -237,3 +291,37 @@ class NetworkWorkspace(QWidget):
             )
             for column, value in enumerate(values):
                 self.heard_table.setItem(row, column, QTableWidgetItem(value))
+        network = self.runtime.snapshots.read().network
+        if network.scanner_paused:
+            scanner_status = tr("network.scanner_paused")
+        elif network.scanner_holding:
+            scanner_status = tr("network.scanner_holding")
+        elif network.scanner_active:
+            scanner_status = tr("network.scanner_scanning")
+        else:
+            scanner_status = tr("network.scanner_stopped")
+        self.scanner_status.setText(scanner_status)
+        self.scanner_current.setText(
+            (
+                f"{network.scanner_frequency_hz / 1_000_000:.4f} MHz"
+                + (f" — {network.scanner_channel}" if network.scanner_channel else "")
+            )
+            if network.scanner_frequency_hz
+            else "—"
+        )
+        available = (
+            network.scanner_channels
+            if network.scanner_active
+            else len(self.runtime.operations.scanner_channels())
+        )
+        self.scanner_channels.setText(str(available))
+        self.scanner_toggle.setText(
+            tr("network.scanner_stop")
+            if network.scanner_active
+            else tr("network.scanner_start")
+        )
+        self.scanner_dwell.setEnabled(not network.scanner_active)
+        self.scanner_use_signal.setEnabled(not network.scanner_active)
+        self.scanner_threshold.setEnabled(
+            not network.scanner_active and self.scanner_use_signal.isChecked()
+        )

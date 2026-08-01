@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import platform as _platform
@@ -537,6 +539,8 @@ class AudioControlTransport(ControlTransport):
         self._peak = 0.0
         self._max_peak = 0.0
         self._last_diagnostic_audio = 0.0
+        self.rejected_control_candidates = 0
+        self.last_rejected_control: dict | None = None
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
@@ -734,8 +738,37 @@ class AudioControlTransport(ControlTransport):
                 window,
                 validator=self._is_valid_control_payload,
             ):
-                if not self._handle_payload(payload, snr):
-                    self._save_bad_audio(window)
+                self._process_candidate(payload, snr, window)
+
+    def _process_candidate(
+        self,
+        payload: bytes,
+        snr: float | None,
+        window: np.ndarray,
+    ) -> bool:
+        """Classify a modem candidate before it reaches the orchestrator."""
+        try:
+            ControlFrame.decode(payload)
+        except FrameError as exc:
+            self.rejected_control_candidates += 1
+            metadata = {
+                "generated_utc": datetime.now(timezone.utc).isoformat(),
+                "modem": getattr(self.modem, "name", type(self.modem).__name__),
+                "sample_rate": self.fs,
+                "snr_db": snr,
+                "payload_length": len(payload),
+                "payload_hex": payload.hex(),
+                "reason": str(exc),
+                "rejected_candidates": self.rejected_control_candidates,
+            }
+            self.last_rejected_control = metadata
+            self.on_log(
+                "RX rejected control candidate: "
+                f"{exc}; {len(payload)} B; head={payload[:12].hex() or '-'}"
+            )
+            self._save_bad_audio(window, metadata)
+            return False
+        return self._handle_payload(payload, snr)
 
     @staticmethod
     def _is_valid_control_payload(payload: bytes) -> bool:
@@ -767,12 +800,18 @@ class AudioControlTransport(ControlTransport):
         self._rx_frames.append((frame, snr))
         return True
 
-    def _save_bad_audio(self, samples: np.ndarray) -> None:
+    def _save_bad_audio(self, samples: np.ndarray, metadata: dict | None = None) -> None:
         path = self.diagnostic_audio_path
         now = time.monotonic()
         if path is None or now - self._last_diagnostic_audio < 8.0:
             return
         self._last_diagnostic_audio = now
+        metadata = metadata or {
+            "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "modem": getattr(self.modem, "name", type(self.modem).__name__),
+            "sample_rate": self.fs,
+            "reason": "demodulation failed",
+        }
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             pcm = (
@@ -783,6 +822,11 @@ class AudioControlTransport(ControlTransport):
                 recording.setsampwidth(2)
                 recording.setframerate(self.fs)
                 recording.writeframes(pcm.tobytes())
+            metadata_path = path.with_suffix(".json")
+            metadata_path.write_text(
+                json.dumps(metadata, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
             self.on_log(f"Failed control audio saved: {path}")
         except OSError as exc:
             self.on_log(f"Failed control audio could not be saved: {exc}")

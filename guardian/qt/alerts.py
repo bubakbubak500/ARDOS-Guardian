@@ -205,6 +205,13 @@ class AlertDialog(QDialog):
         )
         if confirm is not QMessageBox.StandardButton.Yes:
             return
+        if self.runtime.operations.scanner is not None:
+            QMessageBox.warning(
+                self,
+                tr("alert.dialog_title"),
+                tr("alert.stop_scanner"),
+            )
+            return
         if not self.runtime.operations.send_alert(code, note, sweep=sweep):
             QMessageBox.warning(
                 self,

@@ -308,7 +308,14 @@ def help_topics() -> list[HelpTopic]:
             <p>The route frequencies are also the channel list for a net alert:
             when the sweep is confirmed in the alert dialog, the radio visits
             each of them, repeats the same alert, and returns to the frequency
-            and mode it started on.</p>
+            and mode it started on. Only channels compatible with the active
+            FM or HF control modem are visited.</p>
+            <p>The Channel scanner page uses the current frequency as home and
+            adds compatible route frequencies. Start is always explicit and
+            requires a live control channel plus a CAT-controlled Hamlib radio.
+            Activity or a configured S-meter threshold holds the channel. Stop
+            returns home. Stop scanning before sending mail, an alert or a PTT
+            test; incoming sessions pause it automatically.</p>
             """,
             """
             <h2>Trasy a stav sítě</h2>
@@ -330,7 +337,14 @@ def help_topics() -> list[HelpTopic]:
             <p>Kmitočty z tras slouží také jako seznam kanálů pro výstrahu do
             sítě: pokud přeladění v dialogu výstrahy potvrdíte, rádio postupně
             navštíví každý z nich, zopakuje tam stejnou výstrahu a vrátí se na
-            původní kmitočet i režim.</p>
+            původní kmitočet i režim. Navštíví jen kanály kompatibilní s právě
+            aktivním řídicím modemem pro FM nebo HF.</p>
+            <p>Stránka Scanner kanálů používá současnou frekvenci jako domácí a
+            doplní kompatibilní frekvence tras. Spuštění je vždy výslovné a
+            vyžaduje živý řídicí kanál a rádio ovládané přes Hamlib CAT. Aktivita
+            nebo nastavený práh S-metru kanál podrží. Zastavení vrátí rádio domů.
+            Před odesláním pošty, výstrahy nebo testem PTT scanner zastavte;
+            příchozí relace jej pozastaví automaticky.</p>
             """,
             "route heard sessions ttl relay qsy trasa slyšené relace",
         ),

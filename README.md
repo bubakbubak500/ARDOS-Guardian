@@ -87,7 +87,7 @@ See [Product description](PRODUCT.md) for intended use and boundaries and
 |-------|-------------------------------|--------|
 | 1     | UI, config, protocol, drivers | ✅ done |
 | 2     | VARA session state-machine    | ✅ done |
-| 3     | Control modem (AFSK + MFSK) + payload backends | ✅ done* |
+| 3     | Control modem (AFSK + MFSK) + payload backends | ✅ done |
 | 4     | Smart routing / heard-stations | ✅ done |
 | 5     | Multi-channel scanning / mesh | ✅ done* |
 
@@ -95,15 +95,20 @@ See [Product description](PRODUCT.md) for intended use and boundaries and
 
 Heard-stations registry (built from every received control frame),
 **ROUTE_QUERY/ROUTE_OFFER** route discovery when no manual route exists,
-learned-path memory, **multi-hop auto-relay** (TTL + loop avoidance), and a
-tick-driven **channel scanner** (dwell + activity hold). The **Mesh** tab shows
-heard stations and toggles auto-route / auto-relay; channel scanning lives there
-too. (*) scanning needs a real radio to tune.
+learned-path memory and **multi-hop auto-relay** (TTL + loop avoidance) are
+built and tested. The production **channel scanner** has explicit Network UI,
+dwell + activity/S-meter hold, session/payload safety pauses and worker-based
+CAT tuning. (*) Its software paths are tested; physical-radio scanning remains
+to be field-verified.
 
-\*Phase 3 is software-complete: AFSK 1200 (FM) and MFSK-16 (HF, ~0 dB SNR) modems
+Phase 3 is complete: AFSK 1200 (FM) and MFSK-16 (HF, ~0 dB SNR) modems
 with rate-1/2 K=7 convolutional FEC and audio device pickers. The production UI
 uses the real audio control channel; deterministic loopback remains an internal
-test transport. Remaining is on-air bring-up over a real radio + codec.
+test transport. Both control modems and VARA FM/HF payloads have been confirmed
+on air.
+
+The current prioritized work list is maintained in
+[Development backlog](docs/DEVELOPMENT_BACKLOG.md).
 
 ### Phase 3 — control modem + payload transport
 

@@ -176,7 +176,18 @@ class DiagnosticsDialog(QDialog):
     def report(self) -> dict:
         snapshot = self.runtime.snapshots.read()
         diagnostic_audio = config_dir() / "last-bad-control.wav"
+        diagnostic_metadata = diagnostic_audio.with_suffix(".json")
         transport = self.runtime.operations.audio_transport
+        rejected_metadata = None
+        if diagnostic_metadata.exists():
+            try:
+                rejected_metadata = json.loads(
+                    diagnostic_metadata.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                rejected_metadata = {"path": str(diagnostic_metadata), "unreadable": True}
+        if transport is not None and transport.last_rejected_control is not None:
+            rejected_metadata = transport.last_rejected_control
         return {
             "generated_utc": datetime.now(timezone.utc).isoformat(),
             "guardian_version": __version__,
@@ -187,6 +198,10 @@ class DiagnosticsDialog(QDialog):
             "config_path": str(DEFAULT_CONFIG_PATH),
             "last_bad_control_audio": (
                 str(diagnostic_audio) if diagnostic_audio.exists() else None
+            ),
+            "last_rejected_control": rejected_metadata,
+            "rejected_control_candidates": (
+                transport.rejected_control_candidates if transport is not None else 0
             ),
             "control_audio_levels": (
                 transport.levels() if transport is not None else None

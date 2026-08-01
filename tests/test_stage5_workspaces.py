@@ -28,7 +28,9 @@ from guardian.qt.mail_workspace import (
 )
 from guardian.qt.network_workspace import NetworkWorkspace
 from guardian.qt.runtime import ShellRuntime
+from guardian.radio import Channel
 from guardian.routing import Route, RouteTable
+from guardian.services import NetworkSnapshot
 
 
 def _application() -> QApplication:
@@ -406,6 +408,43 @@ def test_network_workspace_allows_direct_route_and_formats_operator_inputs() -> 
         assert workspace.destination.text() == "OK1AAA"
         assert workspace.frequency.text() == "144.5200 MHz"
         assert workspace.routes_table.item(0, 3).text() == "144.5200 MHz"
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_network_workspace_exposes_live_scanner_state(monkeypatch) -> None:
+    _application()
+    runtime = ShellRuntime()
+    monkeypatch.setattr(
+        runtime.operations,
+        "scanner_channels",
+        lambda: [
+            Channel("Home", 145_500_000, "FM"),
+            Channel("145.5500 MHz", 145_550_000, "FM"),
+        ],
+    )
+    workspace = NetworkWorkspace(runtime)
+    try:
+        workspace.refresh()
+        assert workspace.scanner_channels.text() == "2"
+        assert workspace.scanner_toggle.text() == tr("network.scanner_start")
+
+        runtime.snapshots.update(
+            network=NetworkSnapshot(
+                control_channel_active=True,
+                scanner_active=True,
+                scanner_holding=True,
+                scanner_channel="145.5500 MHz",
+                scanner_frequency_hz=145_550_000,
+                scanner_channels=2,
+            )
+        )
+        workspace.refresh()
+        assert workspace.scanner_status.text() == tr("network.scanner_holding")
+        assert "145.5500" in workspace.scanner_current.text()
+        assert workspace.scanner_toggle.text() == tr("network.scanner_stop")
+        assert not workspace.scanner_dwell.isEnabled()
     finally:
         workspace.close()
         runtime.close()

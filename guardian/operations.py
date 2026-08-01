@@ -24,7 +24,7 @@ from .protocol import (
     decode_alert,
     max_note_length,
 )
-from .radio import make_driver
+from .radio import Channel, ChannelPlan, ChannelScanner, make_driver
 from .radio.presets import DUMMY_MODEL, find_executable
 from .radio.rigctld_launcher import RigctldProcess
 from .routing import HeardStations, RouteTable
@@ -86,6 +86,20 @@ PTT_TEST_SECONDS = 2.0
 PTT_TEST_MAX_SECONDS = 5.0
 
 
+def control_mode_compatible(modem: str, mode: str) -> bool:
+    """Whether one live control modem can be used on ``mode``.
+
+    Retuning does not replace the audio modem.  Silently sending AFSK on an HF
+    USB route (or MFSK on FM) would make both scanning and an alert sweep appear
+    successful locally while putting unusable audio on air.
+    """
+    value = (mode or "").strip().upper().replace("-", "")
+    active = (modem or "").strip().lower()
+    if active == "mfsk16":
+        return value in {"USB", "LSB", "PKTUSB", "PKTLSB", "DATAUSB", "DATALSB"}
+    return value in {"FM", "NFM", "PKTFM", "DATAFM"}
+
+
 class Operations:
     """Own hardware objects while exposing only non-blocking UI commands."""
 
@@ -136,6 +150,11 @@ class Operations:
         self.confirm_manual_qsy: Callable[[str, int, str], bool] | None = None
         self.alerts: list[AlertRecord] = []      # newest first
         self.net = self._build_net(NullTransport())
+        self.scanner: ChannelScanner | None = None
+        self._scanner_home: Channel | None = None
+        self._scanner_paused = False
+        self._scanner_last_heard = 0.0
+        self._scanner_generation = 0
 
     def _log(
         self,
@@ -217,6 +236,16 @@ class Operations:
                 level=LogLevel.WARNING,
             )
             return False
+        if self.scanner is not None:
+            self._log(
+                dual(
+                    "Alert not sent: stop the channel scanner first.",
+                    "Výstraha neodeslána: nejprve zastavte scanner kanálů.",
+                ),
+                LogLevel.WARNING,
+                source="alert",
+            )
+            return False
         frame = self.net.send_alert(code, note)
         if sweep:
             self._start_alert_sweep(frame)
@@ -227,6 +256,186 @@ class Operations:
         if self.is_no_cat_radio():
             return int(self.config.manual_frequency_hz or 0) or None
         return self.snapshots.read().radio.frequency_hz
+
+    def scanner_channels(self) -> list[Channel]:
+        """Freeze the current channel and compatible route frequencies."""
+        snapshot = self.snapshots.read().radio
+        home_frequency = self.current_frequency()
+        if not home_frequency:
+            return []
+        fallback_mode = "USB" if self.config.active_modem() == "mfsk16" else "FM"
+        home_mode = (snapshot.mode or fallback_mode).strip().upper()
+        if not control_mode_compatible(self.config.active_modem(), home_mode):
+            return []
+        channels = [Channel("Home", int(home_frequency), home_mode)]
+        seen = {int(home_frequency)}
+        for frequency, mode in self.routes.frequencies():
+            frequency = int(frequency)
+            normal_mode = (mode or fallback_mode).strip().upper()
+            if frequency in seen or not control_mode_compatible(
+                self.config.active_modem(), normal_mode
+            ):
+                continue
+            seen.add(frequency)
+            channels.append(
+                Channel(f"{frequency / 1_000_000:.4f} MHz", frequency, normal_mode)
+            )
+        return channels
+
+    def start_scanner(self) -> bool:
+        """Start receive-only scanning after an explicit operator action."""
+        if self.scanner is not None and self.scanner.enabled:
+            return True
+        snapshot = self.snapshots.read()
+        reason = ""
+        if self.audio_transport is None:
+            reason = dual(
+                "start the live control channel first",
+                "nejprve spusťte živý řídicí kanál",
+            )
+        elif self.config.radio_backend != "hamlib" or self.is_no_cat_radio():
+            reason = dual(
+                "a real CAT-controlled Hamlib radio is required",
+                "je potřeba skutečné rádio ovládané přes Hamlib CAT",
+            )
+        elif not snapshot.radio.connected:
+            reason = dual("the radio is not connected", "rádio není připojené")
+        elif self._payload_active.is_set() or self._active_session_count():
+            reason = dual("a session is active", "probíhá relace")
+        elif self.workers.is_active("alert-sweep"):
+            reason = dual("an alert sweep is active", "probíhá přeladění výstrahy")
+        channels = self.scanner_channels() if not reason else []
+        if not reason and len(channels) < 2:
+            reason = dual(
+                "add at least one compatible route frequency",
+                "přidejte alespoň jednu kompatibilní frekvenci trasy",
+            )
+        if reason:
+            self._log(
+                dual("Scanner not started: ", "Scanner nebyl spuštěn: ") + reason + ".",
+                LogLevel.WARNING,
+                source="scanner",
+            )
+            self._update_network_snapshot()
+            return False
+        self._scanner_generation += 1
+        self.scanner = ChannelScanner(
+            ChannelPlan(channels),
+            dwell=self.config.scan_dwell,
+            signal_threshold=self.config.scan_signal_threshold,
+        )
+        self._scanner_home = channels[0]
+        self.scanner.start(time.monotonic())
+        active = self.heard.active(time.monotonic())
+        self._scanner_last_heard = active[0].last_heard if active else 0.0
+        self._scanner_paused = False
+        self._log(
+            dual(
+                f"Channel scanner started on {len(channels)} channels.",
+                f"Scanner kanálů spuštěn pro {len(channels)} kanálů.",
+            ),
+            source="scanner",
+        )
+        self._update_network_snapshot()
+        return True
+
+    def stop_scanner(self, *, restore: bool = True, log: bool = True) -> bool:
+        scanner = self.scanner
+        if scanner is None:
+            return False
+        scanner.stop()
+        home = self._scanner_home
+        self.scanner = None
+        self._scanner_home = None
+        self._scanner_paused = False
+        self._scanner_generation += 1
+        if restore and home is not None:
+            self._schedule_scanner_tune(home, task_name="scanner-home", restoring=True)
+        if log:
+            self._log(
+                dual("Channel scanner stopped.", "Scanner kanálů zastaven."),
+                source="scanner",
+            )
+        self._update_network_snapshot()
+        return True
+
+    def _active_session_count(self) -> int:
+        return sum(
+            not message.state.terminal for message in self.net.sessions.values()
+        )
+
+    def _tick_scanner(self, now: float) -> None:
+        scanner = self.scanner
+        if scanner is None or not scanner.enabled:
+            self._scanner_paused = False
+            return
+        paused = (
+            self._payload_active.is_set()
+            or bool(self._active_session_count())
+            or self.workers.is_active("alert-sweep")
+            or self.workers.is_active("radio-control")
+            or self.workers.is_active("scanner-home")
+        )
+        self._scanner_paused = paused
+        if paused or self.workers.is_active("scanner-tune"):
+            return
+        active = self.heard.active(now)
+        newest = active[0].last_heard if active else 0.0
+        received = newest > self._scanner_last_heard
+        if received:
+            self._scanner_last_heard = newest
+        signal = self.snapshots.read().radio.signal
+        was_holding = scanner.holding
+        channel = scanner.tick(now, signal=signal, activity=received)
+        if scanner.holding and not was_holding:
+            self._log(
+                dual(
+                    f"Scanner holding on {scanner.current.name} due to activity.",
+                    f"Scanner drží na {scanner.current.name} kvůli aktivitě.",
+                ),
+                source="scanner",
+            )
+        if channel is not None:
+            self._schedule_scanner_tune(channel)
+
+    def _schedule_scanner_tune(
+        self,
+        channel: Channel,
+        *,
+        task_name: str = "scanner-tune",
+        restoring: bool = False,
+    ) -> bool:
+        generation = self._scanner_generation
+
+        def operation() -> Channel:
+            with self._radio_lock:
+                self.radio.set_frequency(channel.freq_hz)
+                if channel.mode:
+                    self.radio.set_mode(channel.mode)
+            return channel
+
+        def completed(result: TaskResult) -> None:
+            if result.error:
+                self._log(
+                    dual(
+                        f"Scanner could not tune {channel.name}: {result.error}",
+                        f"Scanner nemohl přeladit na {channel.name}: {result.error}",
+                    ),
+                    LogLevel.ERROR if restoring else LogLevel.WARNING,
+                    source="scanner",
+                )
+            elif restoring or generation == self._scanner_generation:
+                action = dual("returned to", "vrácen na") if restoring else dual("tuned to", "naladěn na")
+                self._log(
+                    dual("Scanner ", "Scanner ")
+                    + action
+                    + f" {channel.freq_hz / 1_000_000:.4f} MHz {channel.mode}.",
+                    source="scanner",
+                )
+            self.request_radio_poll(force=True)
+            self._update_network_snapshot()
+
+        return self.workers.submit(task_name, operation, completed)
 
     def is_no_cat_radio(self) -> bool:
         return (
@@ -251,10 +460,14 @@ class Operations:
         if self.is_no_cat_radio():
             return []
         here = self.current_frequency()
+        fallback_mode = "USB" if self.config.active_modem() == "mfsk16" else "FM"
         channels = [
-            (freq, mode)
+            (freq, mode or fallback_mode)
             for freq, mode in self.routes.frequencies()
             if freq != here
+            and control_mode_compatible(
+                self.config.active_modem(), mode or fallback_mode
+            )
         ]
         return channels[:ALERT_SWEEP_MAX_CHANNELS]
 
@@ -514,6 +727,7 @@ class Operations:
         rigctld child is kept — `ensure()` already restarts it when its
         command line no longer matches.
         """
+        self.stop_scanner(restore=False)
         with self._radio_lock:
             try:
                 self.radio.close()
@@ -627,6 +841,15 @@ class Operations:
             message = dual(
                 "No radio control is configured, so there is no PTT to test.",
                 "Řízení rádia není nastaveno, není tedy co testovat.",
+            )
+            self._log(message, LogLevel.WARNING, source="radio")
+            if on_result is not None:
+                on_result(False, message)
+            return False
+        if self.scanner is not None:
+            message = dual(
+                "Stop the channel scanner before testing PTT.",
+                "Před testem PTT zastavte scanner kanálů.",
             )
             self._log(message, LogLevel.WARNING, source="radio")
             if on_result is not None:
@@ -760,6 +983,8 @@ class Operations:
         )
 
     def disconnect_radio(self) -> bool:
+        self.stop_scanner(restore=False)
+
         def operation() -> None:
             with self._radio_lock:
                 self.radio.close()
@@ -984,6 +1209,7 @@ class Operations:
         return False
 
     def stop_control_channel(self) -> None:
+        self.stop_scanner(restore=True)
         if self.audio_transport is not None:
             self.audio_transport.stop()
         self.audio_transport = None
@@ -1002,6 +1228,16 @@ class Operations:
                 dual(
                     "Start the audio control channel before sending.",
                     "Před odesláním spusťte zvukový řídicí kanál.",
+                ),
+                LogLevel.WARNING,
+                source="mail",
+            )
+            return False
+        if self.scanner is not None:
+            self._log(
+                dual(
+                    "Message remains queued: stop the channel scanner before sending.",
+                    "Zpráva zůstává ve frontě: před odesláním zastavte scanner kanálů.",
                 ),
                 LogLevel.WARNING,
                 source="mail",
@@ -1052,6 +1288,7 @@ class Operations:
         self.net.tick(now)
         self._tick_beacon(now)
         self._tick_auto_deliver(now)
+        self._tick_scanner(now)
         self.request_radio_poll(now=now)
         self._update_vara_snapshot()
         self._update_network_snapshot(now)
@@ -1063,7 +1300,11 @@ class Operations:
         asking, so they only run with a live control channel, nothing already
         in flight, and no payload transfer holding the codec.
         """
-        if self.audio_transport is None or self._payload_active.is_set():
+        if (
+            self.audio_transport is None
+            or self._payload_active.is_set()
+            or self.scanner is not None
+        ):
             return False
         return not any(
             not message.state.terminal for message in self.net.sessions.values()
@@ -1200,14 +1441,19 @@ class Operations:
 
     def _update_network_snapshot(self, now: float | None = None) -> None:
         now = time.monotonic() if now is None else now
+        scanner = self.scanner
+        channel = scanner.current if scanner is not None else None
         self.snapshots.update(
             network=NetworkSnapshot(
-                active_sessions=sum(
-                    not message.state.terminal
-                    for message in self.net.sessions.values()
-                ),
+                active_sessions=self._active_session_count(),
                 heard_stations=len(self.heard.active(now)),
                 control_channel_active=self.audio_transport is not None,
+                scanner_active=bool(scanner and scanner.enabled),
+                scanner_holding=bool(scanner and scanner.holding),
+                scanner_paused=bool(scanner and self._scanner_paused),
+                scanner_channel=channel.name if channel else "",
+                scanner_frequency_hz=channel.freq_hz if channel else None,
+                scanner_channels=len(scanner.plan) if scanner else 0,
             )
         )
 
@@ -1485,6 +1731,7 @@ class Operations:
         self._qsy_previous = None
 
     def close(self) -> None:
+        self.stop_scanner(restore=False, log=False)
         try:
             self.stop_control_channel()
         except Exception:

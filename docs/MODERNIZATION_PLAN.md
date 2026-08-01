@@ -1,5 +1,8 @@
 # Guardian — analýza a plán modernizace UI, instalace a aktualizací
 
+> Tento dokument je historický implementační plán. Modernizace byla dokončena;
+> aktuální otevřené práce jsou vedené v `docs/DEVELOPMENT_BACKLOG.md`.
+
 Datum analýzy: 2026-07-23
 
 ## 1. Rozsah a pevné hranice
@@ -348,6 +351,9 @@ Výstup: měřitelný baseline, nikoli změna chování.
 
 Výstup: jeden instalační soubor pro běžného uživatele.
 
+Stav: dokončeno. Čistá instalace na Windows bez Pythonu, upgrade-in-place a
+odinstalace byly provozně ověřené a potvrzené 2026-08-01.
+
 ### Etapa 2 — aplikační služby a bezpečné workery
 
 - oddělit `GuardianApp` od doménových objektů pomocí controller/service vrstvy;
@@ -433,9 +439,7 @@ Výstup: bezpečný přechod mezi verzemi přes GitHub Releases.
 - data a konfigurace přežijí upgrade i odinstalaci, pokud uživatel výslovně
   nepožádá o jejich odstranění.
 
-## 13. Nejbližší doporučený krok
+## 13. Další práce
 
-Začít Etapou 0: testy a měřením současného UI. Současně lze připravit Etapu 1,
-protože installer/release infrastruktura nezasahuje do běhu VARA P2P ani
-Winlink. Samotný vizuální refaktor má začít až po definici snapshot rozhraní,
-aby nový Qt shell nepřevzal dnešní provázání `main_window.py`.
+Etapový plán modernizace je dokončený. Další práci vybírat podle priorit v
+`docs/DEVELOPMENT_BACKLOG.md`.
