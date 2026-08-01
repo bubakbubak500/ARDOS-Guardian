@@ -642,6 +642,96 @@ def test_two_stations_with_different_working_channels_agree_and_deliver(
         there_workers.close(wait=True)
 
 
+def test_a_proposal_is_followed_when_this_station_knows_no_reference(
+    tmp_path,
+) -> None:
+    # OK2IPW on air, 2026-08-01: no route entry of its own for the proposer and
+    # a radio snapshot whose frequency had been blanked by a CAT poll error.
+    # The band test then had nothing to compare against and failed closed, so a
+    # link with nothing wrong with it could not agree a channel. An unknown
+    # reference is not a reason to refuse; the amateur bands and the mode are.
+    operations, workers = _working_operations(tmp_path, RouteTable())
+    try:
+        operations.current_frequency = lambda: None
+        assert operations._working_channel_accept(
+            "OK7PS", working_channel_token(145_300_000, "FM")
+        ) == (145_300_000, "FM")
+        assert operations._working_channel_accept(
+            "OK7PS", working_channel_token(150_000_000, "FM")
+        ) is None
+        assert operations._working_channel_accept(
+            "OK7PS", working_channel_token(145_300_000, "USB")
+        ) is None
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_a_proposal_is_bounded_by_where_the_peer_was_heard(tmp_path) -> None:
+    # The frequency a station was last heard on outlives both a missing route
+    # entry and a failed CAT poll, so it is the reference that survives.
+    operations, workers = _working_operations(tmp_path, RouteTable())
+    try:
+        operations.current_frequency = lambda: None
+        operations.heard.record("OK7PS", 1.0, freq_hz=145_237_500)
+        assert operations._working_channel_accept(
+            "OK7PS", working_channel_token(145_300_000, "FM")
+        ) == (145_300_000, "FM")
+        assert operations._working_channel_accept(
+            "OK7PS", working_channel_token(29_500_000, "FM")
+        ) is None
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_the_field_case_delivers_when_only_the_proposer_configured_a_channel(
+    tmp_path,
+) -> None:
+    # The 2026-08-01 on-air failure, end to end: OK7PS proposes 145.300 from
+    # its route table, OK2IPW has no working channel of its own and no usable
+    # frequency in its snapshot. The session must run on 145.300, not die.
+    here, here_workers = _working_operations(
+        tmp_path / "here",
+        RouteTable([Route("OK2IPW", "", "", 145_237_500, "FM", 145_300_000, "FM")]),
+    )
+    there, there_workers = _working_operations(
+        tmp_path / "there", RouteTable(), callsign="OK2IPW"
+    )
+    there.current_frequency = lambda: None
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    receiver = Orchestrator(
+        "OK2IPW", bus.endpoint("receiver"), auto_complete=True, auto_route=False
+    )
+    sender.working_channel_offer = here._working_channel_offer
+    receiver.working_channel_accept = there._working_channel_accept
+    try:
+        message = sender.send_message(
+            "OK2IPW", "hello", msg_id=902, next_hop="OK2IPW"
+        )
+        now = 1.0
+        for _ in range(20):
+            delivered = bus.pump()
+            sender.tick(now)
+            receiver.tick(now)
+            if delivered == 0 and bus.idle:
+                break
+            now += 0.25
+
+        assert message.state is SessionState.DELIVERED
+        assert (message.working_frequency_hz, message.working_mode) == (
+            145_300_000,
+            "FM",
+        )
+        assert receiver.sessions[902].working_frequency_hz == 145_300_000
+    finally:
+        here.close()
+        there.close()
+        here_workers.close(wait=True)
+        there_workers.close(wait=True)
+
+
 def test_peer_may_not_move_this_station_to_another_band_or_mode(tmp_path) -> None:
     # Following a proposal is bounded automation, not remote control of the
     # dial: another band, a mode VARA cannot use here, and anything outside

@@ -84,6 +84,10 @@ _WORKING_MODE_CODES = {
     "DATALSB": "Y",
 }
 _WORKING_MODE_BY_CODE = {code: mode for mode, code in _WORKING_MODE_CODES.items()}
+# Answer to a WORKING_OFFER this station cannot follow: agree to run the
+# payload where the control frames already are. Not a valid channel token --
+# every real one ends in a mode code -- so it can never be mistaken for one.
+WORKING_CALLING_CHANNEL = "="
 
 
 def working_channel_token(frequency_hz: int, mode: str) -> str:
@@ -920,8 +924,19 @@ class Orchestrator:
             except Exception:  # noqa: BLE001
                 channel = None
         if channel is None:
-            self._send(FrameType.CANCEL, msg)
-            self._fail(msg, "working channel is disabled or does not match")
+            # Cancelling here threw the message away over a channel
+            # disagreement, which is the one thing a store-and-forward net must
+            # not do: the payload can always run where the control frames are
+            # already getting through. Answering with the calling-channel
+            # token keeps both peers where they are and starts VARA.
+            msg.working_frequency_hz, msg.working_mode = 0, ""
+            msg.working_token = WORKING_CALLING_CHANNEL
+            msg.t_state = self._now
+            self._send_working(FrameType.WORKING_ACK, msg)
+            self._emit(
+                msg,
+                "working channel not agreed; payload stays on the calling channel",
+            )
             return
         msg.working_frequency_hz, msg.working_mode = channel
         msg.working_token = f.destination
@@ -939,8 +954,19 @@ class Orchestrator:
             and msg.state is SessionState.NEGOTIATING_WORKING
             and f.source == msg.next_hop
             and f.next_hop == self.callsign
-            and f.destination == msg.working_token
         ):
+            return
+        if f.destination == WORKING_CALLING_CHANNEL:
+            # The peer cannot use what we proposed. A zero working frequency is
+            # what the payload layer already reads as "do not move".
+            msg.working_frequency_hz, msg.working_mode = 0, ""
+            msg.working_token = WORKING_CALLING_CHANNEL
+            self._emit(
+                msg,
+                f"{f.source} cannot use the proposed channel; "
+                "payload stays on the calling channel",
+            )
+        elif f.destination != msg.working_token:
             return
         self._start_vara(msg, f.source)
 

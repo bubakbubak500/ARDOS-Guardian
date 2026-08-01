@@ -25,7 +25,7 @@ from .protocol import (
     max_note_length,
 )
 from .radio import Channel, ChannelPlan, ChannelScanner, make_driver
-from .radio.bands import same_band
+from .radio.bands import band_for, same_band
 from .radio.presets import DUMMY_MODEL, find_executable
 from .radio.rigctld_launcher import RigctldProcess
 from .routing import HeardStations, RouteTable
@@ -1758,6 +1758,9 @@ class Operations:
         already works on -- never onto another band, never outside the amateur
         service, never onto a mode the local VARA cannot use, and never at all
         unless the operator opted into two-channel sessions with a CAT radio.
+        When this station knows of no band for the link at all, the amateur
+        bands and the mode are the whole envelope: refusing on a reference we
+        could not produce only breaks links that are otherwise fine.
         """
         if not self.config.separate_working_channels:
             return None
@@ -1774,21 +1777,43 @@ class Operations:
                 source="session",
             )
             return None
-        reference = self._working_channel_reference(callsign, local)
-        if not self._working_mode_compatible(mode) or not same_band(
-            frequency, reference
-        ):
-            self._log(
+        channel = f"{frequency / 1_000_000:.4f} MHz {mode}"
+        if not self._working_mode_compatible(mode):
+            self._refuse_working_channel(
+                callsign,
                 dual(
-                    f"Working channel proposed by {callsign} refused: "
-                    f"{frequency / 1_000_000:.4f} MHz {mode} is not a channel "
-                    "this station works that peer on.",
-                    f"Pracovní kanál navržený {callsign} odmítnut: "
-                    f"{frequency / 1_000_000:.4f} MHz {mode} není kanál, na "
-                    "kterém tato stanice s protistanicí pracuje.",
+                    f"{channel} is not a mode VARA "
+                    f"{(self.config.vara_mode or 'FM').strip().upper()} can work",
+                    f"{channel} není režim, se kterým VARA "
+                    f"{(self.config.vara_mode or 'FM').strip().upper()} pracuje",
                 ),
-                LogLevel.WARNING,
-                source="session",
+            )
+            return None
+        if band_for(frequency) is None:
+            self._refuse_working_channel(
+                callsign,
+                dual(
+                    f"{channel} is outside the amateur bands",
+                    f"{channel} je mimo amatérská pásma",
+                ),
+            )
+            return None
+        # An unknown reference is not a reason to refuse. It was: the band test
+        # silently failed closed whenever no reference could be produced -- a
+        # peer with no route entry of its own, or one CAT poll that errored and
+        # blanked the frequency in the snapshot -- and a link with nothing
+        # wrong with it could not agree a channel.
+        reference, origin = self._working_channel_reference(callsign, local)
+        if reference is not None and not same_band(frequency, reference):
+            self._refuse_working_channel(
+                callsign,
+                dual(
+                    f"{channel} is not in the band this station works that "
+                    f"peer on ({reference / 1_000_000:.4f} MHz, {origin})",
+                    f"{channel} není v pásmu, na kterém tato stanice "
+                    f"s protistanicí pracuje ({reference / 1_000_000:.4f} MHz, "
+                    f"{origin})",
+                ),
             )
             return None
         self._log(
@@ -1814,22 +1839,41 @@ class Operations:
         )
         return frequency, mode
 
+    def _refuse_working_channel(self, callsign: str, reason: str) -> None:
+        """Log a refused proposal so the reason is on the air-side record."""
+        self._log(
+            dual(
+                f"Working channel proposed by {callsign} refused: {reason}.",
+                f"Pracovní kanál navržený {callsign} odmítnut: {reason}.",
+            ),
+            LogLevel.WARNING,
+            source="session",
+        )
+
     def _working_channel_reference(
         self, callsign: str, local: tuple[int, str] | None
-    ) -> int | None:
-        """The channel a proposal is judged against: what we work this peer on.
+    ) -> tuple[int | None, str]:
+        """What a proposal is judged against, and where that came from.
 
-        The locally configured working channel first, then the route's calling
-        frequency, and only then where the radio happens to be tuned. Without
-        any of the three there is nothing to bound the proposal with, and it
-        is refused.
+        Four sources, most specific first, because any one of them can be
+        missing on a perfectly healthy station: the peer may have no route
+        entry here, and the radio snapshot carries no frequency at all after a
+        single CAT poll error. Where the peer was last *heard* is the source
+        that survives both. `(None, "")` means nothing is known, and the caller
+        must not read that as a reason to refuse.
         """
         if local is not None:
-            return local[0]
+            return local[0], dual("local working channel", "místní pracovní kanál")
         route = self.routes.freq_for(callsign)
         if route is not None and route[0]:
-            return int(route[0])
-        return self.current_frequency()
+            return int(route[0]), dual("route frequency", "frekvence trasy")
+        station = self.heard.get(callsign)
+        if station is not None and station.last_freq_hz:
+            return int(station.last_freq_hz), dual("heard on", "slyšeno na")
+        here = self.current_frequency()
+        if here:
+            return int(here), dual("current channel", "aktuální kanál")
+        return None, ""
 
     def _payload_send_qsy(self, message) -> bool:
         if self.config.separate_working_channels:

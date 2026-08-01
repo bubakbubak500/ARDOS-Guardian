@@ -707,6 +707,33 @@ the announcement.
 - **Software verification:** 321 tests pass. Still to prove on air with two CAT
   radios: the retune to a followed channel and the restore afterwards.
 
+## Working-channel field fixes (0.6.50)
+
+First on-air pass of the 0.6.49 negotiation, OK7PS ↔ OK2IPW on 2 m,
+2026-08-01: the proposal of 145.300 MHz FM was refused and the message failed.
+Two defects, both in what 0.6.49 added.
+
+- **The band test failed closed on a missing reference.** It compared the
+  proposal against the local working channel, else the route frequency, else
+  the current dial — and refused when none could be produced. Both inputs go
+  missing on a healthy station: the receiving station need not have a route
+  entry for the proposer, and one failed CAT poll replaces the whole radio
+  snapshot with an empty one (`RadioSnapshot(connected=False)`, frequency
+  included). With no reference, the mode and the amateur bands are now the
+  whole envelope; a reference, when there is one, still confines the proposal
+  to its band. Where the peer was last heard is a new source ahead of the dial,
+  because it survives both failures. Refusals name the failed test, the
+  reference and its origin.
+- **A refused channel cancelled the message.** It now answers `WORKING_ACK`
+  with a calling-channel token: both peers stay put and VARA runs the payload
+  where the control frames are already getting through. A zero working
+  frequency is what the payload layer already reads as "do not move", so
+  nothing below the session layer changed. Only the proposer's own token or
+  that calling-channel answer starts VARA.
+- **Software verification:** 325 tests pass, including the on-air case end to
+  end. Still to prove on air: the retune to a followed channel, the restore
+  afterwards, and the calling-channel fallback.
+
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,
   reported from the air 2026-07-30, HF and FM; the alert itself arrived and

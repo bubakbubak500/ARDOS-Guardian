@@ -6,6 +6,7 @@ from guardian.session import LoopbackBus, Message, Orchestrator, SessionState
 from guardian.routing import Route, RouteTable
 from guardian.session.orchestrator import (
     CONFIRM_TIMEOUT,
+    WORKING_CALLING_CHANNEL,
     TRANSFER_TIMEOUT,
     parse_working_channel_token,
     session_transfer_timeout_for,
@@ -109,10 +110,15 @@ def test_working_channel_token_reads_back_as_the_channel_it_encoded() -> None:
             parse_working_channel_token(bad)
 
 
-def test_mismatched_working_channels_cancel_without_starting_vara() -> None:
+def test_a_refused_working_channel_keeps_the_message_on_the_calling_channel() -> None:
+    # A channel disagreement must not throw the message away: the payload can
+    # always run where the control frames are already getting through. Zero is
+    # what the payload layer reads as "do not move".
     bus = LoopbackBus()
     sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
-    receiver = Orchestrator("OK1AAA", bus.endpoint("receiver"), auto_route=False)
+    receiver = Orchestrator(
+        "OK1AAA", bus.endpoint("receiver"), auto_complete=True, auto_route=False
+    )
     sender.working_channel_offer = lambda _peer: (145_550_000, "FM")
     receiver.working_channel_accept = lambda _peer, _token: None
     sent = _spy(sender)
@@ -122,9 +128,45 @@ def test_mismatched_working_channels_cancel_without_starting_vara() -> None:
     )
     _drain(bus, sender, receiver)
 
-    assert message.state is SessionState.CANCELLED
-    assert receiver.sessions[103].state is SessionState.FAILED
-    assert FrameType.START_VARA not in [frame.type for frame in sent]
+    assert message.state is SessionState.DELIVERED
+    assert receiver.sessions[103].state is SessionState.DELIVERED
+    assert message.working_frequency_hz == 0
+    assert receiver.sessions[103].working_frequency_hz == 0
+    assert message.working_token == WORKING_CALLING_CHANNEL
+    kinds = [frame.type for frame in sent]
+    assert FrameType.START_VARA in kinds
+    assert FrameType.CANCEL not in kinds
+
+
+def test_an_unrelated_working_ack_token_is_still_ignored() -> None:
+    # Only the proposer's own token or the calling-channel answer may start
+    # VARA; a stale or corrupted one must leave the session negotiating.
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    sender.working_channel_offer = lambda _peer: (145_550_000, "FM")
+
+    message = sender.send_message(
+        "OK1AAA", "hello", msg_id=113, next_hop="OK1AAA"
+    )
+    sender._on_frame(
+        ControlFrame(
+            type=FrameType.ACK_HAVE, source="OK1AAA", destination="OK1AAA",
+            next_hop="OK1AAA", message_id=113,
+        )
+    )
+    assert message.state is SessionState.NEGOTIATING_WORKING
+
+    def working_ack(token: str) -> ControlFrame:
+        return ControlFrame(
+            type=FrameType.WORKING_ACK, source="OK1AAA", destination=token,
+            next_hop="OK7PS", message_id=113,
+        )
+
+    sender._on_frame(working_ack("2XXXXXF"))
+    assert message.state is SessionState.NEGOTIATING_WORKING
+    sender._on_frame(working_ack(message.working_token))
+    assert message.state is SessionState.TRANSFERRING
+    assert message.working_frequency_hz == 145_550_000
 
 
 def test_relay_offer_ranking_uses_signal_then_freshness_then_callsign() -> None:
