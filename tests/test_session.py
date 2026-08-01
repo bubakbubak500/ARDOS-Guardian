@@ -1,3 +1,5 @@
+import pytest
+
 from guardian.protocol import ControlFrame, Flags, FrameType
 from guardian.routing import is_locator
 from guardian.session import LoopbackBus, Message, Orchestrator, SessionState
@@ -5,6 +7,7 @@ from guardian.routing import Route, RouteTable
 from guardian.session.orchestrator import (
     CONFIRM_TIMEOUT,
     TRANSFER_TIMEOUT,
+    parse_working_channel_token,
     session_transfer_timeout_for,
     working_channel_token,
 )
@@ -89,6 +92,21 @@ def test_opt_in_peers_agree_working_channel_before_starting_vara() -> None:
     assert receiver.sessions[102].working_token == token
     kinds = [frame.type for frame in sent]
     assert kinds.index(FrameType.WORKING_OFFER) < kinds.index(FrameType.START_VARA)
+
+
+def test_working_channel_token_reads_back_as_the_channel_it_encoded() -> None:
+    # A station that follows a proposal instead of matching it has nothing but
+    # the token to learn where the proposer wants to work.
+    for channel in (
+        (145_350_000, "FM"),
+        (145_300_000, "NFM"),
+        (7_053_000, "USB"),
+        (0, "PKTFM"),
+    ):
+        assert parse_working_channel_token(working_channel_token(*channel)) == channel
+    for bad in ("", "F", "1", "145350000Z", "14?350F"):
+        with pytest.raises(ValueError):
+            parse_working_channel_token(bad)
 
 
 def test_mismatched_working_channels_cancel_without_starting_vara() -> None:

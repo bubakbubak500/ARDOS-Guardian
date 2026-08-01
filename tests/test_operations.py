@@ -22,7 +22,7 @@ from guardian.services import (
     SnapshotStore,
     WorkerPool,
 )
-from guardian.session import SessionState
+from guardian.session import LoopbackBus, Orchestrator, SessionState
 from guardian.session.orchestrator import (
     ACK_TIMEOUT,
     START_TIMEOUT,
@@ -520,6 +520,186 @@ def test_opt_in_payload_channel_is_matched_tuned_and_restored(
     finally:
         operations.close()
         workers.close(wait=True)
+
+
+def _working_operations(tmp_path, routes: RouteTable, **overrides):
+    settings = {
+        "callsign": "OK7PS",
+        "radio_backend": "hamlib",
+        "rig_model": 3073,
+        "auto_qsy": True,
+        "separate_working_channels": True,
+        "vara_mode": "FM",
+    }
+    settings.update(overrides)
+    config = StationConfig(**settings)
+    workers = WorkerPool(max_workers=1)
+    operations = Operations(
+        config,
+        EventBus(),
+        SnapshotStore(),
+        workers,
+        MessageStore(tmp_path / "mail-working-follow"),
+        routes,
+        HeardStations(),
+    )
+    operations.radio = _SweepRadio(145_500_000, "FM")
+    return operations, workers
+
+
+def test_peer_working_channel_is_followed_when_the_local_route_differs(
+    tmp_path, monkeypatch
+) -> None:
+    # The two operators typed different working frequencies for the same link,
+    # which is the ordinary case. The station that opens the session names the
+    # channel; this one goes there instead of failing the negotiation.
+    routes = RouteTable(
+        [Route("OK2IPW", "", "", 145_500_000, "FM", 145_300_000, "FM")]
+    )
+    operations, workers = _working_operations(tmp_path, routes)
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda _seconds: None)
+    try:
+        proposed = working_channel_token(145_350_000, "FM")
+        assert operations._working_channel_offer("OK2IPW") == (145_300_000, "FM")
+        assert operations._working_channel_accept("OK2IPW", proposed) == (
+            145_350_000,
+            "FM",
+        )
+
+        message = SimpleNamespace(
+            next_hop="OK2IPW",
+            source="OK2IPW",
+            working_frequency_hz=145_350_000,
+            working_mode="FM",
+        )
+        assert operations._payload_receive_qsy(message)
+        assert operations.radio.commands[:2] == [
+            ("frequency", 145_350_000),
+            ("mode", "FM"),
+        ]
+        operations._payload_restore_calling()
+        assert operations.radio.commands[-2:] == [
+            ("frequency", 145_500_000),
+            ("mode", "FM"),
+        ]
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_two_stations_with_different_working_channels_agree_and_deliver(
+    tmp_path,
+) -> None:
+    # The whole point, end to end: OK7PS has 145.350 configured for OK2IPW,
+    # OK2IPW has 145.300 configured for OK7PS, and the session still runs --
+    # on the proposer's 145.350, with both stations tuned there.
+    here, here_workers = _working_operations(
+        tmp_path / "here",
+        RouteTable([Route("OK2IPW", "", "", 145_500_000, "FM", 145_350_000, "FM")]),
+    )
+    there, there_workers = _working_operations(
+        tmp_path / "there",
+        RouteTable([Route("OK7PS", "", "", 145_500_000, "FM", 145_300_000, "FM")]),
+        callsign="OK2IPW",
+    )
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    receiver = Orchestrator(
+        "OK2IPW", bus.endpoint("receiver"), auto_complete=True, auto_route=False
+    )
+    sender.working_channel_offer = here._working_channel_offer
+    receiver.working_channel_accept = there._working_channel_accept
+    try:
+        assert here._working_channel_offer("OK2IPW") == (145_350_000, "FM")
+        assert there._working_channel_offer("OK7PS") == (145_300_000, "FM")
+
+        message = sender.send_message(
+            "OK2IPW", "hello", msg_id=901, next_hop="OK2IPW"
+        )
+        now = 1.0
+        for _ in range(20):
+            delivered = bus.pump()
+            sender.tick(now)
+            receiver.tick(now)
+            if delivered == 0 and bus.idle:
+                break
+            now += 0.25
+
+        assert message.state is SessionState.DELIVERED
+        inbound = receiver.sessions[901]
+        assert (message.working_frequency_hz, message.working_mode) == (
+            145_350_000,
+            "FM",
+        )
+        assert (inbound.working_frequency_hz, inbound.working_mode) == (
+            145_350_000,
+            "FM",
+        )
+    finally:
+        here.close()
+        there.close()
+        here_workers.close(wait=True)
+        there_workers.close(wait=True)
+
+
+def test_peer_may_not_move_this_station_to_another_band_or_mode(tmp_path) -> None:
+    # Following a proposal is bounded automation, not remote control of the
+    # dial: another band, a mode VARA cannot use here, and anything outside
+    # the amateur service stay refused.
+    routes = RouteTable(
+        [Route("OK2IPW", "", "", 145_500_000, "FM", 145_300_000, "FM")]
+    )
+    operations, workers = _working_operations(tmp_path, routes)
+    try:
+        for frequency, mode in (
+            (433_500_000, "FM"),        # another band
+            (150_000_000, "FM"),        # outside the amateur service
+            (145_350_000, "USB"),       # VARA FM cannot work this
+        ):
+            token = working_channel_token(frequency, mode)
+            assert operations._working_channel_accept("OK2IPW", token) is None
+        assert operations._working_channel_accept("OK2IPW", "!!") is None
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_peer_working_channel_is_bounded_by_the_calling_frequency(tmp_path) -> None:
+    # No working channel configured for this peer at all: the route's calling
+    # frequency is what the proposal is judged against.
+    routes = RouteTable([Route("OK2IPW", "", "", 145_500_000, "FM")])
+    operations, workers = _working_operations(tmp_path, routes)
+    try:
+        assert operations._working_channel_offer("OK2IPW") is None
+        assert operations._working_channel_accept(
+            "OK2IPW", working_channel_token(145_350_000, "FM")
+        ) == (145_350_000, "FM")
+        assert operations._working_channel_accept(
+            "OK2IPW", working_channel_token(29_500_000, "FM")
+        ) is None
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_following_a_peer_channel_still_needs_the_opt_in_and_a_cat_radio(
+    tmp_path,
+) -> None:
+    routes = RouteTable(
+        [Route("OK2IPW", "", "", 145_500_000, "FM", 145_300_000, "FM")]
+    )
+    token = working_channel_token(145_350_000, "FM")
+    for overrides in (
+        {"separate_working_channels": False},
+        {"auto_qsy": False},
+        {"rig_model": 1},
+    ):
+        operations, workers = _working_operations(tmp_path, routes, **overrides)
+        try:
+            assert operations._working_channel_accept("OK2IPW", token) is None
+        finally:
+            operations.close()
+            workers.close(wait=True)
 
 
 def test_separate_working_channel_refuses_no_cat_automation(tmp_path) -> None:

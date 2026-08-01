@@ -108,7 +108,8 @@ watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 **Built but not yet flown:** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
 goes back), the production channel scanner (0.6.47), and the optional
-calling/working-channel split (0.6.48). **Confirmed working in the field:** the heard-stations S/N estimate
+calling/working-channel split (0.6.48, with the receiving station following the
+proposer's channel since 0.6.49). **Confirmed working in the field:** the heard-stations S/N estimate
 and channel column (operator-confirmed 2026-08-01); Test PTT and no-CAT keying via Hamlib
 dummy + serial PTT (AIOC, 0.6.38, 2026-07-30); audio devices on Windows on
 ARM (0.6.42) and the AFSK control channel there, handshake both ways at
@@ -356,7 +357,8 @@ are considered sufficient for operations.
   (can't tune). This original single-channel path remains the default. Since
   0.6.48 an explicit Network-behavior option can instead negotiate a separate
   payload channel between two CAT-controlled peers; its route UI is otherwise
-  hidden.
+  hidden. Since 0.6.49 the station opening the session names that channel and
+  the other follows it within the band it already works that peer on.
 
 ## Net alerts (0.6.34 — confirmed on air 2026-07-30, HF and FM)
 Tested end to end with OK2IPW on **both** control modems: MFSK-16 on HF and
@@ -665,10 +667,10 @@ the announcement.
 - **Opt-in calling/working split:** enabling the advanced option reveals
   independent VARA working frequency/mode fields. `WORKING_OFFER` and
   `WORKING_ACK` carry a compact exact channel identity while both radios remain
-  on calling. Only matching local configurations proceed to `START_VARA`, then
-  both CAT radios move for the payload and restore before control confirmation.
-  No-CAT, mismatched modes/channels, QSY failures and older peers fail without
-  an automatic retune.
+  on calling. Both peers then move for the payload and restore before control
+  confirmation. No-CAT, incompatible modes, QSY failures and older peers fail
+  without an automatic retune. *(0.6.48 required byte-identical local
+  configurations on both sides; superseded in 0.6.49 — see below.)*
 - **Signal-aware discovery:** every `ROUTE_OFFER` snapshots its own S/N, receive
   time and frequency. Direct reach still wins; relay candidates rank by a
   present measurement, strongest S/N, freshness and callsign. Manual and
@@ -676,6 +678,34 @@ the announcement.
 - **Software verification:** 314 tests pass. The separate-channel path still
   needs an on-air pass with two CAT radios, including mismatch, successful
   payload and restoration after success and failure.
+
+## Followed working channels and compose close (0.6.49)
+
+- **The proposer names the channel.** Requiring both operators to have typed
+  the identical working frequency made the negotiation fail for the ordinary
+  case — 145.350 configured here, 145.300 there — so the station that opens the
+  session now names the channel and the receiving station follows it. Its own
+  route entry is the reference the proposal is judged against, not a match it
+  has to satisfy.
+- **Bounded automation.** A proposal is followed only with the opt-in and
+  automatic QSY enabled, a real CAT radio, a mode the local VARA can use, and a
+  frequency in the same amateur band this station already works that peer on
+  (`radio/bands.py`, IARU R1 edges — a bound on automation, not a licence
+  check). Without a local working channel the route's calling frequency bounds
+  it, then the current dial; with none of the three it is refused. Every
+  refusal names its reason in the session log.
+- **Wire format untouched:** the same frames and the same channel token, now
+  also read back by the peer (`parse_working_channel_token`). Which channel a
+  session uses depends on who opens it.
+- **Compose closes on queue.** The map opened the modal compose dialog from
+  inside the canvas mouse-release handler, so its event loop ran inside an
+  unfinished mouse event with the implicit mouse grab held; on some Windows
+  machines the queued message stored correctly but the window stayed up. The
+  dialog is now opened from the idle event loop, and closes as soon as the
+  message is on disk — before the refresh, log line and listener signal.
+  Message ids reach listeners whole instead of truncated by a Qt signed int.
+- **Software verification:** 321 tests pass. Still to prove on air with two CAT
+  radios: the retune to a followed channel and the restore afterwards.
 
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,

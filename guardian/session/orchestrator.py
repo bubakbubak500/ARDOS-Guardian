@@ -83,6 +83,7 @@ _WORKING_MODE_CODES = {
     "DATAUSB": "X",
     "DATALSB": "Y",
 }
+_WORKING_MODE_BY_CODE = {code: mode for mode, code in _WORKING_MODE_CODES.items()}
 
 
 def working_channel_token(frequency_hz: int, mode: str) -> str:
@@ -100,6 +101,25 @@ def working_channel_token(frequency_hz: int, mode: str) -> str:
     if code is None:
         raise ValueError(f"unsupported working mode {mode!r}")
     return digits + code
+
+
+def parse_working_channel_token(token: str) -> tuple[int, str]:
+    """Read a working-channel token back as (frequency_hz, mode).
+
+    The token is the only description of the proposer's channel that reaches
+    the far end, so a station that means to follow the proposal rather than
+    merely match it has to be able to read one.
+    """
+    text = (token or "").strip().upper()
+    if len(text) < 2:
+        raise ValueError(f"malformed working channel token {token!r}")
+    mode = _WORKING_MODE_BY_CODE.get(text[-1])
+    if mode is None:
+        raise ValueError(f"unsupported working mode code {text[-1]!r}")
+    digits = text[:-1]
+    if any(character not in _BASE36 for character in digits):
+        raise ValueError(f"malformed working channel token {token!r}")
+    return int(digits, 36), mode
 # Everything a beacon spends that is not the locator, for a five-character
 # callsign: 12 header + 2 CRC + three length prefixes + "OK7PS".
 _BEACON_OVERHEAD = 22

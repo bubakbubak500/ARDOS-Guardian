@@ -25,6 +25,7 @@ from .protocol import (
     max_note_length,
 )
 from .radio import Channel, ChannelPlan, ChannelScanner, make_driver
+from .radio.bands import same_band
 from .radio.presets import DUMMY_MODEL, find_executable
 from .radio.rigctld_launcher import RigctldProcess
 from .routing import HeardStations, RouteTable
@@ -39,7 +40,7 @@ from .services import (
     WorkerPool,
 )
 from .session import NullTransport, Orchestrator, SessionState
-from .session.orchestrator import working_channel_token
+from .session.orchestrator import parse_working_channel_token, working_channel_token
 from .vara import VaraClient
 
 
@@ -1687,6 +1688,20 @@ class Operations:
             self._payload_active.clear()
             self.request_radio_poll(force=True)
 
+    def _working_channel_guard(self) -> None:
+        """Raise when this station must not act on a working channel at all."""
+        if not self.config.auto_qsy:
+            raise RuntimeError("automatic QSY is disabled")
+        if self.config.radio_backend != "hamlib" or self.is_no_cat_radio():
+            raise RuntimeError("separate working channels require a real CAT radio")
+
+    def _working_mode_compatible(self, mode: str) -> bool:
+        """Can VARA as configured here actually work on this mode?"""
+        normal = (mode or "").strip().upper().replace("-", "")
+        if (self.config.vara_mode or "FM").strip().upper() == "HF":
+            return normal in {"USB", "LSB", "PKTUSB", "PKTLSB", "DATAUSB", "DATALSB"}
+        return normal in {"FM", "NFM", "PKTFM", "DATAFM"}
+
     def _working_channel_offer(self, callsign: str) -> tuple[int, str] | None:
         """Return an opt-in payload channel, refusing unsafe automation."""
         if not self.config.separate_working_channels:
@@ -1694,32 +1709,28 @@ class Operations:
         target = self.routes.working_for(callsign)
         if target is None:
             return None
-        if not self.config.auto_qsy:
-            raise RuntimeError("automatic QSY is disabled")
-        if self.config.radio_backend != "hamlib" or self.is_no_cat_radio():
-            raise RuntimeError("separate working channels require a real CAT radio")
+        self._working_channel_guard()
         frequency, mode = target
-        vara_mode = (self.config.vara_mode or "FM").strip().upper()
-        if vara_mode == "HF":
-            compatible = (mode or "").strip().upper().replace("-", "") in {
-                "USB", "LSB", "PKTUSB", "PKTLSB", "DATAUSB", "DATALSB"
-            }
-        else:
-            compatible = (mode or "").strip().upper().replace("-", "") in {
-                "FM", "NFM", "PKTFM", "DATAFM"
-            }
-        if not compatible:
+        if not self._working_mode_compatible(mode):
             raise RuntimeError(
-                f"working mode {mode or '?'} is incompatible with VARA {vara_mode}"
+                f"working mode {mode or '?'} is incompatible with VARA "
+                f"{(self.config.vara_mode or 'FM').strip().upper()}"
             )
         return int(frequency), (mode or "").strip().upper()
 
     def _working_channel_accept(
         self, callsign: str, token: str
     ) -> tuple[int, str] | None:
-        """Accept only the exact payload channel independently configured here."""
+        """Agree the payload channel the calling station proposed.
+
+        Requiring both operators to have typed the identical working frequency
+        into their own route tables made the negotiation fail for the ordinary
+        case: two stations that each have a perfectly good working channel for
+        this link, just not the same one. The station that opens the session
+        names the channel, and this one follows it when it safely can.
+        """
         try:
-            channel = self._working_channel_offer(callsign)
+            local = self._working_channel_offer(callsign)
         except RuntimeError as exc:
             self._log(
                 dual(
@@ -1730,23 +1741,95 @@ class Operations:
                 source="session",
             )
             return None
-        if channel is None:
+        if local is not None:
+            try:
+                if working_channel_token(*local) == token:
+                    return local
+            except ValueError:
+                pass
+        return self._follow_working_channel(callsign, token, local)
+
+    def _follow_working_channel(
+        self, callsign: str, token: str, local: tuple[int, str] | None
+    ) -> tuple[int, str] | None:
+        """Take the proposer's channel, inside an envelope this station sets.
+
+        A peer may move this radio to another channel of the band the link
+        already works on -- never onto another band, never outside the amateur
+        service, never onto a mode the local VARA cannot use, and never at all
+        unless the operator opted into two-channel sessions with a CAT radio.
+        """
+        if not self.config.separate_working_channels:
             return None
         try:
-            matches = working_channel_token(*channel) == token
-        except ValueError:
-            matches = False
-        if not matches:
+            self._working_channel_guard()
+            frequency, mode = parse_working_channel_token(token)
+        except (RuntimeError, ValueError) as exc:
             self._log(
                 dual(
-                    f"Working channel from {callsign} does not match this route.",
-                    f"Pracovní kanál od {callsign} neodpovídá místní trase.",
+                    f"Working channel proposed by {callsign} refused: {exc}.",
+                    f"Pracovní kanál navržený {callsign} odmítnut: {exc}.",
                 ),
                 LogLevel.WARNING,
                 source="session",
             )
             return None
-        return channel
+        reference = self._working_channel_reference(callsign, local)
+        if not self._working_mode_compatible(mode) or not same_band(
+            frequency, reference
+        ):
+            self._log(
+                dual(
+                    f"Working channel proposed by {callsign} refused: "
+                    f"{frequency / 1_000_000:.4f} MHz {mode} is not a channel "
+                    "this station works that peer on.",
+                    f"Pracovní kanál navržený {callsign} odmítnut: "
+                    f"{frequency / 1_000_000:.4f} MHz {mode} není kanál, na "
+                    "kterém tato stanice s protistanicí pracuje.",
+                ),
+                LogLevel.WARNING,
+                source="session",
+            )
+            return None
+        self._log(
+            dual(
+                f"Following {callsign} to its working channel "
+                f"{frequency / 1_000_000:.4f} MHz {mode}"
+                + (
+                    f" (this station had {local[0] / 1_000_000:.4f} MHz "
+                    f"{local[1]} configured)."
+                    if local is not None
+                    else "."
+                ),
+                f"Přelaďuji za stanicí {callsign} na její pracovní kanál "
+                f"{frequency / 1_000_000:.4f} MHz {mode}"
+                + (
+                    f" (zde bylo nastaveno {local[0] / 1_000_000:.4f} MHz "
+                    f"{local[1]})."
+                    if local is not None
+                    else "."
+                ),
+            ),
+            source="session",
+        )
+        return frequency, mode
+
+    def _working_channel_reference(
+        self, callsign: str, local: tuple[int, str] | None
+    ) -> int | None:
+        """The channel a proposal is judged against: what we work this peer on.
+
+        The locally configured working channel first, then the route's calling
+        frequency, and only then where the radio happens to be tuned. Without
+        any of the three there is nothing to bound the proposal with, and it
+        is refused.
+        """
+        if local is not None:
+            return local[0]
+        route = self.routes.freq_for(callsign)
+        if route is not None and route[0]:
+            return int(route[0])
+        return self.current_frequency()
 
     def _payload_send_qsy(self, message) -> bool:
         if self.config.separate_working_channels:

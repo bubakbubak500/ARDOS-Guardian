@@ -66,6 +66,35 @@ def test_compose_queues_real_bundle_and_mail_workspace_reads_it(tmp_path) -> Non
         runtime.close()
 
 
+def test_queueing_closes_the_dialog_and_reports_the_stored_id(tmp_path) -> None:
+    # Half of all callsigns hash to a station prefix with the top bit set, so
+    # their message ids do not fit Qt's signed 32-bit int: reported through
+    # one they arrive at the listener truncated into a negative number. And
+    # whatever the bookkeeping after the store does, the operator must not be
+    # left with a compose window standing over a message already queued.
+    _application()
+    runtime = ShellRuntime()
+    runtime.mailstore = MessageStore(tmp_path / "mail")
+    runtime.config.callsign = "OK2IPW"
+    dialog = ComposeDialog(runtime)
+    reported: list[int] = []
+    dialog.queued.connect(reported.append)
+    try:
+        dialog.show()
+        dialog.destination.setText("OK1AAA")
+        dialog.subject.setText("Readiness")
+        dialog.body.setPlainText("Station ready.")
+        dialog._queue()
+
+        stored = runtime.mailstore.list(Folder.OUTBOX)[0]["msg_id"]
+        assert stored > 0x7FFF_FFFF, "this callsign should exercise the overflow"
+        assert reported == [stored]
+        assert not dialog.isVisible()
+    finally:
+        dialog.close()
+        runtime.close()
+
+
 def test_mail_list_marks_whole_rows_and_keeps_them_selected(tmp_path) -> None:
     _application()
     runtime = ShellRuntime()
@@ -627,6 +656,10 @@ def test_clicking_a_mapped_station_prefills_a_new_message(monkeypatch) -> None:
     window = map_module.MapWindow(runtime)
     try:
         window._compose_to("OK2IPW")
+        # Deferred on purpose: a modal dialog must not run inside the canvas
+        # mouse-release handler that asked for it.
+        assert opened == []
+        _application().processEvents()
         assert opened == [("destination", "OK2IPW"), ("exec", "")]
     finally:
         window.close()

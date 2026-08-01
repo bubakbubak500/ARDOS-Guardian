@@ -46,7 +46,11 @@ from .runtime import ShellRuntime
 
 
 class ComposeDialog(QDialog):
-    queued = Signal(int)
+    # object, not int: a message id is an unsigned 32-bit value, and Qt's int
+    # is signed 32-bit. Half of all callsigns hash to a station prefix with
+    # the top bit set, and those ids arrive at the slot silently truncated
+    # into a negative number.
+    queued = Signal(object)
 
     def __init__(
         self,
@@ -268,13 +272,17 @@ class ComposeDialog(QDialog):
             status=Status.QUEUED,
         )
         self.runtime.mailstore.add(message)
+        # The message is on disk, so the operator's work is done and the
+        # window has to go. Closing before the bookkeeping means no failure in
+        # a refresh, a log line or a listener can leave a dialog standing over
+        # a message that was in fact queued.
+        self.accept()
         self.runtime.refresh()
         self.runtime.events.publish(
             tr("event.mail_queued", id=message.msg_id, destination=destination),
             source="mail",
         )
         self.queued.emit(message.msg_id)
-        self.accept()
 
 
 class MessageDialog(QDialog):

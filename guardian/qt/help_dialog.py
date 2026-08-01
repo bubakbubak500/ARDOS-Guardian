@@ -306,10 +306,14 @@ def help_topics() -> list[HelpTopic]:
             <p>Separate VARA working channels are an advanced opt-in under
             Network behavior and require real CAT on both peers. Until enabled,
             their route fields are hidden and single-channel operation is
-            unchanged. When enabled, both peers must independently configure
-            the same working frequency and mode. They agree it on the calling
-            channel, move only for the VARA payload, then return before control
-            confirmations resume. A missing or mismatched channel is refused.</p>
+            unchanged. When enabled, the station that opens the session
+            proposes its own working channel on the calling channel and the
+            receiving station follows it, even when its route table names a
+            different one. A proposal is followed only within the band that
+            station already works the peer on, only on a mode the local VARA
+            can use, and only with automatic QSY and a CAT radio; anything
+            else is refused. Both then move for the VARA payload only and
+            return before control confirmations resume.</p>
             <p>Last S/N is estimated from the received audio against the idle
             noise floor, not reported by the modem, and stays empty until that
             floor has settled. Heard on is the frequency this radio was tuned
@@ -343,10 +347,13 @@ def help_topics() -> list[HelpTopic]:
             <p>Samostatné pracovní kanály VARA jsou pokročilá volitelná funkce
             v Chování sítě a na obou stranách vyžadují skutečné CAT. Dokud ji
             nezapnete, její pole tras jsou skrytá a jednokanálový provoz se
-            nemění. Po zapnutí musí obě stanice nezávisle nastavit shodnou
-            pracovní frekvenci a režim. Shodu potvrdí na volacím kanálu, pouze
-            na payload se přeladí a před řídicím potvrzením se vrátí. Chybějící
-            nebo neshodný kanál je odmítnut.</p>
+            nemění. Po zapnutí navrhne stanice, která relaci zahajuje, na
+            volacím kanálu svůj pracovní kanál a přijímající stanice se za ní
+            přeladí, i když má ve své tabulce tras jiný. Návrh přijme jen
+            v pásmu, na kterém s protistanicí už pracuje, jen v režimu, který
+            místní VARA umí, a jen se zapnutým automatickým QSY a CAT rádiem;
+            cokoli jiného odmítne. Přeladí se pouze na payload a před řídicím
+            potvrzením se obě vrátí.</p>
             <p>Poslední S/N je odhad z přijatého zvuku proti klidové úrovni
             šumu, nikoli údaj z modemu, a zůstává prázdné, dokud se úroveň
             neustálí. Slyšeno na je kmitočet, na kterém bylo rádio naladěno při

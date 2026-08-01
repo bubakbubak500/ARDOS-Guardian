@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 import time
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QUrl, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -636,7 +636,20 @@ class MapWindow(QDialog):
         )
 
     def _compose_to(self, callsign: str) -> None:
-        """Clicking a heard marker starts a message addressed to that peer."""
+        """Clicking a heard marker starts a message addressed to that peer.
+
+        Opened from the idle event loop, not from the click itself. This
+        arrives from the canvas mouse-release handler, and running a modal
+        dialog there parks its event loop inside a mouse event the canvas has
+        not finished -- the implicit mouse grab is still held for as long as
+        the dialog lives. On some Windows machines that grab outlives the
+        dialog: the message queues, the dialog is told to close, and the
+        window stays on screen. Letting the click finish first costs nothing
+        and leaves the dialog an ordinary top-level modal window.
+        """
+        QTimer.singleShot(0, lambda: self._open_compose(callsign))
+
+    def _open_compose(self, callsign: str) -> None:
         dialog = ComposeDialog(self.runtime, self, destination=callsign)
         dialog.exec()
 

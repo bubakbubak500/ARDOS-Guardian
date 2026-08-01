@@ -509,11 +509,13 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     ),
     "settings.separate_working_channels_hint": (
         "Off by default. When enabled, extra working-channel fields appear in "
-        "Network routes. Both peers must configure the same channel; control "
-        "stays on the existing calling channel.",
+        "Network routes. The station that opens the session names the channel "
+        "and the other follows it inside the band it already works that peer "
+        "on; control stays on the existing calling channel.",
         "Ve výchozím stavu vypnuto. Po zapnutí se v trasách sítě zobrazí "
-        "další pole pracovního kanálu. Obě stanice musí nastavit stejný kanál; "
-        "řízení zůstává na stávajícím volacím kanálu.",
+        "další pole pracovního kanálu. Kanál určuje stanice, která relaci "
+        "zahajuje, a druhá se za ní přeladí v rámci pásma, na kterém s ní už "
+        "pracuje; řízení zůstává na stávajícím volacím kanálu.",
     ),
     "settings.appearance": ("Appearance", "Vzhled"),
     "settings.language": ("Language", "Jazyk"),

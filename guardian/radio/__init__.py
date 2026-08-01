@@ -6,6 +6,7 @@ Hamlib via rigctld (hundreds of radios, Windows + Linux), with a generic
 serial RTS/DTR PTT fallback for dumb VOX radios.
 """
 
+from .bands import AMATEUR_BANDS, band_for, same_band
 from .base import RadioDriver, RadioState, NullRadio
 from .hamlib import HamlibRadio
 from .generic_vox import VoxRadio
@@ -37,6 +38,9 @@ def make_driver(cfg) -> RadioDriver:
 
 
 __all__ = [
+    "AMATEUR_BANDS",
+    "band_for",
+    "same_band",
     "RadioDriver",
     "RadioState",
     "NullRadio",
