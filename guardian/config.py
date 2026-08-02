@@ -192,6 +192,13 @@ class StationConfig:
     # Theme
     appearance: str = "System"    # "System" | "Dark" | "Light"
 
+    # Desktop notifications. `notify_incoming` covers the polite level (tray
+    # toast + soft chime for new mail and routine alerts); URGENT/EMERGENCY
+    # always gets the on-top window because that is what the station is
+    # listening for. `notify_sound` silences every chime, including that one.
+    notify_incoming: bool = True
+    notify_sound: bool = True
+
     # Named snapshots of the radio page, so a station used with more than one
     # rig or cable is one pick away from each of them instead of nine fields
     # re-entered from memory. Radio settings only: a profile must never carry

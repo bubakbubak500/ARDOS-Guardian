@@ -5,17 +5,20 @@ from __future__ import annotations
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QFontDatabase, QIcon
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
     QFileDialog,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
+    QSystemTrayIcon,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -29,7 +32,9 @@ from ..routing import read_csv, write_csv
 from ..routing.csv_io import TEMPLATE_ROWS
 from ..radio.presets import DUMMY_MODEL
 from ..services import ApplicationSnapshot
+from ..services import LogLevel
 from .alerts import AlertBanner
+from .notifications import EmergencyDialog, NotificationCenter, SoundPlayer
 from .diagnostics_dialog import DiagnosticsDialog
 from .help_dialog import HelpDialog
 from .inputs import FrequencySpinBox
@@ -106,6 +111,7 @@ class GuardianMainWindow(QMainWindow):
 
         self._build_menu()
         self._build_shell()
+        self._build_notifications()
         self._restore_geometry()
         self._refresh()
 
@@ -443,11 +449,79 @@ class GuardianMainWindow(QMainWindow):
         layout.addStretch()
         return panel
 
+    def _build_notifications(self) -> None:
+        """The tray presence and the two announcement levels."""
+        player = SoundPlayer(
+            self.runtime.config,
+            on_refused=lambda reason: self.runtime.events.publish(
+                dual(
+                    f"Notification chime withheld: {reason}.",
+                    f"Zvuk upozornění zadržen: {reason}.",
+                ),
+                LogLevel.WARNING,
+                source="ui",
+            ),
+        )
+        self.tray: QSystemTrayIcon | None = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = QSystemTrayIcon(QIcon(str(get_ico_path())), self)
+            self.tray.setToolTip(
+                f"{__app_name__} — {self.runtime.config.callsign}"
+            )
+            menu = QMenu(self)
+            open_action = QAction(tr("tray.open"), menu)
+            open_action.triggered.connect(self._restore_from_tray)
+            menu.addAction(open_action)
+            menu.addSeparator()
+            exit_action = QAction(tr("menu.exit"), menu)
+            exit_action.triggered.connect(self.close)
+            menu.addAction(exit_action)
+            self.tray.setContextMenu(menu)
+            self.tray.activated.connect(self._tray_activated)
+            self.tray.show()
+        self.emergency_dialog = EmergencyDialog(
+            player.play, self._notification_sound_allowed
+        )
+        self.notifications = NotificationCenter(
+            self.runtime,
+            toast=self._show_toast,
+            emergency=self._show_emergency,
+            play=player.play,
+            window_active=self.isActiveWindow,
+            sound_allowed=self._notification_sound_allowed,
+        )
+
+    def _notification_sound_allowed(self) -> bool:
+        # Not while transmitting, and not while VARA holds the shared codec:
+        # the operator is listening to the channel, not to the desktop.
+        snapshot = self.runtime.snapshots.read()
+        return not snapshot.radio.ptt and not self.runtime.operations.payload_active()
+
+    def _tray_activated(self, reason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._restore_from_tray()
+
+    def _restore_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _show_toast(self, title: str, body: str) -> None:
+        if self.tray is not None:
+            self.tray.showMessage(
+                title, body, QSystemTrayIcon.MessageIcon.Information, 6_000
+            )
+
+    def _show_emergency(self, title: str, body: str) -> None:
+        self.emergency_dialog.announce(title, body)
+        QApplication.alert(self)
+
     def _refresh(self) -> None:
         self.runtime.drain_workers()
         self.runtime.tick()
         snapshot = self.runtime.snapshots.read()
         self._apply_snapshot(snapshot)
+        self.notifications.poll()
         events = self.runtime.events.drain()
         if events:
             self.activity.appendPlainText(
@@ -956,6 +1030,11 @@ class GuardianMainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self.settings.setValue("ui/main_geometry", self.saveGeometry())
         self.settings.sync()
+        if getattr(self, "tray", None) is not None:
+            self.tray.hide()
+        emergency = getattr(self, "emergency_dialog", None)
+        if emergency is not None:
+            emergency.close()
         self.spectrum_window.shutdown()
         map_window = getattr(self, "map_window", None)
         if map_window is not None:

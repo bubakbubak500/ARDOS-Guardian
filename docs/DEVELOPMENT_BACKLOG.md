@@ -1,6 +1,6 @@
 # Guardian development backlog
 
-_Aktualizováno: 2026-08-01_
+_Aktualizováno: 2026-08-02_
 
 Tento dokument je jediný pracovní seznam identifikovaných, ale nedokončených
 věcí. Historické plány a release notes popisují stav v okamžiku vydání; pro
@@ -48,6 +48,31 @@ volbu další práce je rozhodující tento backlog.
 4. **Rozšířit validaci konfigurace.** First-run readiness a základní UI validace
    jsou hotové; doplnit centrální kontrolu typů, rozsahů a neplatných kombinací
    při načtení nebo importu konfigurace.
+
+## P2 — rozšíření mapy (navrženo 2026-08-02, zatím nerealizováno)
+
+Situační panel, skutečné hop-chainy a označení výstrah vyšly v 0.6.52; tyto
+body z téhož návrhu čekají na rozhodnutí operátora:
+
+1. **Překryv lokátorových čtverců.** Mřížka JN99/JN89 s popiskami nad mapou,
+   přepínatelná 4/6 znaků; `locator_bounds` už existuje.
+2. **Kružnice vzdálenosti + měřicí nástroj.** Kroužky 50/100/200 km od vlastní
+   stanice a měření vzdálenosti/azimutu mezi dvěma body (`distance_bearing`
+   je hotové).
+3. **Barvy stanic podle stavu, ne jen stáří.** Přímo dosažitelná vs. přes
+   relay (RouteTable + learned_paths + reaches), případně podle kanálu;
+   doplnit legendu.
+4. **Šedá linie (terminátor den–noc).** Čistá astronomie bez dat i sítě,
+   užitečné pro plánování HF.
+5. **Stopa mobilní stanice.** U stanice si pamatovat posledních N různých
+   lokátorů s časem (deque v `HeardStation`) a kreslit slábnoucí trasu.
+6. **Předstažení dlaždic pro oblast.** „Stáhni viditelnou oblast" do
+   `TileCache` před odjezdem do terénu + ukazatel, co je v cache.
+7. **Export situačního snímku (PNG)** pro briefing; `grab()` se už používá
+   jinde.
+
+Zamítnuto (nezapadá do offline filozofie ARDOS): odhad pokrytí z výškového
+modelu terénu — vyžaduje stovky MB dat SRTM nebo síť.
 
 ## P3 — release hardening a sledovaná rizika
 

@@ -452,6 +452,10 @@ class Operations:
 
         return self.workers.submit(task_name, operation, completed)
 
+    def payload_active(self) -> bool:
+        """True while VARA owns the shared audio; the UI keeps quiet then."""
+        return self._payload_active.is_set()
+
     def is_no_cat_radio(self) -> bool:
         return (
             self.config.radio_backend == "hamlib"

@@ -666,6 +666,119 @@ def test_clicking_a_mapped_station_prefills_a_new_message(monkeypatch) -> None:
         runtime.close()
 
 
+def test_map_panel_lists_heard_stations_with_the_numbers(tmp_path) -> None:
+    _application()
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.mailstore = MessageStore(tmp_path / "mail")
+    runtime.config.map_background = False
+    runtime.config.station_grid = "JN99CS53IO"
+    now = time.monotonic()
+    runtime.heard.record(
+        "OK2IPW", now, snr=12.5, freq_hz=145_300_000, grid="JN99CS"
+    )
+    runtime.heard.record("OK1AAA", now - 30, frame="ROUTE_OFFER", reaches="OK5XYZ")
+    window = MapWindow(runtime)
+    try:
+        window.refresh()
+        rows = {row[0]: row for row in window.panel_rows()}
+        assert set(rows) == {"OK2IPW", "OK1AAA"}
+        station = rows["OK2IPW"]
+        assert station[1] == "JN99CS"
+        assert station[2] != ""            # distance, since both ends have grids
+        assert station[4] == "+12.5"
+        assert station[6] == "145.3000"
+        # No position yet: listed anyway, with the geometry left honest-blank.
+        assert rows["OK1AAA"][1] == "—"
+        assert rows["OK1AAA"][2] == ""
+        assert rows["OK1AAA"][7] == "OK5XYZ"
+        assert window.panel.rowCount() == 2
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_map_draws_the_relay_path_mail_actually_took(tmp_path) -> None:
+    _application()
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.mailstore = MessageStore(tmp_path / "mail")
+    runtime.config.map_background = False
+    runtime.config.callsign = "OK7PS"
+    runtime.config.station_grid = "JN99CS53IO"
+    now = time.monotonic()
+    runtime.heard.record("OK1AAA", now, grid="JO80AB")
+    runtime.heard.record("OK2IPW", now, grid="JN89HE")
+    relayed = MailMessage(
+        msg_id=901,
+        source="OK1AAA",
+        final_dest="OK7PS",
+        subject="Via relay",
+        created=time.time(),
+        hops=["OK1AAA", "OK2IPW"],   # store_incoming appends the relay
+        folder=Folder.INBOX,
+        status=Status.RECEIVED,
+    )
+    runtime.mailstore.add(relayed)
+    direct = MailMessage(
+        msg_id=902,
+        source="OK1AAA",
+        final_dest="OK7PS",
+        created=time.time(),
+        hops=["OK1AAA"],             # direct traffic stays an orange link
+        folder=Folder.INBOX,
+        status=Status.RECEIVED,
+    )
+    runtime.mailstore.add(direct)
+    window = MapWindow(runtime)
+    try:
+        window.refresh()
+        assert window.canvas.chains == [("JO80AB", "JN89HE", "JN99CS53IO")]
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_an_alert_pulses_on_its_origin_and_shows_the_chip(tmp_path) -> None:
+    _application()
+    from guardian.operations import AlertRecord
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.mailstore = MessageStore(tmp_path / "mail")
+    runtime.config.map_background = False
+    runtime.heard.record("OK2IPW", time.monotonic(), grid="JN89HE")
+    window = MapWindow(runtime)
+    try:
+        window.refresh()
+        assert window.canvas.alert_grids == []
+        assert not window.alert_chip.isVisibleTo(window)
+
+        runtime.operations.alerts.insert(
+            0,  # 0x02 = medical emergency
+            AlertRecord(
+                code=0x02, note="", source="OK2IPW",
+                received=time.time(), mine=False,
+            ),
+        )
+        runtime.operations.alerts.insert(
+            0,  # our own alert marks nothing: we know where we are
+            AlertRecord(
+                code=0x02, note="", source=runtime.config.callsign,
+                received=time.time(), mine=True,
+            ),
+        )
+        window.refresh()
+        assert window.canvas.alert_grids == ["JN89HE"]
+        assert window.alert_chip.isVisibleTo(window)
+        assert "OK2IPW" in window.alert_chip.text()
+    finally:
+        window.close()
+        runtime.close()
+
+
 def test_picking_on_the_map_stores_the_finest_locator() -> None:
     # A coarse square can be derived from a fine one, never the other way
     # round, so what gets stored is all ten characters.

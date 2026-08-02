@@ -20,13 +20,18 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -34,6 +39,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..i18n import dual, tr
 from ..message import Folder, Status
+from .alerts import alert_headline
 from .mail_workspace import ComposeDialog
 from .map_tiles import SOURCES, TILE_PIXELS, TileCache, TileSource, tile_for
 from ..routing import (
@@ -54,6 +60,10 @@ MIN_FIT_DEGREES = 2.0
 MERCATOR_LIMIT = 85.05112878     # where the projection runs to infinity
 MAX_TILES_PER_DRAW = 400         # a zoomed-out view must not ask for thousands
 MAX_TILES_IN_FLIGHT = 8          # polite to a service given away for free
+# An alert stops pulsing on the map after this long; the banner and the log
+# keep the history. Matches what the notifier considers worth interrupting for.
+ALERT_MAP_WINDOW = 900.0
+PULSE_INTERVAL_MS = 200
 
 
 class MapCanvas(QWidget):
@@ -72,6 +82,13 @@ class MapCanvas(QWidget):
         self.own_grid = ""
         self.stations: list[tuple[str, str, float]] = []   # call, grid, age
         self.links: list[tuple[str, str, str]] = []  # call, grid, mail activity
+        # Relay paths mail actually travelled: each chain is the mapped grids
+        # of consecutive hops, origin first, this station last.
+        self.chains: list[tuple[str, ...]] = []
+        # Grids of stations that originated an alert still worth interrupting
+        # for; painted as a pulsing ring, so the geography of the emergency is
+        # one glance, not a callsign lookup.
+        self.alert_grids: list[str] = []
         self._drag_from: QPointF | None = None
         self._dragged = False
         self.source: TileSource | None = None
@@ -341,12 +358,16 @@ class MapCanvas(QWidget):
         painter.fillRect(self.rect(), QColor("#101418"))
         self._draw_tiles(painter)
         self._draw_graticule(painter)
+        for chain in self.chains:
+            self._draw_chain(painter, chain)
         for callsign, grid, activity in self.links:
             self._draw_link(painter, callsign, grid, activity)
         for callsign, grid, age in self.stations:
             self._draw_station(painter, callsign, grid, age, own=False)
         if self.own_grid:
             self._draw_station(painter, tr("map.you"), self.own_grid, 0.0, own=True)
+        for grid in self.alert_grids:
+            self._draw_alert_ring(painter, grid)
         painter.end()
 
     def _graticule_step(self) -> float:
@@ -426,6 +447,63 @@ class MapCanvas(QWidget):
         )
         painter.restore()
 
+    def _grid_centre(self, grid: str) -> QPointF | None:
+        try:
+            south, west, north, east = locator_bounds(grid)
+        except ValueError:
+            return None
+        return QRectF(
+            self.to_screen(north, west), self.to_screen(south, east)
+        ).center()
+
+    def _draw_chain(self, painter: QPainter, grids: tuple[str, ...]) -> None:
+        """The path a message actually took, hop by hop.
+
+        Dashed and in a different voice than the orange correspondent links:
+        those say who the operator talked to, this says who carried it.
+        """
+        points = [self._grid_centre(grid) for grid in grids]
+        if any(point is None for point in points) or len(points) < 2:
+            return
+        colour = QColor("#00c8ff")
+        painter.save()
+        for start, end in zip(points, points[1:]):
+            painter.setPen(QPen(QColor(0, 0, 0, 190), 5, Qt.PenStyle.DashLine))
+            painter.drawLine(start, end)
+            painter.setPen(QPen(colour, 3, Qt.PenStyle.DashLine))
+            painter.drawLine(start, end)
+            # A small arrowhead at the middle of each segment, pointing the
+            # way the message travelled -- toward this station.
+            dx, dy = end.x() - start.x(), end.y() - start.y()
+            length = math.hypot(dx, dy)
+            if length > 30:
+                ux, uy = dx / length, dy / length
+                mid = (start + end) / 2
+                painter.drawLine(
+                    mid, mid + QPointF(-ux * 10 - uy * 6, -uy * 10 + ux * 6)
+                )
+                painter.drawLine(
+                    mid, mid + QPointF(-ux * 10 + uy * 6, -uy * 10 - ux * 6)
+                )
+        painter.restore()
+
+    def _draw_alert_ring(self, painter: QPainter, grid: str) -> None:
+        """Pulse where an alert came from; repainted by the owner's timer."""
+        centre = self._grid_centre(grid)
+        if centre is None:
+            return
+        phase = (time.monotonic() % 1.6) / 1.6
+        painter.save()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(
+            QPen(QColor(255, 59, 48, max(0, int(230 * (1.0 - phase)))), 4)
+        )
+        radius = 12.0 + 30.0 * phase
+        painter.drawEllipse(centre, radius, radius)
+        painter.setPen(QPen(QColor(255, 59, 48, 220), 3))
+        painter.drawEllipse(centre, 11, 11)
+        painter.restore()
+
     def _draw_link(
         self, painter: QPainter, callsign: str, grid: str, _activity: str
     ) -> None:
@@ -502,10 +580,62 @@ class MapWindow(QDialog):
         intro.setWordWrap(True)
         outer.addWidget(intro)
 
+        # Where the last alert came from, one line above the map. The pulsing
+        # ring says "there"; this says what and who.
+        self.alert_chip = QLabel()
+        self.alert_chip.setProperty("statusRole", "danger")
+        self.alert_chip.setWordWrap(True)
+        self.alert_chip.hide()
+        outer.addWidget(self.alert_chip)
+
         self.canvas = MapCanvas()
         self.canvas.picked.connect(self._picked)
         self.canvas.station_picked.connect(self._compose_to)
-        outer.addWidget(self.canvas, 1)
+
+        # The situational panel: every heard station with the numbers an
+        # operator wants at a glance, whether or not it sent a position yet.
+        self.panel = QTableWidget(0, 8)
+        self.panel.setHorizontalHeaderLabels(
+            [
+                tr("map.col_station"),
+                tr("map.col_grid"),
+                tr("map.col_distance"),
+                tr("map.col_bearing"),
+                tr("map.col_snr"),
+                tr("map.col_age"),
+                tr("map.col_channel"),
+                tr("map.col_reaches"),
+            ]
+        )
+        self.panel.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.panel.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.panel.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.panel.verticalHeader().setVisible(False)
+        header = self.panel.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(True)
+        self.panel.cellClicked.connect(self._panel_clicked)
+        self.panel.cellDoubleClicked.connect(self._panel_double_clicked)
+        self._panel_calls: list[str] = []
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(self.canvas)
+        split.addWidget(self.panel)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        split.setSizes([760, 380])
+        outer.addWidget(split, 1)
+
+        # Repaint while an alert ring is pulsing; a no-op otherwise, so the
+        # ordinary once-a-second poll stays the only refresh the map needs.
+        self._pulse = QTimer(self)
+        self._pulse.setInterval(PULSE_INTERVAL_MS)
+        self._pulse.timeout.connect(self._pulse_tick)
+        self._pulse.start()
 
         controls = QHBoxLayout()
         self.pick_button = QPushButton(tr("map.pick"))
@@ -570,9 +700,168 @@ class MapWindow(QDialog):
         self.canvas.own_grid = (self.runtime.config.station_grid or "").upper()
         self.canvas.stations = self.stations()
         self.canvas.links = self.interactions()
+        self.canvas.chains = self.hop_chains()
+        self.canvas.alert_grids = self._alert_grids()
+        self._refresh_alert_chip()
+        self._refresh_panel()
         self.canvas.update()
         self._describe()
         self._describe_background()
+
+    def active_alerts(self) -> list:
+        """Alerts recent enough to still mark the map, newest first."""
+        now = time.time()
+        return [
+            record
+            for record in getattr(self.runtime.operations, "alerts", [])
+            if not record.mine and now - record.received <= ALERT_MAP_WINDOW
+        ]
+
+    def _alert_grids(self) -> list[str]:
+        positions = {
+            callsign.upper(): grid
+            for callsign, grid, _age in self.canvas.stations
+        }
+        return sorted(
+            {
+                positions[record.source]
+                for record in self.active_alerts()
+                if record.source in positions
+            }
+        )
+
+    def _refresh_alert_chip(self) -> None:
+        alerts = self.active_alerts()
+        if not alerts:
+            self.alert_chip.hide()
+            return
+        newest = alerts[0]
+        minutes = max(0, int((time.time() - newest.received) // 60))
+        note = f" — {newest.note}" if newest.note else ""
+        self.alert_chip.setText(
+            f"⚠ {alert_headline(newest)}{note} · {newest.source} · "
+            + tr("map.alert_age", minutes=minutes)
+        )
+        self.alert_chip.show()
+
+    def _pulse_tick(self) -> None:
+        if self.canvas.alert_grids and self.isVisible():
+            self.canvas.update()
+
+    def hop_chains(self) -> list[tuple[str, ...]]:
+        """Relay paths mail actually took, as runs of mapped hop positions.
+
+        Direct exchanges stay with the orange links; a chain is only worth
+        drawing when at least one relay carried the message. Unmapped hops
+        split a chain rather than invent a position for it -- every drawn
+        segment really was one hop.
+        """
+        positions = {
+            callsign.upper(): grid
+            for callsign, grid, _age in self.canvas.stations
+        }
+        mine = (self.runtime.config.callsign or "").strip().upper()
+        own = (self.runtime.config.station_grid or "").upper()
+        if mine and is_locator(own):
+            positions[mine] = own
+        chains: set[tuple[str, ...]] = set()
+        for meta in self.runtime.mailstore.list():
+            hops = [str(hop).strip().upper() for hop in meta.get("hops") or []]
+            if (
+                meta.get("folder") in (Folder.INBOX, Folder.TRANSIT)
+                and mine
+                and mine not in hops
+            ):
+                hops.append(mine)
+            if len(hops) < 3:
+                continue
+            run: list[str] = []
+            for hop in hops:
+                grid = positions.get(hop, "")
+                if grid:
+                    run.append(grid)
+                else:
+                    if len(run) >= 2:
+                        chains.add(tuple(run))
+                    run = []
+            if len(run) >= 2:
+                chains.add(tuple(run))
+        return sorted(chains)
+
+    # --- situational panel ------------------------------------------------ #
+    @staticmethod
+    def _age_text(age: float) -> str:
+        if age < 60:
+            return f"{age:.0f} s"
+        return f"{age / 60:.0f} min"
+
+    def panel_rows(self) -> list[tuple[str, ...]]:
+        """One row per heard station: the numbers, already formatted."""
+        now = time.monotonic()
+        own = (self.runtime.config.station_grid or "").upper()
+        own_position = from_locator(own) if is_locator(own) else None
+        rows: list[tuple[str, ...]] = []
+        for station in self.runtime.heard.active(now):
+            distance_text = bearing_text = ""
+            if own_position is not None and is_locator(station.grid):
+                latitude, longitude = from_locator(station.grid)
+                distance, bearing = distance_bearing(
+                    own_position[0], own_position[1], latitude, longitude
+                )
+                distance_text = f"{distance:.0f}"
+                bearing_text = f"{bearing:.0f}°"
+            rows.append(
+                (
+                    station.callsign,
+                    station.grid or "—",
+                    distance_text,
+                    bearing_text,
+                    f"{station.last_snr:+.1f}" if station.last_snr is not None else "",
+                    self._age_text(station.age(now)),
+                    f"{station.last_freq_hz / 1_000_000:.4f}"
+                    if station.last_freq_hz
+                    else "",
+                    ", ".join(sorted(station.reaches)),
+                )
+            )
+        return rows
+
+    def _refresh_panel(self) -> None:
+        rows = self.panel_rows()
+        calls = [row[0] for row in rows]
+        if calls == self._panel_calls:
+            # Same stations in the same order: update the numbers in place so
+            # the selection and scroll position survive the 1 Hz poll.
+            for index, row in enumerate(rows):
+                for column, value in enumerate(row):
+                    item = self.panel.item(index, column)
+                    if item is not None and item.text() != value:
+                        item.setText(value)
+            return
+        selected = ""
+        picked = self.panel.selectedItems()
+        if picked:
+            selected = self.panel.item(picked[0].row(), 0).text()
+        self.panel.setRowCount(len(rows))
+        for index, row in enumerate(rows):
+            for column, value in enumerate(row):
+                self.panel.setItem(index, column, QTableWidgetItem(value))
+        self._panel_calls = calls
+        if selected in calls:
+            self.panel.selectRow(calls.index(selected))
+
+    def _panel_clicked(self, row: int, _column: int) -> None:
+        """A click brings the station into view; it must never transmit."""
+        item = self.panel.item(row, 1)
+        grid = item.text() if item is not None else ""
+        if is_locator(grid):
+            latitude, longitude = from_locator(grid)
+            self.canvas.look_at(latitude, longitude)
+
+    def _panel_double_clicked(self, row: int, _column: int) -> None:
+        item = self.panel.item(row, 0)
+        if item is not None and item.text():
+            self._compose_to(item.text())
 
     def interactions(self) -> list[tuple[str, str, str]]:
         """Mapped peers involved in sending, sent, or received mail."""

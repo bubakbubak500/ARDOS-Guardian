@@ -174,6 +174,15 @@ class SettingsDialog(QDialog):
         form.addRow(dual("Callsign", "Volací značka"), self.callsign)
         form.addRow(dual("Operator name", "Jméno operátora"), self.operator_name)
 
+        self.notify_incoming = QCheckBox(tr("settings.notify_incoming"))
+        self.notify_incoming.setChecked(self.config.notify_incoming)
+        self.notify_incoming.setToolTip(tr("settings.notify_incoming_hint"))
+        self.notify_sound = QCheckBox(tr("settings.notify_sound"))
+        self.notify_sound.setChecked(self.config.notify_sound)
+        self.notify_sound.setToolTip(tr("settings.notify_sound_hint"))
+        form.addRow(self.notify_incoming)
+        form.addRow(self.notify_sound)
+
     def _build_radio(self) -> None:
         form = self._page(
             tr("settings.radio"),
@@ -981,6 +990,8 @@ class SettingsDialog(QDialog):
         cfg = self.config
         cfg.callsign = self.callsign.text().strip().upper() or "NOCALL"
         cfg.operator_name = self.operator_name.text().strip()
+        cfg.notify_incoming = self.notify_incoming.isChecked()
+        cfg.notify_sound = self.notify_sound.isChecked()
         # The same reading of the radio page a profile stores, so what gets
         # saved under a name and what reaches the station cannot drift apart.
         for field_name, value in self._radio_form_values().items():

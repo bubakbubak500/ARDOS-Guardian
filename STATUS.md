@@ -105,11 +105,20 @@ never reached VARA unless it happened to be set before connecting — fixed in
 modems — MFSK-16 on HF and AFSK-1200 on FM. One open observation, see the
 watch-list: an occasional `RX bad frame: bad magic` alongside an alert.
 
+**Confirmed working on air 2026-08-02:** the optional calling/working-channel
+split (0.6.48) with the receiving station following the proposer's channel
+(0.6.49, fixed in 0.6.50) — OK7PS ↔ OK2IPW on 2 m, the two stations configured
+with *different* working frequencies, payload on the proposer's channel and
+both radios back on the calling channel afterwards. Its calling-channel
+fallback is still unflown: it only runs when a proposal is refused, and no
+refusal has happened on air since.
+
 **Built but not yet flown:** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
-goes back), the production channel scanner (0.6.47), and the optional
-calling/working-channel split (0.6.48, with the receiving station following the
-proposer's channel since 0.6.49). **Confirmed working in the field:** the heard-stations S/N estimate
+goes back) and the production channel scanner (0.6.47). **Confirmed working in the field:** named radio
+profiles (0.6.51, operator-confirmed 2026-08-02); the compose window opened
+from the map closing on the machine where it used to stay up (0.6.49,
+operator-confirmed 2026-08-02); the heard-stations S/N estimate
 and channel column (operator-confirmed 2026-08-01); Test PTT and no-CAT keying via Hamlib
 dummy + serial PTT (AIOC, 0.6.38, 2026-07-30); audio devices on Windows on
 ARM (0.6.42) and the AFSK control channel there, handshake both ways at
@@ -358,7 +367,9 @@ are considered sufficient for operations.
   0.6.48 an explicit Network-behavior option can instead negotiate a separate
   payload channel between two CAT-controlled peers; its route UI is otherwise
   hidden. Since 0.6.49 the station opening the session names that channel and
-  the other follows it within the band it already works that peer on.
+  the other follows it within the band it already works that peer on —
+  confirmed on air 2026-08-02 in its 0.6.50 form, with the two stations
+  configured with different working frequencies.
 
 ## Net alerts (0.6.34 — confirmed on air 2026-07-30, HF and FM)
 Tested end to end with OK2IPW on **both** control modems: MFSK-16 on HF and
@@ -675,9 +686,8 @@ the announcement.
   time and frequency. Direct reach still wins; relay candidates rank by a
   present measurement, strongest S/N, freshness and callsign. Manual and
   learned paths retain their precedence.
-- **Software verification:** 314 tests pass. The separate-channel path still
-  needs an on-air pass with two CAT radios, including mismatch, successful
-  payload and restoration after success and failure.
+- **Software verification:** 314 tests pass. **Flown 2026-08-02** with two
+  IC-705s on 2 m, in the 0.6.50 form — see below.
 
 ## Followed working channels and compose close (0.6.49)
 
@@ -691,9 +701,9 @@ the announcement.
   automatic QSY enabled, a real CAT radio, a mode the local VARA can use, and a
   frequency in the same amateur band this station already works that peer on
   (`radio/bands.py`, IARU R1 edges — a bound on automation, not a licence
-  check). Without a local working channel the route's calling frequency bounds
-  it, then the current dial; with none of the three it is refused. Every
-  refusal names its reason in the session log.
+  check). Every refusal names its reason in the session log. *(The reference
+  chain described here refused when it could produce no reference at all, which
+  is what broke the first on-air pass; superseded in 0.6.50.)*
 - **Wire format untouched:** the same frames and the same channel token, now
   also read back by the peer (`parse_working_channel_token`). Which channel a
   session uses depends on who opens it.
@@ -704,8 +714,10 @@ the announcement.
   dialog is now opened from the idle event loop, and closes as soon as the
   message is on disk — before the refresh, log line and listener signal.
   Message ids reach listeners whole instead of truncated by a Qt signed int.
-- **Software verification:** 321 tests pass. Still to prove on air with two CAT
-  radios: the retune to a followed channel and the restore afterwards.
+- **Software verification:** 321 tests pass. **The compose fix is confirmed in
+  the field (operator, 2026-08-02):** the window opened from the map now closes
+  on the machine where it used to stay up. The channel negotiation needed
+  0.6.50 before it worked on air.
 
 ## Working-channel field fixes (0.6.50)
 
@@ -731,8 +743,17 @@ Two defects, both in what 0.6.49 added.
   nothing below the session layer changed. Only the proposer's own token or
   that calling-channel answer starts VARA.
 - **Software verification:** 325 tests pass, including the on-air case end to
-  end. Still to prove on air: the retune to a followed channel, the restore
-  afterwards, and the calling-channel fallback.
+  end.
+- **WORKING — confirmed on air 2026-08-02**, OK7PS ↔ OK2IPW on 2 m, two
+  IC-705s, the two stations deliberately configured with *different* working
+  frequencies. The proposer's channel is agreed on the calling channel, both
+  radios move for the VARA payload and both are back on the calling channel
+  before the control confirmations resume. This is the first pass of the
+  0.6.48 calling/working split that ran end to end on air.
+- **Still unflown:** the calling-channel fallback. It only runs when a proposal
+  is refused, and no refusal has occurred on air since the fix — the next
+  deliberate mismatch (another band, or a mode VARA cannot use) would exercise
+  it.
 
 ## Named radio profiles (0.6.51)
 
@@ -752,6 +773,38 @@ Two defects, both in what 0.6.49 added.
 - Apply and the profile read the page through one function, so what is stored
   under a name and what reaches the station cannot drift apart.
 - **Software verification:** 330 tests pass.
+- **WORKING — operator-confirmed 2026-08-02.** Profiles save, list and load
+  back on a live station.
+
+## Desktop notifications and the situational map (0.6.52)
+
+- **Two announcement levels.** New mail and routine alerts arriving while
+  Guardian is in the background: tray toast + soft chime, seeded at startup so
+  existing unread mail replays nothing, announced exactly once, skipped while
+  the operator is looking at the window. URGENT/EMERGENCY (alert or mail
+  priority): an always-on-top window with a repeating sound until
+  acknowledged — deliberately not a Windows toast, so Focus Assist cannot
+  silence a MAYDAY, and it fires even with notifications otherwise disabled.
+- **The chime can never leave the transmitter.** Sounds play on the Windows
+  default output only after proving it is not the device configured as the
+  radio's audio output; unknown default or radio-as-default means silence with
+  the reason logged once (`qt/notifications.py`). Withheld while PTT is keyed
+  or VARA holds the codec. Both WAVs are synthesized on first use
+  (`assets/sounds.py`), like the icon. Tray icon with Open/Exit added.
+- **Map: situational panel.** Every heard station in a table beside the
+  canvas — callsign, locator, distance, bearing, S/N, age, channel heard on,
+  reaches — including stations with no position yet. Row click centres, double
+  click composes, selection survives the 1 Hz poll.
+- **Map: real relay paths.** Received mail records its hops; the map draws
+  them as dashed cyan segments with direction arrows. Direct traffic stays an
+  orange link; unmapped hops split a chain rather than invent a position.
+- **Map: alerts have a place.** The origin of an active alert (15 min) pulses
+  red, with a chip above the map naming what, who and how long ago.
+- Two switches on the Station page (`notify_incoming`, `notify_sound`).
+  Deferred map ideas (grid overlay, range rings, status colours, terminator,
+  mobile trail, tile prefetch, PNG export) are in the backlog.
+- **Software verification:** 341 tests pass. Not yet field-proven: the toast
+  and chime on a real desktop session.
 
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,

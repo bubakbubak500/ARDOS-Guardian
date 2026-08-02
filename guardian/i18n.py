@@ -349,6 +349,15 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Normované položky se odešlou jako čitelný prostý text, takže zprávu "
         "otevře každá přijímající stanice.",
     ),
+    "map.col_station": ("Station", "Stanice"),
+    "map.col_grid": ("Grid", "Lokátor"),
+    "map.col_distance": ("km", "km"),
+    "map.col_bearing": ("Bearing", "Azimut"),
+    "map.col_snr": ("S/N dB", "S/N dB"),
+    "map.col_age": ("Heard", "Slyšeno"),
+    "map.col_channel": ("MHz", "MHz"),
+    "map.col_reaches": ("Reaches", "Dosahuje"),
+    "map.alert_age": ("{minutes} min ago", "před {minutes} min"),
     "event.mail_queued": (
         "Message #{id} queued for {destination}.",
         "Zpráva #{id} byla zařazena k odeslání pro {destination}.",
@@ -517,6 +526,39 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "zahajuje, a druhá se za ní přeladí v rámci pásma, na kterém s ní už "
         "pracuje; řízení zůstává na stávajícím volacím kanálu.",
     ),
+    "settings.notify_incoming": (
+        "Desktop notifications for incoming mail and alerts",
+        "Upozornění na ploše na příchozí zprávy a výstrahy",
+    ),
+    "settings.notify_incoming_hint": (
+        "A tray toast and a soft chime when a message or a routine alert "
+        "arrives while Guardian is in the background. URGENT and EMERGENCY "
+        "always raise the on-top window.",
+        "Bublina u hodin a tichý tón, když zpráva nebo běžná výstraha přijde, "
+        "zatímco je Guardian na pozadí. NALÉHAVÉ a NOUZOVÉ vždy vyvolá okno "
+        "nad ostatními.",
+    ),
+    "settings.notify_sound": (
+        "Notification sounds",
+        "Zvuky upozornění",
+    ),
+    "settings.notify_sound_hint": (
+        "Played on the Windows default output device — never on the device "
+        "configured as the radio's audio output.",
+        "Přehrává se na výchozím zvukovém zařízení Windows — nikdy na "
+        "zařízení nastaveném jako zvukový výstup do rádia.",
+    ),
+    "notify.mail_title": (
+        "Message from {source}",
+        "Zpráva od {source}",
+    ),
+    "notify.urgent_mail_title": (
+        "URGENT message from {source}",
+        "NALÉHAVÁ zpráva od {source}",
+    ),
+    "notify.emergency_window": ("Net alert", "Výstraha sítě"),
+    "notify.acknowledge": ("Acknowledge", "Potvrdit"),
+    "tray.open": ("Open Guardian", "Otevřít Guardian"),
     "settings.appearance": ("Appearance", "Vzhled"),
     "settings.language": ("Language", "Jazyk"),
     "language.english": ("English", "Angličtina"),
