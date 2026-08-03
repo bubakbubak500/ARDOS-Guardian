@@ -6,11 +6,12 @@ the reason this exists at all: OpenStreetMap's own tile servers forbid the
 prefetching an offline map needs, so pointing Guardian at them would have
 been a licence breach dressed as a feature.
 
-Tiles are fetched only for what is on screen -- no bulk download of regions
-the operator never looks at -- and every one that arrives is kept in a
-SQLite file under the station's data directory. A station that opened the
-map at home therefore still has that ground in the field, with no network,
-which is the case Guardian exists for.
+Tiles viewed on screen are cached automatically. The operator may also ask
+Guardian to save the *currently visible* ČÚZK area at a bounded set of zoom
+levels. That deliberate job is previewed, capped and cancellable; Guardian
+never crawls an unseen region. Every tile that arrives is kept in a SQLite
+file under the station's data directory so the same ground remains available
+in the field with no network, which is the case Guardian exists for.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from pathlib import Path
 from ..config import config_dir
 
 TILE_PIXELS = 256
+MAX_CACHE_MEGABYTES = 512.0
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,9 @@ class TileSource:
     url: str                 # format with {z} {x} {y}
     attribution: str
     max_zoom: int = 16
+    # Optional coverage in south, west, north, east order. Bulk offline work is
+    # clipped to it instead of asking a regional provider for the whole world.
+    bounds: tuple[float, float, float, float] | None = None
 
     def tile_url(self, zoom: int, x: int, y: int) -> str:
         return self.url.format(z=zoom, x=x, y=y)
@@ -49,6 +54,7 @@ CUZK_ZTM = TileSource(
     ),
     attribution="© ČÚZK (CC BY 4.0)",
     max_zoom=16,
+    bounds=(48.4, 11.8, 51.2, 19.1),
 )
 
 SOURCES: tuple[TileSource, ...] = (CUZK_ZTM,)
@@ -65,11 +71,54 @@ def tile_for(latitude: float, longitude: float, zoom: int) -> tuple[int, int]:
     return min(max(x, 0), count - 1), min(max(y, 0), count - 1)
 
 
+def tiles_for_bounds(
+    south: float,
+    west: float,
+    north: float,
+    east: float,
+    minimum_zoom: int,
+    maximum_zoom: int,
+    *,
+    source: TileSource | None = None,
+    limit: int = 750,
+) -> list[tuple[int, int, int]]:
+    """Plan an inclusive slippy-tile download, clipped and size-limited."""
+    if minimum_zoom < 0 or maximum_zoom < minimum_zoom:
+        raise ValueError("invalid zoom range")
+    if source is not None:
+        maximum_zoom = min(maximum_zoom, source.max_zoom)
+        if source.bounds is not None:
+            bound_south, bound_west, bound_north, bound_east = source.bounds
+            south, west = max(south, bound_south), max(west, bound_west)
+            north, east = min(north, bound_north), min(east, bound_east)
+    south, north = max(-85.05112878, south), min(85.05112878, north)
+    west, east = max(-180.0, west), min(180.0, east)
+    if south >= north or west >= east:
+        return []
+    keys: list[tuple[int, int, int]] = []
+    for zoom in range(minimum_zoom, maximum_zoom + 1):
+        first_x, first_y = tile_for(north, west, zoom)
+        last_x, last_y = tile_for(south, east, zoom)
+        for x in range(first_x, last_x + 1):
+            for y in range(first_y, last_y + 1):
+                keys.append((zoom, x, y))
+                if len(keys) > limit:
+                    raise ValueError(f"tile plan exceeds {limit}")
+    return keys
+
+
 class TileCache:
     """Every tile we have ever displayed, kept for the day the net is gone."""
 
-    def __init__(self, source: TileSource, directory: Path | None = None) -> None:
+    def __init__(
+        self,
+        source: TileSource,
+        directory: Path | None = None,
+        *,
+        max_megabytes: float = MAX_CACHE_MEGABYTES,
+    ) -> None:
         self.source = source
+        self.max_megabytes = float(max_megabytes)
         base = directory or (config_dir() / "maps")
         base.mkdir(parents=True, exist_ok=True)
         self.path = base / f"{source.key}.sqlite"
@@ -92,15 +141,29 @@ class TileCache:
             ).fetchone()
         return bytes(row[0]) if row else None
 
-    def put(self, zoom: int, x: int, y: int, image: bytes) -> None:
-        if not image:
-            return
+    def contains(self, zoom: int, x: int, y: int) -> bool:
         with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM tiles WHERE zoom=? AND x=? AND y=?", (zoom, x, y)
+            ).fetchone()
+        return row is not None
+
+    def put(self, zoom: int, x: int, y: int, image: bytes) -> bool:
+        if not image:
+            return False
+        with self._lock:
+            exists = self._db.execute(
+                "SELECT 1 FROM tiles WHERE zoom=? AND x=? AND y=?", (zoom, x, y)
+            ).fetchone()
+            projected = self.megabytes() + len(image) / 1_048_576
+            if not exists and projected > self.max_megabytes:
+                return False
             self._db.execute(
                 "INSERT OR REPLACE INTO tiles (zoom, x, y, image) VALUES (?,?,?,?)",
                 (zoom, x, y, sqlite3.Binary(image)),
             )
             self._db.commit()
+        return True
 
     def count(self) -> int:
         with self._lock:

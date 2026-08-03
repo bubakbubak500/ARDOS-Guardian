@@ -67,8 +67,12 @@ manifest, and asks again before launching it.
   can be detected once through Windows Location Service after explicit consent,
   picked on the map, or entered as a Maidenhead locator. Detection previews the
   reported source and accuracy before saving and never stores exact
-  coordinates. The map is an independent window and does not stay above the
-  main application.
+  coordinates. Optional 4/6-character locator grids, geodesic 50/100/200 km
+  rings, two-point distance/bearing measurement and a reachability legend turn
+  it into an operational planning view. The visible ČÚZK area can be saved into
+  a bounded 512 MB offline cache with a cancellable zoom plan, and the rendered
+  situation can be exported to PNG. The map is an independent window and does
+  not stay above the main application.
 - **Consent-driven VARA setup**: Station readiness can download the exact
   reviewed VARA FM/HF archive from the official Winlink distribution server,
   enforce the version, size and SHA-256 pinned in this Guardian release, then
@@ -99,7 +103,7 @@ See [Product description](PRODUCT.md) for intended use and boundaries and
 | 2     | VARA session state-machine    | ✅ done |
 | 3     | Control modem (AFSK + MFSK) + payload backends | ✅ done |
 | 4     | Smart routing / heard-stations | ✅ done |
-| 5     | Multi-channel scanning / mesh | ✅ done* |
+| 5     | Multi-channel scanning / mesh | ✅ done |
 
 ### Phases 4 & 5 — smart routing + mesh
 
@@ -110,8 +114,9 @@ built and tested. Dynamic relay offers are ranked by direct reach, measured
 S/N, freshness and a deterministic callsign tie-break. The production
 **channel scanner** has explicit Network UI,
 dwell + activity/S-meter hold, session/payload safety pauses and worker-based
-CAT tuning. (*) Its software paths are tested; physical-radio scanning remains
-to be field-verified.
+CAT tuning. Its physical-radio tuning, hold and home-return path was confirmed
+working on 2026-08-03. The scanner is considered complete, but a future
+operator-designed **network builder** is planned to replace it.
 
 Phase 3 is complete: AFSK 1200 (FM) and MFSK-16 (HF, ~0 dB SNR) modems
 with rate-1/2 K=7 convolutional FEC and audio device pickers. The production UI

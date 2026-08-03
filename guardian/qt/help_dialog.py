@@ -412,6 +412,16 @@ def help_topics() -> list[HelpTopic]:
             typing a locator does not enable beacons and does not transmit.
             When both beacons and this switch are enabled, only the accepted
             Maidenhead locator uses the existing presence-beacon field.</p>
+            <p><b>Map tools</b> can draw a 4/6-character locator grid and
+            geodesic 50/100/200 km rings. <b>Measure</b> uses two clicks for
+            distance and initial bearing; Esc or right-click clears it. Marker
+            colours and the legend distinguish direct, relay, unavailable and
+            historical position evidence.</p>
+            <p><b>Save area offline</b> prepares only the visible ČÚZK area at
+            selected zoom levels after showing count and size. Downloads are
+            bounded and cancellable. <b>Export PNG</b> saves the rendered map,
+            overlays, time, version and attribution without fetching anything
+            new.</p>
             """,
             """
             <h2>Mapa stanic a vlastní poloha</h2>
@@ -435,6 +445,15 @@ def help_topics() -> list[HelpTopic]:
             zadání nezapnou majáky a nic nevysílají. Teprve při zapnutých
             majácích i tomto přepínači použije přijatý Maidenhead lokátor
             stávající pole majáku přítomnosti.</p>
+            <p><b>Nástroje mapy</b> vykreslí 4/6znakovou lokátorovou mřížku a
+            geodetické kružnice 50/100/200 km. <b>Změřit</b> použije dvě
+            klepnutí pro vzdálenost a počáteční azimut; Esc nebo pravé tlačítko
+            měření smaže. Barvy značek a legenda rozlišují přímý dosah, relay,
+            nyní nedostupnou a historickou polohu.</p>
+            <p><b>Uložit oblast offline</b> připraví pouze viditelnou oblast
+            ČÚZK ve zvolených zoomech po zobrazení počtu a velikosti. Stahování
+            má limity a lze je zrušit. <b>Exportovat PNG</b> uloží vykreslenou
+            mapu, překryvy, čas, verzi a atribuci bez dalšího stahování.</p>
             """,
             "map position locator detect windows accuracy mapa poloha lokátor přesnost",
         ),

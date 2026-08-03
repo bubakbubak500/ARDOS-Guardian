@@ -523,11 +523,11 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "map.background": ("Map background", "Mapový podklad"),
     "map.background_hint": (
         "Topographic tiles from ČÚZK, which publishes them free and without "
-        "registration. Only what you look at is fetched, and it is kept on "
-        "disk so the same ground works later with no network.",
+        "registration. Viewed tiles stay on disk; you can also deliberately "
+        "save the visible area for later use with no network.",
         "Topografické dlaždice z ČÚZK, který je poskytuje zdarma a bez "
-        "registrace. Stahuje se jen to, na co se díváte, a ukládá se na disk, "
-        "takže stejné území funguje později i bez sítě.",
+        "registrace. Zobrazené dlaždice zůstávají na disku; viditelnou oblast "
+        "lze také vědomě uložit pro pozdější použití bez sítě.",
     ),
     "map.background_off": (
         "Map background off — stations are drawn on the graticule alone.",
@@ -545,6 +545,97 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Váš lokátor cestuje v majáku přítomnosti, aby vás ostatní stanice "
         "mohly umístit. Dokud jsou majáky vypnuté, nevysílá se nic.",
     ),
+    "map.tools_group": ("Map tools", "Nástroje mapy"),
+    "map.locator_grid": ("Locator grid", "Lokátorová mřížka"),
+    "map.overlay_off": ("Off", "Vypnuto"),
+    "map.locator_grid_4": ("4 characters", "4 znaky"),
+    "map.locator_grid_6": ("6 characters", "6 znaků"),
+    "map.range_rings": ("50/100/200 km rings", "Kružnice 50/100/200 km"),
+    "map.status_colours": ("Reachability colours", "Barvy dosažitelnosti"),
+    "map.legend_direct": ("heard directly", "přímo slyšena"),
+    "map.legend_relay": ("reachable via relay", "dosažitelná přes relay"),
+    "map.legend_unknown": ("not currently reachable", "nyní nedosažitelná"),
+    "map.legend_stale": ("historical position", "historická poloha"),
+    "map.measure": ("Measure", "Změřit"),
+    "map.measure_first": (
+        "Click the first point. Esc or right-click clears the measurement.",
+        "Klepněte na první bod. Esc nebo pravé tlačítko měření vymaže.",
+    ),
+    "map.measure_second": (
+        "Click the second point.",
+        "Klepněte na druhý bod.",
+    ),
+    "map.measure_result": (
+        "Distance {distance} km · initial bearing {bearing}°. Click again to "
+        "start a new measurement.",
+        "Vzdálenost {distance} km · počáteční azimut {bearing}°. Dalším "
+        "klepnutím zahájíte nové měření.",
+    ),
+    "map.offline_area": ("Save area offline…", "Uložit oblast offline…"),
+    "map.offline_title": ("Save visible area offline", "Uložit viditelnou oblast offline"),
+    "map.offline_intro": (
+        "Only the currently visible ČÚZK area is planned. Choose detail levels; "
+        "one task is limited to {limit} tiles and can be cancelled.",
+        "Naplánuje se pouze právě viditelná oblast ČÚZK. Zvolte úrovně detailu; "
+        "jedna úloha je omezena na {limit} dlaždic a lze ji zrušit.",
+    ),
+    "map.offline_min_zoom": ("Minimum zoom", "Nejnižší zoom"),
+    "map.offline_max_zoom": ("Maximum zoom", "Nejvyšší zoom"),
+    "map.offline_download": ("Download", "Stáhnout"),
+    "map.offline_bad_zoom": (
+        "Maximum zoom must not be lower than minimum zoom.",
+        "Nejvyšší zoom nesmí být nižší než nejnižší zoom.",
+    ),
+    "map.offline_too_many": (
+        "This selection exceeds the safety limit of {limit} tiles. Reduce the "
+        "zoom range or zoom further into the map.",
+        "Výběr překračuje bezpečnostní limit {limit} dlaždic. Zmenšete rozsah "
+        "zoomů nebo mapu více přibližte.",
+    ),
+    "map.offline_summary": (
+        "Plan: {total} tiles · already cached: {cached} · to download: "
+        "{missing} · estimated additional size: {megabytes} MB · cache: "
+        "{cache}/{limit} MB.",
+        "Plán: {total} dlaždic · již uloženo: {cached} · ke stažení: "
+        "{missing} · odhad další velikosti: {megabytes} MB · mezipaměť: "
+        "{cache}/{limit} MB.",
+    ),
+    "map.offline_cache_limit": (
+        "Reduce the area or zoom range to stay inside the cache limit.",
+        "Zmenšete oblast nebo rozsah zoomů, aby se vešly do limitu mezipaměti.",
+    ),
+    "map.offline_needs_background": (
+        "Switch on the map background before saving an offline area.",
+        "Před uložením offline oblasti zapněte mapový podklad.",
+    ),
+    "map.offline_already_cached": (
+        "The selected area and zoom levels are already cached.",
+        "Vybraná oblast a úrovně zoomu jsou již uložené.",
+    ),
+    "map.offline_progress": (
+        "Downloading the visible area into the offline cache…",
+        "Stahuji viditelnou oblast do offline mezipaměti…",
+    ),
+    "map.offline_cancelled": (
+        "Offline download cancelled; completed tiles remain cached.",
+        "Offline stahování zrušeno; dokončené dlaždice zůstaly uložené.",
+    ),
+    "map.offline_finished": (
+        "Visible area saved for offline use.",
+        "Viditelná oblast byla uložena pro použití bez sítě.",
+    ),
+    "map.offline_finished_errors": (
+        "Offline download completed with {errors} failed tiles; successful "
+        "tiles remain cached.",
+        "Offline stahování skončilo s {errors} chybnými dlaždicemi; úspěšné "
+        "dlaždice zůstaly uložené.",
+    ),
+    "map.export_png": ("Export PNG…", "Exportovat PNG…"),
+    "map.export_title": ("Export station map", "Export mapy stanic"),
+    "map.export_filter": ("PNG image (*.png)", "Obrázek PNG (*.png)"),
+    "map.export_done": ("Map exported to {path}.", "Mapa exportována do {path}."),
+    "map.export_failed": ("Could not save {path}.", "Soubor {path} nelze uložit."),
+    "map.offline": ("offline graticule", "offline souřadnicová síť"),
     "map.no_position": (
         "No position set for this station yet.",
         "Poloha této stanice zatím není nastavena.",

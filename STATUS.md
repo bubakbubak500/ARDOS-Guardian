@@ -30,15 +30,17 @@ RTS/DTR VOX fallback — no per-radio CAT reverse-engineering.
 | 2 | VARA handshake state-machine (orchestrator) | ✅ done |
 | 3 | Control modem (AFSK + MFSK) + payload backend + audio channel | ✅ done |
 | 4 | Smart routing / heard-stations | ✅ done |
-| 5 | Multi-channel scanning / mesh | ✅ done* |
+| 5 | Multi-channel scanning / mesh | ✅ done |
 | 6 | Mail layer: store-and-forward + attachments | ✅ done |
 
-**Phases 4 and 5 are done in software.** The
+**Phases 4 and 5 are done.** The
 heard-stations registry, ROUTE_QUERY/ROUTE_OFFER discovery, learned paths and
 multi-hop auto-relay are tested over the loopback bus. The production channel
 scanner has explicit Network UI, snapshot state, worker-based CAT tuning,
-activity/S-meter hold and safety pauses around sessions and payloads. (*) A
-physical-radio scanner pass is still required.
+activity/S-meter hold and safety pauses around sessions and payloads. A
+physical-radio pass confirmed tune/mode, dwell/hold and home return on
+2026-08-03. The scanner is complete; a future operator-defined network builder
+will replace it after its workflow is specified.
 
 **Phase 3 done.** Built + tested: AFSK 1200 modem, MFSK-16 HF modem
 (decodes to ~0 dB SNR in loopback), rate-1/2 K=7 convolutional FEC + Viterbi,
@@ -115,7 +117,9 @@ refusal has happened on air since.
 
 **Built but not yet flown:** the alert frequency sweep (an
 alert is repeated on every other frequency in the route table, then the radio
-goes back) and the production channel scanner (0.6.47). **Confirmed working in the field:** named radio
+goes back). **Confirmed working in the field:** the production channel scanner
+(0.6.47; tune/mode, dwell/hold and home return, operator-confirmed 2026-08-03);
+named radio
 profiles (0.6.51, operator-confirmed 2026-08-02); the compose window opened
 from the map closing on the machine where it used to stay up (0.6.49,
 operator-confirmed 2026-08-02); the heard-stations S/N estimate
@@ -182,7 +186,6 @@ ARM (0.6.42) and the AFSK control channel there, handshake both ways at
 - **Multi-hop relay on air.** Only the two-station direct case has flown; the
   A→B→C chain is loopback-tested only.
 - Alert frequency sweep on HF and FM.
-- Channel scanning on a physical CAT-controlled radio.
 
 ---
 
@@ -651,7 +654,7 @@ ownership, a no-CAT poll that sends only `t` (never `f/m/l`), and both QSY
 branches proving Cancel emits no announcement while OK updates the dial before
 the announcement.
 
-## P0 operational hardening (0.6.47 — software complete, field pass pending)
+## P0 operational hardening (0.6.47 — software complete)
 
 - **Production channel scanner:** the current channel plus compatible route
   frequencies form a frozen plan. Network UI exposes Start/Stop, dwell,
@@ -659,6 +662,9 @@ the announcement.
   a worker under the radio lock; decoded activity holds the channel, sessions
   and payloads pause it, and Stop restores the home frequency/mode. No-CAT is
   rejected and outbound mail/alerts/PTT tests require scanning to stop first.
+  Its physical CAT-radio tune/mode, dwell/hold and home-return behavior was
+  confirmed working on 2026-08-03. It will eventually be replaced by an
+  operator-defined network builder whose design is intentionally deferred.
 - **Modem-compatible movement:** both scanner and alert sweep keep AFSK on
   FM-family modes and MFSK on SSB/data modes. Retuning never pretends to replace
   the live audio modem.
@@ -667,8 +673,8 @@ the announcement.
   including reason, modem, S/N, length and payload hex. Diagnostics exposes the
   record and a session counter.
 - **Software verification:** 299 tests pass. Remaining P0 evidence is explicitly
-  operational: scanner CAT movement/hold/home return, alert timing and copy count
-  on air, and classification of the next naturally occurring rejected frame.
+  operational: alert timing and copy count on air, and classification of the
+  next naturally occurring rejected frame.
 
 ## P1 network operation (0.6.48)
 
@@ -800,9 +806,8 @@ Two defects, both in what 0.6.49 added.
   orange link; unmapped hops split a chain rather than invent a position.
 - **Map: alerts have a place.** The origin of an active alert (15 min) pulses
   red, with a chip above the map naming what, who and how long ago.
-- Two switches on the Station page (`notify_incoming`, `notify_sound`).
-  Deferred map ideas (grid overlay, range rings, status colours, terminator,
-  mobile trail, tile prefetch, PNG export) are in the backlog.
+- Two switches on the Station page (`notify_incoming`, `notify_sound`). The
+  mobile trail remains deferred; the terminator was removed from the plan.
 - **Software verification:** 341 tests pass. Not yet field-proven: the toast
   and chime on a real desktop session.
 
@@ -830,9 +835,28 @@ Two defects, both in what 0.6.49 added.
 - Windows-only PyWinRT Geolocation/Foundation projections are lazy in source
   and explicit in PyInstaller. The QR phone bridge remains a documented future
   companion concept, not a dependency or partial protocol.
-- **Software verification:** 348 tests pass. A live unpackaged run reached the
-  Windows service and correctly classified the release machine's disabled
-  desktop permission as denied; an allowed live fix remains a field check.
+- **Verified in the field, 2026-08-03:** the installed 0.6.53 release obtained
+  an allowed live Windows fix and the complete detect, preview and accept flow
+  behaved correctly (operator-confirmed). The denied-permission fallback was
+  also verified before release. **Software verification:** 348 tests pass.
+
+## Operational map tools and offline preparation (0.6.54)
+
+- A bounded 4/6-character Maidenhead overlay, geodesic 50/100/200 km rings and
+  an ephemeral two-click distance/initial-bearing tool are native painter
+  layers; none changes station position or radio state.
+- Station evidence is explicit: fresh direct reception, a known relay path,
+  currently unavailable and historical-only positions have separate colours
+  and an on-canvas legend. Active alerts and the selected station stay visually
+  dominant.
+- The operator can prepare only the visible ČÚZK area for offline use, choosing
+  zoom levels after seeing tile count, cached count and estimated size. A task
+  is capped at 750 tiles, the SQLite cache at 512 MB, concurrency at four, and
+  cancellation preserves completed tiles.
+- PNG export captures the rendered canvas and active overlays without fetching
+  missing data, and stamps Guardian version, local time and source attribution.
+- M5 mobile trails are deliberately deferred. The proposed day/night
+  terminator was removed from the roadmap by operator decision.
 
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,

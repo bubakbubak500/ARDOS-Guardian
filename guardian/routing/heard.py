@@ -83,6 +83,10 @@ class HeardStations:
         out = [s for s in self._stations.values() if s.age(now) <= self.max_age]
         return sorted(out, key=lambda s: s.last_heard, reverse=True)
 
+    def known(self) -> list[HeardStation]:
+        """Every station retained this run, including stale map positions."""
+        return sorted(self._stations.values(), key=lambda s: s.last_heard, reverse=True)
+
     def prune(self, now: float) -> None:
         self._stations = {c: s for c, s in self._stations.items()
                           if s.age(now) <= self.max_age}

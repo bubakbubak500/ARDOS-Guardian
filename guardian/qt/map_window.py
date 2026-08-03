@@ -25,13 +25,17 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QPixmap,
+    QPolygonF,
 )
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -39,10 +43,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -54,7 +60,15 @@ from ..message import Folder, Status
 from .alerts import alert_headline
 from .mail_workspace import ComposeDialog
 from .location import WindowsLocationRequest
-from .map_tiles import SOURCES, TILE_PIXELS, TileCache, TileSource, tile_for
+from .map_tiles import (
+    SOURCES,
+    TILE_PIXELS,
+    TileCache,
+    TileSource,
+    tile_for,
+    tiles_for_bounds,
+)
+from .map_tools import destination_point, locator_cells
 from ..routing import (
     MAX_LOCATOR_CHARS,
     distance_bearing,
@@ -73,6 +87,9 @@ MIN_FIT_DEGREES = 2.0
 MERCATOR_LIMIT = 85.05112878     # where the projection runs to infinity
 MAX_TILES_PER_DRAW = 400         # a zoomed-out view must not ask for thousands
 MAX_TILES_IN_FLIGHT = 8          # polite to a service given away for free
+MAX_PREFETCH_IN_FLIGHT = 4
+MAX_PREFETCH_TILES = 750
+PREFETCH_PACE_MS = 150
 # An alert stops pulsing on the map after this long; the banner and the log
 # keep the history. Matches what the notifier considers worth interrupting for.
 ALERT_MAP_WINDOW = 900.0
@@ -84,6 +101,9 @@ class MapCanvas(QWidget):
 
     picked = Signal(float, float)          # latitude, longitude
     station_picked = Signal(str)           # callsign
+    measurement_changed = Signal(str)
+    prefetch_progress = Signal(int, int)
+    prefetch_finished = Signal(bool, int)  # cancelled, errors
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -95,6 +115,14 @@ class MapCanvas(QWidget):
         self.own_grid = ""
         self.preview_grid = ""
         self.stations: list[tuple[str, str, float]] = []   # call, grid, age
+        self.station_states: dict[str, str] = {}
+        self.selected_callsign = ""
+        self.locator_grid_chars = 0
+        self.range_rings = False
+        self.status_colours = True
+        self.measuring = False
+        self.measure_start: tuple[float, float] | None = None
+        self.measure_end: tuple[float, float] | None = None
         self.links: list[tuple[str, str, str]] = []  # call, grid, mail activity
         # Relay paths mail actually travelled: each chain is the mapped grids
         # of consecutive hops, origin first, this station last.
@@ -112,9 +140,19 @@ class MapCanvas(QWidget):
         self._missing: set[tuple[int, int, int]] = set()
         self._network = QNetworkAccessManager(self)
         self._network.finished.connect(self._tile_arrived)
+        self._prefetch_network = QNetworkAccessManager(self)
+        self._prefetch_network.finished.connect(self._prefetch_arrived)
+        self._prefetch_queue: list[tuple[int, int, int]] = []
+        self._prefetch_pending: set[tuple[int, int, int]] = set()
+        self._prefetch_total = 0
+        self._prefetch_done = 0
+        self._prefetch_errors = 0
+        self._prefetch_cancelled = False
+        self._prefetch_active = False
 
     # --- tiles ------------------------------------------------------------ #
     def set_source(self, source: TileSource | None) -> None:
+        self.cancel_prefetch()
         if self._cache is not None:
             self._cache.close()
             self._cache = None
@@ -186,8 +224,8 @@ class MapCanvas(QWidget):
     def _request(self, key: tuple[int, int, int]) -> None:
         """Ask for one tile, on demand only.
 
-        Never a region the operator has not looked at: prefetching is exactly
-        what tile providers forbid, and what would turn a courtesy into abuse.
+        The automatic path only asks for what is on screen. Deliberate offline
+        saving is a separate, bounded path restricted to the visible ČÚZK area.
         """
         if key in self._pending or len(self._pending) >= MAX_TILES_IN_FLIGHT:
             return
@@ -225,6 +263,124 @@ class MapCanvas(QWidget):
             self.update()
         finally:
             reply.deleteLater()
+
+    def visible_bounds(self) -> tuple[float, float, float, float]:
+        north, west = self.to_position(QPointF(0, 0))
+        south, east = self.to_position(QPointF(self.width(), self.height()))
+        return south, west, north, east
+
+    def offline_plan(
+        self, minimum_zoom: int, maximum_zoom: int
+    ) -> list[tuple[int, int, int]]:
+        if self.source is None:
+            return []
+        south, west, north, east = self.visible_bounds()
+        return tiles_for_bounds(
+            south,
+            west,
+            north,
+            east,
+            minimum_zoom,
+            maximum_zoom,
+            source=self.source,
+            limit=MAX_PREFETCH_TILES,
+        )
+
+    def missing_tiles(
+        self, keys: list[tuple[int, int, int]]
+    ) -> list[tuple[int, int, int]]:
+        if self._cache is None:
+            return []
+        return [key for key in keys if not self._cache.contains(*key)]
+
+    def start_prefetch(self, keys: list[tuple[int, int, int]]) -> None:
+        if self.source is None or self._cache is None or self._prefetch_active:
+            return
+        self._prefetch_queue = self.missing_tiles(keys)
+        self._prefetch_total = len(self._prefetch_queue)
+        self._prefetch_done = 0
+        self._prefetch_errors = 0
+        self._prefetch_cancelled = False
+        self._prefetch_active = True
+        self.prefetch_progress.emit(0, self._prefetch_total)
+        if not self._prefetch_queue:
+            self._finish_prefetch()
+            return
+        self._pump_prefetch()
+
+    def _pump_prefetch(self) -> None:
+        if not self._prefetch_active or self._prefetch_cancelled:
+            return
+        while (
+            self._prefetch_queue
+            and len(self._prefetch_pending) < MAX_PREFETCH_IN_FLIGHT
+        ):
+            key = self._prefetch_queue.pop(0)
+            zoom, x, y = key
+            request = QNetworkRequest(QUrl(self.source.tile_url(zoom, x, y)))
+            request.setHeader(
+                QNetworkRequest.KnownHeaders.UserAgentHeader,
+                f"Guardian/{__version__} (ARDOS offline field map)",
+            )
+            request.setAttribute(
+                QNetworkRequest.Attribute.User, f"{zoom}/{x}/{y}"
+            )
+            self._prefetch_pending.add(key)
+            self._prefetch_network.get(request)
+
+    def _prefetch_arrived(self, reply) -> None:
+        try:
+            coordinates = reply.request().attribute(QNetworkRequest.Attribute.User)
+            zoom, x, y = (int(part) for part in str(coordinates).split("/"))
+            key = (zoom, x, y)
+            self._prefetch_pending.discard(key)
+            if not self._prefetch_cancelled:
+                if reply.error() == QNetworkReply.NetworkError.NoError:
+                    data = bytes(reply.readAll())
+                    pixmap = QPixmap()
+                    if data and pixmap.loadFromData(data) and self._cache is not None:
+                        if self._cache.put(zoom, x, y, data):
+                            self._pixmaps[key] = pixmap
+                        else:
+                            self._prefetch_errors += 1
+                    else:
+                        self._prefetch_errors += 1
+                else:
+                    self._prefetch_errors += 1
+                self._prefetch_done += 1
+                self.prefetch_progress.emit(
+                    self._prefetch_done, self._prefetch_total
+                )
+        finally:
+            reply.deleteLater()
+        if self._prefetch_cancelled and not self._prefetch_pending:
+            self._finish_prefetch()
+        elif not self._prefetch_queue and not self._prefetch_pending:
+            self._finish_prefetch()
+        else:
+            QTimer.singleShot(PREFETCH_PACE_MS, self._pump_prefetch)
+
+    def cancel_prefetch(self) -> None:
+        if not self._prefetch_active:
+            return
+        self._prefetch_cancelled = True
+        self._prefetch_queue.clear()
+        for reply in self._prefetch_network.findChildren(QNetworkReply):
+            if reply.isRunning():
+                reply.abort()
+        if not self._prefetch_pending:
+            self._finish_prefetch()
+
+    def _finish_prefetch(self) -> None:
+        if not self._prefetch_active:
+            return
+        cancelled = self._prefetch_cancelled
+        errors = self._prefetch_errors
+        self._prefetch_active = False
+        self._prefetch_queue.clear()
+        self._prefetch_pending.clear()
+        self.update()
+        self.prefetch_finished.emit(cancelled, errors)
 
     # --- projection ---------------------------------------------------- #
     # Web Mercator, in the slippy-map convention where the whole world is a
@@ -295,7 +451,31 @@ class MapCanvas(QWidget):
     def mouseReleaseEvent(self, event) -> None:
         # A click is a press that did not become a drag; otherwise panning the
         # map would keep moving the operator's own station around with it.
-        if self.picking and not self._dragged:
+        if self.measuring and event.button() == Qt.MouseButton.RightButton:
+            self.clear_measurement()
+        elif self.measuring and not self._dragged:
+            position = self.to_position(QPointF(event.position()))
+            if self.measure_start is None or self.measure_end is not None:
+                self.measure_start = position
+                self.measure_end = None
+                self.measurement_changed.emit(tr("map.measure_second"))
+            else:
+                self.measure_end = position
+                distance, bearing = distance_bearing(
+                    self.measure_start[0],
+                    self.measure_start[1],
+                    position[0],
+                    position[1],
+                )
+                self.measurement_changed.emit(
+                    tr(
+                        "map.measure_result",
+                        distance=f"{distance:.1f}",
+                        bearing=f"{bearing:.0f}",
+                    )
+                )
+            self.update()
+        elif self.picking and not self._dragged:
             latitude, longitude = self.to_position(QPointF(event.position()))
             self.picked.emit(latitude, longitude)
         elif not self._dragged:
@@ -303,6 +483,30 @@ class MapCanvas(QWidget):
             if callsign:
                 self.station_picked.emit(callsign)
         self._drag_from = None
+
+    def set_measurement_active(self, enabled: bool) -> None:
+        self.measuring = enabled
+        self.setFocusPolicy(
+            Qt.FocusPolicy.StrongFocus if enabled else Qt.FocusPolicy.NoFocus
+        )
+        if enabled:
+            self.setFocus()
+            self.measurement_changed.emit(tr("map.measure_first"))
+        else:
+            self.clear_measurement(announce=False)
+
+    def clear_measurement(self, *, announce: bool = True) -> None:
+        self.measure_start = None
+        self.measure_end = None
+        if announce and self.measuring:
+            self.measurement_changed.emit(tr("map.measure_first"))
+        self.update()
+
+    def keyPressEvent(self, event) -> None:
+        if self.measuring and event.key() == Qt.Key.Key_Escape:
+            self.clear_measurement()
+            return
+        super().keyPressEvent(event)
 
     def station_at(self, point: QPointF, radius: float = 16.0) -> str:
         """Return the nearest plotted peer under a click, if there is one."""
@@ -372,12 +576,23 @@ class MapCanvas(QWidget):
         painter.fillRect(self.rect(), QColor("#101418"))
         self._draw_tiles(painter)
         self._draw_graticule(painter)
+        self._draw_locator_grid(painter)
+        self._draw_range_rings(painter)
+        self._draw_measurement(painter)
         for chain in self.chains:
             self._draw_chain(painter, chain)
         for callsign, grid, activity in self.links:
             self._draw_link(painter, callsign, grid, activity)
         for callsign, grid, age in self.stations:
-            self._draw_station(painter, callsign, grid, age, own=False)
+            self._draw_station(
+                painter,
+                callsign,
+                grid,
+                age,
+                own=False,
+                state=self.station_states.get(callsign, "stale"),
+                selected=callsign == self.selected_callsign,
+            )
         if self.own_grid:
             self._draw_station(painter, tr("map.you"), self.own_grid, 0.0, own=True)
         if self.preview_grid and self.preview_grid != self.own_grid:
@@ -391,6 +606,7 @@ class MapCanvas(QWidget):
             )
         for grid in self.alert_grids:
             self._draw_alert_ring(painter, grid)
+        self._draw_status_legend(painter)
         painter.end()
 
     def _graticule_step(self) -> float:
@@ -421,6 +637,108 @@ class MapCanvas(QWidget):
             painter.drawText(QPointF(3, y - 3), f"{line:g}°")
             line += step
 
+    def _draw_locator_grid(self, painter: QPainter) -> None:
+        if self.locator_grid_chars not in (4, 6):
+            return
+        south, west, north, east = self.visible_bounds()
+        cells = locator_cells(
+            south, west, north, east, self.locator_grid_chars, max_cells=400
+        )
+        if not cells:
+            return
+        painter.save()
+        line_colour = QColor(74, 222, 255, 145)
+        painter.setPen(QPen(QColor(0, 0, 0, 170), 3))
+        for _locator, (cell_south, cell_west, cell_north, cell_east) in cells:
+            painter.drawRect(
+                QRectF(
+                    self.to_screen(cell_north, cell_west),
+                    self.to_screen(cell_south, cell_east),
+                )
+            )
+        painter.setPen(QPen(line_colour, 1))
+        font = QFont(painter.font())
+        font.setBold(True)
+        font.setPointSizeF(max(7.0, font.pointSizeF() - 1.0))
+        painter.setFont(font)
+        for locator, (cell_south, cell_west, cell_north, cell_east) in cells:
+            rectangle = QRectF(
+                self.to_screen(cell_north, cell_west),
+                self.to_screen(cell_south, cell_east),
+            )
+            painter.drawRect(rectangle)
+            if rectangle.width() < 38 or rectangle.height() < 22:
+                continue
+            text_bounds = QFontMetricsF(font).boundingRect(locator).adjusted(-3, -2, 3, 2)
+            text_bounds.moveTopLeft(rectangle.topLeft() + QPointF(3, 3))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 155))
+            painter.drawRoundedRect(text_bounds, 3, 3)
+            painter.setPen(QPen(QColor("#bff6ff"), 1))
+            painter.drawText(text_bounds, Qt.AlignmentFlag.AlignCenter, locator)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(line_colour, 1))
+        painter.restore()
+
+    def _draw_range_rings(self, painter: QPainter) -> None:
+        if not self.range_rings or not is_locator(self.own_grid):
+            return
+        latitude, longitude = from_locator(self.own_grid)
+        painter.save()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        font = QFont(painter.font())
+        font.setBold(True)
+        painter.setFont(font)
+        for distance in (50, 100, 200):
+            points = QPolygonF(
+                [
+                    self.to_screen(*destination_point(latitude, longitude, distance, bearing))
+                    for bearing in range(0, 361, 5)
+                ]
+            )
+            painter.setPen(QPen(QColor(0, 0, 0, 180), 4, Qt.PenStyle.DashLine))
+            painter.drawPolyline(points)
+            painter.setPen(QPen(QColor(255, 212, 64, 190), 2, Qt.PenStyle.DashLine))
+            painter.drawPolyline(points)
+            label_position = self.to_screen(
+                *destination_point(latitude, longitude, distance, 90)
+            )
+            painter.drawText(label_position + QPointF(4, -4), f"{distance} km")
+        painter.restore()
+
+    def _draw_measurement(self, painter: QPainter) -> None:
+        if self.measure_start is None:
+            return
+        start = self.to_screen(*self.measure_start)
+        end = self.to_screen(*(self.measure_end or self.measure_start))
+        painter.save()
+        painter.setPen(QPen(QColor(0, 0, 0, 210), 6))
+        painter.drawLine(start, end)
+        painter.setPen(QPen(QColor("#ffcf33"), 3))
+        painter.drawLine(start, end)
+        painter.setBrush(QColor("#ffcf33"))
+        painter.drawEllipse(start, 5, 5)
+        if self.measure_end is not None:
+            painter.drawEllipse(end, 5, 5)
+            distance, bearing = distance_bearing(
+                self.measure_start[0],
+                self.measure_start[1],
+                self.measure_end[0],
+                self.measure_end[1],
+            )
+            text = f"{distance:.1f} km · {bearing:.0f}°"
+            font = QFont(painter.font())
+            font.setBold(True)
+            painter.setFont(font)
+            bounds = QFontMetricsF(font).boundingRect(text).adjusted(-6, -4, 6, 4)
+            bounds.moveCenter((start + end) / 2 + QPointF(0, -14))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 205))
+            painter.drawRoundedRect(bounds, 4, 4)
+            painter.setPen(QPen(QColor("#ffffff"), 1))
+            painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
+
     def _draw_station(
         self,
         painter: QPainter,
@@ -430,18 +748,28 @@ class MapCanvas(QWidget):
         *,
         own: bool,
         preview: bool = False,
+        state: str = "direct",
+        selected: bool = False,
     ) -> None:
         try:
             south, west, north, east = locator_bounds(grid)
         except ValueError:
             return
-        colour = (
-            QColor("#ffb000")
-            if preview
-            else QColor("#1683ff") if own else QColor("#14a83b")
-        )
-        if age > 600:
-            colour = QColor("#66717c")      # heard a while ago, faded back
+        if preview:
+            colour = QColor("#ffb000")
+        elif own:
+            colour = QColor("#1683ff")
+        elif self.status_colours:
+            colour = {
+                "direct": QColor("#25d366"),
+                "relay": QColor("#00c8ff"),
+                "unknown": QColor("#ffb000"),
+                "stale": QColor("#8a949e"),
+            }.get(state, QColor("#ffb000"))
+        else:
+            colour = QColor("#14a83b")
+            if age > 600:
+                colour = QColor("#66717c")
         top_left = self.to_screen(north, west)
         bottom_right = self.to_screen(south, east)
         square = QRectF(top_left, bottom_right)
@@ -462,6 +790,10 @@ class MapCanvas(QWidget):
         painter.setPen(QPen(colour, 2))
         painter.setBrush(colour)
         painter.drawEllipse(centre, 6, 6)
+        if selected:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor("#ffffff"), 3))
+            painter.drawEllipse(centre, 12, 12)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         font = QFont(painter.font())
         font.setBold(True)
@@ -480,6 +812,55 @@ class MapCanvas(QWidget):
             text,
         )
         painter.restore()
+
+    def _draw_status_legend(self, painter: QPainter) -> None:
+        if not self.status_colours:
+            return
+        entries = [
+            (QColor("#25d366"), tr("map.legend_direct")),
+            (QColor("#00c8ff"), tr("map.legend_relay")),
+            (QColor("#ffb000"), tr("map.legend_unknown")),
+            (QColor("#8a949e"), tr("map.legend_stale")),
+        ]
+        font = QFont(painter.font())
+        font.setPointSizeF(max(7.0, font.pointSizeF() - 1.0))
+        metrics = QFontMetricsF(font)
+        width = max(metrics.horizontalAdvance(text) for _colour, text in entries) + 34
+        height = len(entries) * 20 + 10
+        box = QRectF(self.width() - width - 10, 10, width, height)
+        painter.save()
+        painter.setPen(QPen(QColor(255, 255, 255, 60), 1))
+        painter.setBrush(QColor(0, 0, 0, 190))
+        painter.drawRoundedRect(box, 5, 5)
+        painter.setFont(font)
+        for index, (colour, text) in enumerate(entries):
+            y = box.top() + 15 + index * 20
+            painter.setPen(QPen(QColor(0, 0, 0, 220), 2))
+            painter.setBrush(colour)
+            painter.drawEllipse(QPointF(box.left() + 13, y), 5, 5)
+            painter.setPen(QPen(QColor("#ffffff"), 1))
+            painter.drawText(QPointF(box.left() + 24, y + 4), text)
+        painter.restore()
+
+    def export_png(self, path: str) -> bool:
+        """Save exactly the rendered map plus provenance visible to a briefer."""
+        pixmap = self.grab()
+        painter = QPainter(pixmap)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        source = self.source.attribution if self.source is not None else tr("map.offline")
+        text = f"Guardian {__version__} · {stamp} · {source}"
+        font = QFont(painter.font())
+        font.setPointSizeF(max(7.0, font.pointSizeF() - 1.0))
+        painter.setFont(font)
+        bounds = QFontMetricsF(font).boundingRect(text).adjusted(-6, -3, 6, 3)
+        bounds.moveBottomLeft(QPointF(8, pixmap.height() - 8))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 205))
+        painter.drawRoundedRect(bounds, 4, 4)
+        painter.setPen(QPen(QColor("#ffffff"), 1))
+        painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, text)
+        painter.end()
+        return pixmap.save(path, "PNG")
 
     def _grid_centre(self, grid: str) -> QPointF | None:
         try:
@@ -599,6 +980,97 @@ class MapCanvas(QWidget):
         painter.restore()
 
 
+class OfflineAreaDialog(QDialog):
+    """Bounded zoom selection and honest size preview for field-map caching."""
+
+    def __init__(self, canvas: MapCanvas, parent=None) -> None:
+        super().__init__(parent)
+        self.canvas = canvas
+        self._plan: list[tuple[int, int, int]] = []
+        self.setWindowTitle(tr("map.offline_title"))
+        layout = QVBoxLayout(self)
+        intro = QLabel(tr("map.offline_intro", limit=MAX_PREFETCH_TILES))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        form = QFormLayout()
+        current = canvas.tile_zoom()
+        maximum = canvas.source.max_zoom if canvas.source is not None else current
+        self.minimum_zoom = QSpinBox()
+        self.minimum_zoom.setRange(0, maximum)
+        self.minimum_zoom.setValue(current)
+        self.maximum_zoom = QSpinBox()
+        self.maximum_zoom.setRange(0, maximum)
+        self.maximum_zoom.setValue(min(current + 2, maximum))
+        form.addRow(tr("map.offline_min_zoom"), self.minimum_zoom)
+        form.addRow(tr("map.offline_max_zoom"), self.maximum_zoom)
+        layout.addLayout(form)
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            tr("map.offline_download")
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(
+            tr("common.cancel")
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self.minimum_zoom.valueChanged.connect(self._update_summary)
+        self.maximum_zoom.valueChanged.connect(self._update_summary)
+        self._update_summary()
+
+    @property
+    def plan(self) -> list[tuple[int, int, int]]:
+        return list(self._plan)
+
+    def _update_summary(self) -> None:
+        minimum = self.minimum_zoom.value()
+        maximum = self.maximum_zoom.value()
+        button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if minimum > maximum:
+            self._plan = []
+            self.summary.setText(tr("map.offline_bad_zoom"))
+            button.setEnabled(False)
+            return
+        try:
+            self._plan = self.canvas.offline_plan(minimum, maximum)
+        except ValueError:
+            self._plan = []
+            self.summary.setText(tr("map.offline_too_many", limit=MAX_PREFETCH_TILES))
+            button.setEnabled(False)
+            return
+        missing = self.canvas.missing_tiles(self._plan)
+        cache = self.canvas.cache
+        average_bytes = 35_000.0
+        if cache is not None and cache.count():
+            average_bytes = cache.megabytes() * 1_048_576 / cache.count()
+        estimate = len(missing) * average_bytes / 1_048_576
+        cache_size = cache.megabytes() if cache is not None else 0.0
+        cache_limit = cache.max_megabytes if cache is not None else 0.0
+        self.summary.setText(
+            tr(
+                "map.offline_summary",
+                total=len(self._plan),
+                cached=len(self._plan) - len(missing),
+                missing=len(missing),
+                megabytes=f"{estimate:.1f}",
+                cache=f"{cache_size:.1f}",
+                limit=f"{cache_limit:.0f}",
+            )
+        )
+        fits = cache is not None and cache_size + estimate <= cache_limit
+        if self._plan and not fits:
+            self.summary.setText(
+                self.summary.text() + " " + tr("map.offline_cache_limit")
+            )
+        button.setEnabled(bool(self._plan) and fits)
+
+
 class MapWindow(QDialog):
     """The map, the operator's own position, and what it will transmit."""
 
@@ -625,6 +1097,7 @@ class MapWindow(QDialog):
         self._location_request = None
         self._detected_fix: LocationFix | None = None
         self._detected_grid = ""
+        self._prefetch_dialog: QProgressDialog | None = None
         self.setWindowTitle(tr("map.title"))
         self.setMinimumSize(760, 560)
 
@@ -645,6 +1118,16 @@ class MapWindow(QDialog):
         self.canvas = MapCanvas()
         self.canvas.picked.connect(self._picked)
         self.canvas.station_picked.connect(self._compose_to)
+        self.canvas.measurement_changed.connect(self._measurement_changed)
+        self.canvas.prefetch_progress.connect(self._prefetch_progress)
+        self.canvas.prefetch_finished.connect(self._prefetch_finished)
+        self.canvas.locator_grid_chars = (
+            self.runtime.config.map_locator_grid
+            if self.runtime.config.map_locator_grid in (0, 4, 6)
+            else 0
+        )
+        self.canvas.range_rings = bool(self.runtime.config.map_range_rings)
+        self.canvas.status_colours = bool(self.runtime.config.map_status_colours)
 
         # The situational panel: every heard station with the numbers an
         # operator wants at a glance, whether or not it sent a position yet.
@@ -755,6 +1238,49 @@ class MapWindow(QDialog):
         position_layout.addWidget(self.location_settings, 0, Qt.AlignmentFlag.AlignLeft)
         outer.addWidget(position_group)
 
+        tools_group = QGroupBox(tr("map.tools_group"))
+        tools_layout = QVBoxLayout(tools_group)
+        overlay_controls = QHBoxLayout()
+        overlay_controls.addWidget(QLabel(tr("map.locator_grid")))
+        self.grid_combo = QComboBox()
+        self.grid_combo.addItem(tr("map.overlay_off"), 0)
+        self.grid_combo.addItem(tr("map.locator_grid_4"), 4)
+        self.grid_combo.addItem(tr("map.locator_grid_6"), 6)
+        index = self.grid_combo.findData(self.canvas.locator_grid_chars)
+        self.grid_combo.setCurrentIndex(max(0, index))
+        self.grid_combo.currentIndexChanged.connect(self._locator_grid_changed)
+        overlay_controls.addWidget(self.grid_combo)
+        self.rings = QCheckBox(tr("map.range_rings"))
+        self.rings.setChecked(self.canvas.range_rings)
+        self.rings.toggled.connect(self._range_rings_toggled)
+        overlay_controls.addWidget(self.rings)
+        self.status_colours = QCheckBox(tr("map.status_colours"))
+        self.status_colours.setChecked(self.canvas.status_colours)
+        self.status_colours.toggled.connect(self._status_colours_toggled)
+        overlay_controls.addWidget(self.status_colours)
+        overlay_controls.addStretch(1)
+        tools_layout.addLayout(overlay_controls)
+
+        action_controls = QHBoxLayout()
+        self.measure_button = QPushButton(tr("map.measure"))
+        self.measure_button.setCheckable(True)
+        self.measure_button.toggled.connect(self._measure_toggled)
+        action_controls.addWidget(self.measure_button)
+        self.offline_button = QPushButton(tr("map.offline_area"))
+        self.offline_button.clicked.connect(self._offline_area)
+        action_controls.addWidget(self.offline_button)
+        self.export_button = QPushButton(tr("map.export_png"))
+        self.export_button.clicked.connect(self._export_png)
+        action_controls.addWidget(self.export_button)
+        action_controls.addStretch(1)
+        tools_layout.addLayout(action_controls)
+        self.tool_status = QLabel()
+        self.tool_status.setObjectName("Metadata")
+        self.tool_status.setWordWrap(True)
+        self.tool_status.hide()
+        tools_layout.addWidget(self.tool_status)
+        outer.addWidget(tools_group)
+
         map_controls = QHBoxLayout()
         map_controls.addStretch(1)
         self.background = QCheckBox(tr("map.background"))
@@ -790,17 +1316,47 @@ class MapWindow(QDialog):
 
     # --- data ------------------------------------------------------------ #
     def stations(self) -> list[tuple[str, str, float]]:
-        """Heard stations that have told us where they are."""
+        """All retained stations that have told us where they are."""
         now = time.monotonic()
         return [
             (station.callsign, station.grid, station.age(now))
-            for station in self.runtime.heard.active(now)
+            for station in self.runtime.heard.known()
             if is_locator(station.grid)
         ]
+
+    def station_states(self) -> dict[str, str]:
+        """Map each plotted station to direct, relay, unknown, or stale evidence."""
+        now = time.monotonic()
+        direct = {station.callsign for station in self.runtime.heard.active(now)}
+        relay_destinations: set[str] = set()
+        for station in self.runtime.heard.active(now):
+            relay_destinations.update(station.reaches)
+        for route in self.runtime.routes:
+            if route.preferred and route.preferred != route.destination:
+                relay_destinations.add(route.destination)
+        learned = getattr(getattr(self.runtime.operations, "net", None), "learned_paths", {})
+        relay_destinations.update(
+            destination
+            for destination, next_hop in learned.items()
+            if next_hop and next_hop != destination
+        )
+        return {
+            callsign: (
+                "direct"
+                if callsign in direct
+                else "relay"
+                if callsign in relay_destinations
+                else "unknown"
+                if age <= self.runtime.heard.max_age * 2
+                else "stale"
+            )
+            for callsign, _grid, age in self.canvas.stations
+        }
 
     def refresh(self) -> None:
         self.canvas.own_grid = (self.runtime.config.station_grid or "").upper()
         self.canvas.stations = self.stations()
+        self.canvas.station_states = self.station_states()
         self.canvas.links = self.interactions()
         self.canvas.chains = self.hop_chains()
         self.canvas.alert_grids = self._alert_grids()
@@ -954,11 +1510,14 @@ class MapWindow(QDialog):
 
     def _panel_clicked(self, row: int, _column: int) -> None:
         """A click brings the station into view; it must never transmit."""
+        callsign = self.panel.item(row, 0)
+        self.canvas.selected_callsign = callsign.text() if callsign is not None else ""
         item = self.panel.item(row, 1)
         grid = item.text() if item is not None else ""
         if is_locator(grid):
             latitude, longitude = from_locator(grid)
             self.canvas.look_at(latitude, longitude)
+        self.canvas.update()
 
     def _panel_double_clicked(self, row: int, _column: int) -> None:
         item = self.panel.item(row, 0)
@@ -1124,10 +1683,114 @@ class MapWindow(QDialog):
         self.canvas.update()
 
     def _pick_toggled(self, enabled: bool) -> None:
+        if enabled and self.measure_button.isChecked():
+            self.measure_button.setChecked(False)
         self.canvas.picking = enabled
         self.canvas.setCursor(
             Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor
         )
+
+    def _locator_grid_changed(self, _index: int) -> None:
+        value = int(self.grid_combo.currentData() or 0)
+        self.canvas.locator_grid_chars = value
+        self.runtime.config.map_locator_grid = value
+        self.runtime.config.save()
+        self.canvas.update()
+
+    def _range_rings_toggled(self, enabled: bool) -> None:
+        self.canvas.range_rings = enabled
+        self.runtime.config.map_range_rings = enabled
+        self.runtime.config.save()
+        self.canvas.update()
+
+    def _status_colours_toggled(self, enabled: bool) -> None:
+        self.canvas.status_colours = enabled
+        self.runtime.config.map_status_colours = enabled
+        self.runtime.config.save()
+        self.canvas.update()
+
+    def _measure_toggled(self, enabled: bool) -> None:
+        if enabled and self.pick_button.isChecked():
+            self.pick_button.setChecked(False)
+        self.canvas.set_measurement_active(enabled)
+        self.canvas.setCursor(
+            Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor
+        )
+        if not enabled:
+            self.tool_status.hide()
+
+    def _measurement_changed(self, text: str) -> None:
+        self.tool_status.setText(text)
+        self.tool_status.show()
+
+    def _offline_area(self) -> None:
+        if self.canvas.source is None or self.canvas.cache is None:
+            self.tool_status.setText(tr("map.offline_needs_background"))
+            self.tool_status.show()
+            return
+        chooser = OfflineAreaDialog(self.canvas, self)
+        if chooser.exec() != QDialog.DialogCode.Accepted:
+            return
+        missing = self.canvas.missing_tiles(chooser.plan)
+        if not missing:
+            self.tool_status.setText(tr("map.offline_already_cached"))
+            self.tool_status.show()
+            return
+        progress = QProgressDialog(
+            tr("map.offline_progress"),
+            tr("common.cancel"),
+            0,
+            len(missing),
+            self,
+        )
+        progress.setWindowTitle(tr("map.offline_title"))
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.canceled.connect(self.canvas.cancel_prefetch)
+        self._prefetch_dialog = progress
+        progress.show()
+        self.offline_button.setEnabled(False)
+        self.canvas.start_prefetch(missing)
+
+    def _prefetch_progress(self, done: int, total: int) -> None:
+        if self._prefetch_dialog is not None:
+            self._prefetch_dialog.setMaximum(total)
+            self._prefetch_dialog.setValue(done)
+
+    def _prefetch_finished(self, cancelled: bool, errors: int) -> None:
+        if self._prefetch_dialog is not None:
+            self._prefetch_dialog.close()
+            self._prefetch_dialog.deleteLater()
+            self._prefetch_dialog = None
+        self.offline_button.setEnabled(self.canvas.source is not None)
+        if cancelled:
+            text = tr("map.offline_cancelled")
+        elif errors:
+            text = tr("map.offline_finished_errors", errors=errors)
+        else:
+            text = tr("map.offline_finished")
+        self.tool_status.setText(text)
+        self.tool_status.show()
+        self._describe_background()
+
+    def _export_png(self) -> None:
+        suggested = f"Guardian-map-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        chosen, _ = QFileDialog.getSaveFileName(
+            self,
+            tr("map.export_title"),
+            suggested,
+            tr("map.export_filter"),
+        )
+        if not chosen:
+            return
+        if not chosen.lower().endswith(".png"):
+            chosen += ".png"
+        if self.canvas.export_png(chosen):
+            self.tool_status.setText(tr("map.export_done", path=chosen))
+        else:
+            self.tool_status.setText(tr("map.export_failed", path=chosen))
+        self.tool_status.show()
 
     def _compose_to(self, callsign: str) -> None:
         """Clicking a heard marker starts a message addressed to that peer.
@@ -1179,6 +1842,7 @@ class MapWindow(QDialog):
         self.refresh()
 
     def closeEvent(self, event) -> None:
+        self.canvas.cancel_prefetch()
         if self._location_request is not None:
             self._location_request.cancel()
             self._location_request = None
@@ -1192,6 +1856,7 @@ class MapWindow(QDialog):
         self.runtime.config.map_background = enabled
         self.runtime.config.save()
         self.canvas.set_source(SOURCES[0] if enabled else None)
+        self.offline_button.setEnabled(enabled)
         self._describe_background()
 
     def _describe_background(self) -> None:

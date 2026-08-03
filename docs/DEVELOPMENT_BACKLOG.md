@@ -8,15 +8,11 @@ volbu další práce je rozhodující tento backlog.
 
 ## P0 — vydáno v 0.6.47, čeká na provozní ověření
 
-1. **Vícekanálový scanner — software vydán.** Operations/runtime integrace,
-   produkční UI, snapshoty, workerové CAT ladění, activity/S-meter hold,
-   FM/HF kompatibilita a blokace proti relaci/payloadu/alertu jsou otestované.
-   **Čeká na reálné rádio:** tune/mode, dwell, hold a návrat na domácí kanál.
-2. **`RX bad frame: bad magic` — diagnostické zachycení vydáno.** Odmítnutý
+1. **`RX bad frame: bad magic` — diagnostické zachycení vydáno.** Odmítnutý
    kandidát se nedoručí orchestrátoru a vedle WAV se uloží JSON s modemem, S/N,
    délkou, payloadem a důvodem. **Čeká na další on-air výskyt:** podle capture
    rozlišit zkrácený rámec, kolizi opakování/relay nebo timing hypotézu.
-3. **Alert frequency sweep — softwarově zajištěn.** Sweep navštěvuje pouze
+2. **Alert frequency sweep — softwarově zajištěn.** Sweep navštěvuje pouze
    kanály kompatibilní s aktivním AFSK/MFSK modemem a nekoliduje se scannerem.
    **Čeká na provozní ověření:** dvě kopie na HF, 45sekundový home wait a návrat
    frekvence/módu po chybě či přerušení.
@@ -42,8 +38,10 @@ kliknutí a consent dialogu Guardianu. Detekovaný fix se před uložením uká�
 spolu s hlášenou přesností a dočasným bodem v mapě; na disk se uloží pouze
 Maidenhead lokátor a přesné souřadnice se zahodí. Rádiové rámce, beacon i
 přepínač odesílání polohy zůstaly beze změny. Windows přístup zamítnutý na
-release stroji je ověřený; živý přesný fix čeká na provozní ověření na PC s
-povolenou polohou. Privacy pravidla a odložený koncept QR mostu jsou v
+release stroji je ověřený. **Provozně ověřeno 2026-08-03:** nainstalovaný
+release 0.6.53 získal povolený živý fix a celý tok detekce, náhledu a přijetí
+fungoval správně (potvrzeno operátorem). Privacy pravidla a odložený koncept
+QR mostu jsou v
 [`LOCATOR_DETECTION.md`](LOCATOR_DETECTION.md).
 
 ## P2 — rozšíření po rozhodnutí operátora
@@ -61,27 +59,27 @@ povolenou polohou. Privacy pravidla a odložený koncept QR mostu jsou v
    jsou hotové; doplnit centrální kontrolu typů, rozsahů a neplatných kombinací
    při načtení nebo importu konfigurace.
 
-## P2 — rozšíření mapy (navrženo 2026-08-02, zatím nerealizováno)
+## Vydáno v 0.6.54 — rozšíření mapy M1–M3 a M6–M7
 
-Situační panel, skutečné hop-chainy a označení výstrah vyšly v 0.6.52; tyto
-body z téhož návrhu čekají na rozhodnutí operátora:
+- **M1 — lokátorová mřížka:** uložená volba vypnuto / 4 / 6 znaků, výpočet jen
+  pro viditelnou oblast a pevný limit buněk proti zahlcení při oddálení.
+- **M2 — kružnice a měření:** geodetické kružnice 50/100/200 km kolem vlastního
+  lokátoru a dočasné dvoubodové měření vzdálenosti a počátečního azimutu;
+  pravé tlačítko nebo Esc měření smaže.
+- **M3 — stavové barvy:** přímý dosah, cesta přes relay, nyní nedosažitelná a
+  historická poloha mají pevné barvy a legendu. Výstražný puls a vybraná stanice
+  zůstávají nad stavovou barvou.
+- **M6 — offline oblast ČÚZK:** volba zoomů pro právě viditelnou oblast, náhled
+  počtu/uložených dlaždic a velikosti, limit 750 dlaždic na úlohu a 512 MB na
+  cache, omezená souběžnost, zrušení a zachování již dokončených dlaždic.
+- **M7 — PNG:** export právě vykresleného plátna se značkami, cestami,
+  překryvy, legendou, časem, verzí Guardianu a atribucí zdroje; export nic
+  dodatečně nestahuje.
 
-1. **Překryv lokátorových čtverců.** Mřížka JN99/JN89 s popiskami nad mapou,
-   přepínatelná 4/6 znaků; `locator_bounds` už existuje.
-2. **Kružnice vzdálenosti + měřicí nástroj.** Kroužky 50/100/200 km od vlastní
-   stanice a měření vzdálenosti/azimutu mezi dvěma body (`distance_bearing`
-   je hotové).
-3. **Barvy stanic podle stavu, ne jen stáří.** Přímo dosažitelná vs. přes
-   relay (RouteTable + learned_paths + reaches), případně podle kanálu;
-   doplnit legendu.
-4. **Šedá linie (terminátor den–noc).** Čistá astronomie bez dat i sítě,
-   užitečné pro plánování HF.
-5. **Stopa mobilní stanice.** U stanice si pamatovat posledních N různých
-   lokátorů s časem (deque v `HeardStation`) a kreslit slábnoucí trasu.
-6. **Předstažení dlaždic pro oblast.** „Stáhni viditelnou oblast" do
-   `TileCache` před odjezdem do terénu + ukazatel, co je v cache.
-7. **Export situačního snímku (PNG)** pro briefing; `grab()` se už používá
-   jinde.
+**M5 — stopa mobilní stanice je odložena a nyní se neimplementuje.** Před
+pozdějším návratem je nutné rozhodnout limit bodů, maximální stáří, filtr proti
+poskakování a zda má být historie pouze v paměti. Terminátor den/noc byl z
+plánu odstraněn rozhodnutím operátora.
 
 Zamítnuto (nezapadá do offline filozofie ARDOS): odhad pokrytí z výškového
 modelu terénu — vyžaduje stovky MB dat SRTM nebo síť.
@@ -96,6 +94,15 @@ modelu terénu — vyžaduje stovky MB dat SRTM nebo síť.
 3. **Vyhodnotit 12bitový station-hash prefix.** Kolize je vzácná a identita je
    fakticky `(source, msg_id)`; změnu řešit až při důkazu problému nebo při nové
    verzi wire protokolu.
+
+## Potvrzeně dokončeno 2026-08-03
+
+- **Vícekanálový scanner byl provozně ověřen na skutečném CAT rádiu:** ladění
+  frekvence a módu, dwell/hold i návrat na domácí kanál fungují správně
+  (potvrzeno operátorem).
+- Současný scanner je tímto uzavřený, ale není dlouhodobým směrem dalšího
+  vývoje. Později jej nahradí **sestavovač sítě**; význam, workflow a migrační
+  postup doplní operátor v samostatném zadání.
 
 ## Potvrzeně dokončeno 2026-08-01
 

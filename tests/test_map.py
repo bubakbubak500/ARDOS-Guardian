@@ -3,13 +3,21 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QPointF
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QEventLoop, QPointF, QTimer
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication
 
-from guardian.qt.map_tiles import CUZK_ZTM, TILE_PIXELS, TileCache, tile_for
+from guardian.qt.map_tiles import (
+    CUZK_ZTM,
+    TILE_PIXELS,
+    TileCache,
+    TileSource,
+    tile_for,
+    tiles_for_bounds,
+)
+from guardian.qt.map_tools import destination_point, locator_cells
 from guardian.qt.map_window import MAX_TILES_PER_DRAW, MapCanvas
-from guardian.routing import from_locator
+from guardian.routing import distance_bearing, from_locator
 
 
 def _application() -> QApplication:
@@ -148,7 +156,9 @@ def test_tiles_survive_on_disk_so_the_same_ground_works_offline(tmp_path) -> Non
     cache = TileCache(CUZK_ZTM, directory=tmp_path)
     try:
         assert cache.get(8, 138, 86) is None
+        assert not cache.contains(8, 138, 86)
         cache.put(8, 138, 86, b"\xff\xd8\xff\xe0 pretend jpeg")
+        assert cache.contains(8, 138, 86)
         assert cache.get(8, 138, 86) == b"\xff\xd8\xff\xe0 pretend jpeg"
         assert cache.count() == 1
         cache.put(8, 138, 86, b"newer")            # replaced, not duplicated
@@ -165,6 +175,13 @@ def test_tiles_survive_on_disk_so_the_same_ground_works_offline(tmp_path) -> Non
         assert again.megabytes() >= 0.0
     finally:
         again.close()
+
+    limited = TileCache(CUZK_ZTM, directory=tmp_path / "limited", max_megabytes=0)
+    try:
+        assert not limited.put(8, 138, 86, b"tile beyond the cap")
+        assert not limited.contains(8, 138, 86)
+    finally:
+        limited.close()
 
 
 def test_tile_numbering_matches_the_slippy_map_convention() -> None:
@@ -216,3 +233,88 @@ def test_station_markers_have_a_thick_contrast_ring_and_are_clickable() -> None:
     peer = canvas.to_screen(*from_locator("JO70FB29MC"))
     assert canvas.station_at(peer) == "OK2IPW"
     assert canvas.station_at(peer + QPointF(40, 40)) == ""
+
+
+def test_locator_overlay_cells_are_real_maidenhead_bounds_and_bounded() -> None:
+    cells = locator_cells(49.9, 14.0, 50.2, 15.0, 4)
+    locators = {locator for locator, _bounds in cells}
+    assert "JO70" in locators
+    jo70 = dict(cells)["JO70"]
+    assert jo70[0] <= 50.0 <= jo70[2]
+    assert jo70[1] <= 14.5 <= jo70[3]
+
+    fine = locator_cells(50.0, 14.3, 50.1, 14.5, 6)
+    assert fine and all(len(locator) == 6 for locator, _bounds in fine)
+    assert locator_cells(-80, -170, 80, 170, 6, max_cells=100) == []
+
+
+def test_range_ring_destination_is_geodesically_honest() -> None:
+    end = destination_point(50.0755, 14.4378, 100, 90)
+    kilometres, bearing = distance_bearing(50.0755, 14.4378, *end)
+    assert kilometres == pytest.approx(100, abs=0.02)
+    assert bearing == pytest.approx(90, abs=0.1)
+
+
+def test_offline_plan_is_visible_bounded_and_clipped_to_cuzk() -> None:
+    keys = tiles_for_bounds(
+        49.9, 14.2, 50.2, 14.8, 9, 11, source=CUZK_ZTM
+    )
+    assert keys
+    assert {zoom for zoom, _x, _y in keys} == {9, 10, 11}
+    assert len(keys) == len(set(keys))
+    assert tiles_for_bounds(40, -10, 41, -9, 8, 10, source=CUZK_ZTM) == []
+    with pytest.raises(ValueError, match="exceeds"):
+        tiles_for_bounds(-80, -170, 80, 170, 0, 10, limit=10)
+
+
+def test_offline_prefetch_runs_through_qt_and_populates_the_cache(tmp_path) -> None:
+    _application()
+    tile_path = tmp_path / "8-138-86.png"
+    tile = QPixmap(32, 32)
+    tile.fill(QColor("#2468a0"))
+    assert tile.save(str(tile_path), "PNG")
+    source = TileSource(
+        key=f"test-{tmp_path.name}",
+        label="Test tiles",
+        url=(tmp_path.as_uri() + "/{z}-{x}-{y}.png"),
+        attribution="test",
+        max_zoom=8,
+    )
+    canvas = _canvas()
+    canvas.set_source(source)
+    finished: list[tuple[bool, int]] = []
+    loop = QEventLoop()
+    canvas.prefetch_finished.connect(
+        lambda cancelled, errors: (finished.append((cancelled, errors)), loop.quit())
+    )
+    QTimer.singleShot(5_000, loop.quit)
+
+    canvas.start_prefetch([(8, 138, 86)])
+    loop.exec()
+
+    assert finished == [(False, 0)]
+    assert canvas.cache is not None
+    assert canvas.cache.contains(8, 138, 86)
+    canvas.set_source(None)
+
+
+def test_map_snapshot_exports_the_rendered_overlays(tmp_path) -> None:
+    application = _application()
+    canvas = _canvas(640, 420)
+    canvas.set_source(None)
+    canvas.own_grid = "JO70FB28MC"
+    canvas.stations = [("OK2IPW", "JN89HE", 0.0)]
+    canvas.station_states = {"OK2IPW": "relay"}
+    canvas.locator_grid_chars = 4
+    canvas.range_rings = True
+    canvas.measure_start = from_locator("JO70FB28MC")
+    canvas.measure_end = from_locator("JN89HE")
+    canvas.show()
+    application.processEvents()
+    path = tmp_path / "situation.png"
+
+    assert canvas.export_png(str(path))
+    image = QPixmap(str(path))
+    assert not image.isNull()
+    assert image.size() == canvas.size()
+    canvas.close()

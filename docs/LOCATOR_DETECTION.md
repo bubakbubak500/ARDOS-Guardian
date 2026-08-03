@@ -133,6 +133,10 @@ porovnat lokátor s ručně ověřeným místem, nikoli ukládat souřadnice už
 
 ## Kritéria přijetí pro 0.6.53
 
+**Splněno a provozně potvrzeno 2026-08-03:** nainstalovaný release 0.6.53
+úspěšně získal povolený živý Windows fix a operátor potvrdil správné chování
+detekce, náhledu i vědomého přijetí lokátoru.
+
 - Operátor vždy rozumí, zda polohu teprve prohlíží, nebo ji už uložil.
 - Bez vědomého kliknutí se poloha nevyžaduje.
 - Po zamítnutí nebo chybě zůstávají ruční zadání a mapa okamžitě dostupné.

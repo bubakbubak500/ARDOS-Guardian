@@ -699,6 +699,91 @@ def test_map_panel_lists_heard_stations_with_the_numbers(tmp_path) -> None:
         runtime.close()
 
 
+def test_map_colours_direct_relay_and_historical_station_evidence() -> None:
+    _application()
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.config.map_background = False
+    runtime.heard.max_age = 30
+    now = time.monotonic()
+    runtime.heard.record("OK1RELAY", now, grid="JO80AB", reaches="OK2DEST")
+    runtime.heard.record("OK2DEST", now - 120, grid="JN89HE")
+    runtime.heard.record("OK2UNKNOWN", now - 45, grid="JN87AA")
+    runtime.heard.record("OK3OLD", now - 120, grid="JN88EE")
+    window = MapWindow(runtime)
+    try:
+        states = window.station_states()
+        assert states == {
+            "OK1RELAY": "direct",
+            "OK2DEST": "relay",
+            "OK2UNKNOWN": "unknown",
+            "OK3OLD": "stale",
+        }
+        assert {call for call, _grid, _age in window.canvas.stations} == set(states)
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_map_overlay_choices_are_persisted_and_measurement_is_ephemeral() -> None:
+    _application()
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.config.map_background = False
+    runtime.config.map_locator_grid = 0
+    runtime.config.map_range_rings = False
+    runtime.config.map_status_colours = True
+    window = MapWindow(runtime)
+    try:
+        window.grid_combo.setCurrentIndex(window.grid_combo.findData(6))
+        window.rings.setChecked(True)
+        window.status_colours.setChecked(False)
+        assert runtime.config.map_locator_grid == 6
+        assert runtime.config.map_range_rings is True
+        assert runtime.config.map_status_colours is False
+        assert window.canvas.locator_grid_chars == 6
+        assert window.canvas.range_rings is True
+        assert window.canvas.status_colours is False
+
+        window.measure_button.setChecked(True)
+        assert window.canvas.measuring
+        assert window.tool_status.isVisibleTo(window)
+        window.canvas.measure_start = (50.0, 14.0)
+        window.canvas.measure_end = (49.0, 15.0)
+        window.measure_button.setChecked(False)
+        assert window.canvas.measure_start is None
+        assert window.canvas.measure_end is None
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_offline_area_dialog_plans_only_the_visible_cuzk_area() -> None:
+    _application()
+    from guardian.qt.map_window import OfflineAreaDialog, MapWindow
+
+    runtime = ShellRuntime()
+    runtime.config.map_background = True
+    runtime.config.station_grid = "JO70FB28MC"
+    window = MapWindow(runtime)
+    try:
+        window.canvas.resize(760, 480)
+        window.canvas.look_at(50.0755, 14.4378, 2.0)
+        chooser = OfflineAreaDialog(window.canvas, window)
+        try:
+            assert chooser.plan
+            assert len(chooser.plan) <= 750
+            assert "MB" in chooser.summary.text()
+            assert window.canvas.missing_tiles(chooser.plan) == chooser.plan
+        finally:
+            chooser.close()
+    finally:
+        window.close()
+        runtime.close()
+
+
 def test_map_draws_the_relay_path_mail_actually_took(tmp_path) -> None:
     _application()
     from guardian.qt.map_window import MapWindow

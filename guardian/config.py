@@ -176,6 +176,11 @@ class StationConfig:
     # is on screen and kept in %APPDATA%\Guardian\maps, so ground the operator
     # has already looked at stays available with no network.
     map_background: bool = True
+    # Optional operational overlays in the station map. Locator precision is
+    # 0 (off), 4 (field/square) or 6 (subsquare).
+    map_locator_grid: int = 0
+    map_range_rings: bool = False
+    map_status_colours: bool = True
     scan_dwell: float = 3.0    # seconds per channel when scanning
     # Optional raw Hamlib STRENGTH value. None means that only a decoded
     # control frame holds the scanner on a channel.
