@@ -4,7 +4,7 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -823,6 +823,131 @@ def test_a_typed_locator_is_accepted_and_nonsense_is_refused() -> None:
         assert runtime.config.station_grid == "JN89HE12AB", "kept the good one"
         assert "ZZ99XX" in window.status.text()
         assert window.locator_edit.text() == "JN89HE12AB"
+    finally:
+        window.close()
+        runtime.close()
+
+
+class _FakeLocationRequest(QObject):
+    fix_ready = Signal(object)
+    failed = Signal(object, str)
+    state_changed = Signal(str)
+
+    def __init__(self, parent, outcome) -> None:
+        super().__init__(parent)
+        self.outcome = outcome
+        self.cancelled = False
+
+    def start(self) -> None:
+        from guardian.location import LocationFailure
+
+        self.state_changed.emit("locating")
+        if isinstance(self.outcome, LocationFailure):
+            self.failed.emit(self.outcome, "test")
+        else:
+            self.fix_ready.emit(self.outcome)
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+def test_detected_pc_position_is_previewed_then_explicitly_saved() -> None:
+    _application()
+    from guardian.location import LocationFix, LocationSource
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.config.map_background = False
+    runtime.config.station_grid = "JN89HE"
+    runtime.config.beacon_position = False
+    fix = LocationFix(50.0755, 14.4378, 42, LocationSource.WIFI)
+    window = MapWindow(
+        runtime,
+        location_request_factory=lambda parent: _FakeLocationRequest(parent, fix),
+        location_consent=lambda: True,
+    )
+    try:
+        window._detect_location()
+        assert runtime.config.station_grid == "JN89HE", "preview must not persist"
+        assert window._detected_grid.startswith("JO70FB")
+        assert window.canvas.preview_grid == window._detected_grid
+        assert window.detected_panel.isVisibleTo(window)
+        assert "42 m" in window.detected_text.text()
+        assert "Wi-Fi" in window.detected_text.text()
+
+        window._use_detected()
+        assert runtime.config.station_grid.startswith("JO70FB")
+        assert window.canvas.preview_grid == ""
+        assert not window.detected_panel.isVisibleTo(window)
+        assert runtime.config.beacon_position is False, "detection must not enable TX"
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_approximate_detection_can_be_discarded_and_denial_keeps_manual_ui() -> None:
+    _application()
+    from guardian.location import LocationFailure, LocationFix, LocationSource
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.config.map_background = False
+    runtime.config.station_grid = "JN89HE"
+    approximate = LocationFix(50.0755, 14.4378, 2_400, LocationSource.IP)
+    window = MapWindow(
+        runtime,
+        location_request_factory=lambda parent: _FakeLocationRequest(
+            parent, approximate
+        ),
+        location_consent=lambda: True,
+    )
+    try:
+        window._detect_location()
+        assert "orientační" in window.detected_text.text() or "approximate" in (
+            window.detected_text.text().lower()
+        )
+        window._discard_detected()
+        assert runtime.config.station_grid == "JN89HE"
+        assert window.locator_edit.isEnabled()
+        assert window.pick_button.isEnabled()
+
+        window._location_request_factory = lambda parent: _FakeLocationRequest(
+            parent, LocationFailure.DENIED
+        )
+        window._detect_location()
+        assert window.location_settings.isVisibleTo(window)
+        assert window.locator_edit.isEnabled()
+        assert window.pick_button.isEnabled()
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_declined_location_consent_never_starts_the_provider() -> None:
+    _application()
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.config.map_background = False
+    runtime.config.station_grid = ""
+    starts: list[bool] = []
+
+    def forbidden_factory(_parent):
+        starts.append(True)
+        raise AssertionError("provider must not be created before consent")
+
+    window = MapWindow(
+        runtime,
+        location_request_factory=forbidden_factory,
+        location_consent=lambda: False,
+    )
+    try:
+        window._detect_location()
+        assert starts == []
+        assert runtime.config.station_grid == ""
+        assert "zrušeno" in window.location_status.text() or "cancelled" in (
+            window.location_status.text().lower()
+        )
     finally:
         window.close()
         runtime.close()

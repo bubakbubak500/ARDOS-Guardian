@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs, collect_submodules
 
 
 root = Path(SPECPATH).resolve()
@@ -16,6 +16,11 @@ for package in ("sounddevice",):
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hiddenimports
+
+# Imported lazily so non-Windows source installs retain a clean fallback.  A
+# frozen Windows build still needs the projection module and its native DLLs.
+hiddenimports += collect_submodules("winrt")
+binaries += collect_dynamic_libs("winrt")
 
 analysis = Analysis(
     [str(root / "guardian_launch.py")],

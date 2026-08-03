@@ -4,6 +4,8 @@ pillow>=10.0.0
 PySide6-Essentials>=6.7,<7
 numpy>=1.26
 sounddevice>=0.4.6
+winrt-Windows.Devices.Geolocation>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Foundation>=3.2,<4; sys_platform == "win32"
 
 # Packaging (dev only)
 pyinstaller>=6.20.0

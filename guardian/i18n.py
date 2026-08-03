@@ -420,14 +420,105 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "map.intro": (
         "Stations appear here once they beacon a position. Drag to pan, wheel "
         "to zoom, or click a station to write it a message. Set your own "
-        "position by picking it on the map or by typing the locator.",
+        "position from this PC, by picking it on the map, or by typing the "
+        "locator.",
         "Stanice se zde objeví, jakmile odvysílají polohu v majáku. Tažením "
         "posunete, kolečkem přiblížíte a klepnutím na stanici jí napíšete "
-        "zprávu. Vlastní polohu zadáte klepnutím do mapy nebo napsáním "
-        "lokátoru.",
+        "zprávu. Vlastní polohu zjistíte z tohoto PC, vyberete v mapě nebo "
+        "zadáte lokátor ručně.",
     ),
-    "map.pick": ("Pick my position", "Určit mou polohu"),
+    "map.position_group": ("My position", "Moje poloha"),
+    "map.detect": ("Detect from this PC", "Zjistit z tohoto PC"),
+    "map.detect_hint": (
+        "Ask Windows for one location fix. Guardian saves nothing until you "
+        "review and accept the resulting locator.",
+        "Jednorázově požádá Windows o polohu. Guardian nic neuloží, dokud "
+        "výsledný lokátor nezkontrolujete a nepotvrdíte.",
+    ),
+    "map.location_consent_title": (
+        "Allow one-time location detection?",
+        "Povolit jednorázové zjištění polohy?",
+    ),
+    "map.location_consent_body": (
+        "Guardian will ask Windows for this PC's position once and convert it "
+        "locally to a Maidenhead locator. Exact coordinates are not stored or "
+        "sent anywhere. Nothing is saved until you review and accept the "
+        "locator. Continue?",
+        "Guardian jednorázově požádá Windows o polohu tohoto PC a místně ji "
+        "převede na Maidenhead lokátor. Přesné souřadnice se neuloží ani nikam "
+        "neodešlou. Dokud lokátor nezkontrolujete a nepotvrdíte, nic se "
+        "neuloží. Pokračovat?",
+    ),
+    "map.detect_cancel": ("Cancel detection", "Zrušit zjišťování"),
+    "map.detect_use": ("Use locator", "Použít lokátor"),
+    "map.detect_discard": ("Discard", "Zahodit"),
+    "map.detected_marker": ("Detected preview", "Náhled detekce"),
+    "map.pick": ("Pick on map", "Vybrat v mapě"),
     "map.locator": ("Locator", "Lokátor"),
+    "map.location_locating": (
+        "Windows is determining this PC's position…",
+        "Windows zjišťuje polohu tohoto PC…",
+    ),
+    "map.location_review": (
+        "Review the detected locator. It is not saved yet.",
+        "Zkontrolujte nalezený lokátor. Zatím není uložený.",
+    ),
+    "map.location_result": (
+        "Detected locator: {locator} · reported accuracy: {accuracy} · "
+        "source: {source}.",
+        "Nalezený lokátor: {locator} · hlášená přesnost: {accuracy} · "
+        "zdroj: {source}.",
+    ),
+    "map.location_approximate": (
+        "This result is only approximate; verify it on the map or enter the "
+        "locator manually.",
+        "Výsledek je pouze orientační; ověřte jej v mapě nebo zadejte lokátor "
+        "ručně.",
+    ),
+    "map.location_settings": (
+        "Open Windows location settings",
+        "Otevřít nastavení polohy Windows",
+    ),
+    "map.location_failure_denied": (
+        "Location access was denied. You can keep using the map or manual entry.",
+        "Přístup k poloze byl zamítnut. Dále můžete použít mapu nebo ruční zadání.",
+    ),
+    "map.location_failure_disabled": (
+        "Windows location services are disabled. You can keep using the map "
+        "or manual entry.",
+        "Služby určování polohy Windows jsou vypnuté. Dále můžete použít mapu "
+        "nebo ruční zadání.",
+    ),
+    "map.location_failure_no_data": (
+        "Windows could not determine a position. Try the map or manual entry.",
+        "Windows nedokázal určit polohu. Použijte mapu nebo ruční zadání.",
+    ),
+    "map.location_failure_unavailable": (
+        "PC location is not available in this installation or on this device.",
+        "Poloha PC není v této instalaci nebo na tomto zařízení dostupná.",
+    ),
+    "map.location_failure_timeout": (
+        "Location detection timed out. Try again, use the map, or enter a locator.",
+        "Zjišťování polohy vypršelo. Zkuste je znovu, mapu nebo ruční zadání.",
+    ),
+    "map.location_failure_cancelled": (
+        "Location detection was cancelled.",
+        "Zjišťování polohy bylo zrušeno.",
+    ),
+    "map.location_failure_error": (
+        "Windows location failed. The map and manual entry are still available.",
+        "Zjištění polohy Windows selhalo. Mapa a ruční zadání zůstávají dostupné.",
+    ),
+    "map.location_source_cellular": ("mobile network", "mobilní síť"),
+    "map.location_source_satellite": ("satellite", "satelit"),
+    "map.location_source_wifi": ("Wi-Fi", "Wi-Fi"),
+    "map.location_source_ip": ("IP address", "IP adresa"),
+    "map.location_source_default": (
+        "Windows default location",
+        "výchozí poloha Windows",
+    ),
+    "map.location_source_obfuscated": ("coarse location", "přibližná poloha"),
+    "map.location_source_unknown": ("unspecified", "neurčeno"),
     "map.centre": ("Show all", "Zobrazit vše"),
     "map.background": ("Map background", "Mapový podklad"),
     "map.background_hint": (

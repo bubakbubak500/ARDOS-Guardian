@@ -63,8 +63,12 @@ manifest, and asks again before launching it.
   confirmations resume. A mismatch or an older peer never triggers QSY.
 - **Operational station map**: cached ČÚZK topographic tiles, high-contrast
   own/heard markers, mail-activity links labelled with distance and azimuth,
-  and one-click message composition addressed to a heard station. The map is
-  an independent window and does not stay above the main application.
+  and one-click message composition addressed to a heard station. Own position
+  can be detected once through Windows Location Service after explicit consent,
+  picked on the map, or entered as a Maidenhead locator. Detection previews the
+  reported source and accuracy before saving and never stores exact
+  coordinates. The map is an independent window and does not stay above the
+  main application.
 - **Consent-driven VARA setup**: Station readiness can download the exact
   reviewed VARA FM/HF archive from the official Winlink distribution server,
   enforce the version, size and SHA-256 pinned in this Guardian release, then

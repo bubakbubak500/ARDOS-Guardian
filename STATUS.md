@@ -1,6 +1,6 @@
 # Guardian (ARDOS) — Project Status & Plan
 
-_Last updated: 2026-08-01_
+_Last updated: 2026-08-03_
 
 A resumable snapshot: what Guardian is, what's built, what's verified, the key
 decisions and why, and what comes next. Read this first when picking the project
@@ -805,6 +805,34 @@ Two defects, both in what 0.6.49 added.
   mobile trail, tile prefetch, PNG export) are in the backlog.
 - **Software verification:** 341 tests pass. Not yet field-proven: the toast
   and chime on a real desktop session.
+
+## Consent-first own-position detection (0.6.53)
+
+- **All position management stays in the map.** The new **My position** block
+  groups one-shot PC detection, the existing map picker, manual Maidenhead
+  entry and the independent beacon-transmission switch.
+- **Two deliberate approvals.** The operator clicks Detect, confirms a Guardian
+  privacy dialog, then reviews the locator, Windows-reported source and
+  accuracy on an amber map preview. Only **Use locator** writes `station_grid`.
+- **Coordinates are ephemeral.** The Windows fix is converted locally to the
+  existing ten-character locator and discarded after use/cancel. Exact
+  latitude/longitude never reaches config, events, diagnostics or a Guardian
+  web service. Results worse than 1 km are explicitly labelled approximate.
+- **Classic desktop reality.** WinRT `RequestAccessAsync` requires a
+  UWP/WinUI CoreWindow and returns `E_HANDLE` from the unpackaged PySide window,
+  so Guardian owns the explicit consent dialog and calls the one-shot
+  Geolocator directly. Windows still enforces the global desktop-app location
+  privacy setting; denied/disabled/no-data/timeout states fall back to map or
+  manual entry and can open that setting.
+- **Protocol untouched.** Detection neither enables beacons nor changes the
+  send-position switch. Accepted positions use the same `station_grid`,
+  conversion and beacon bytes as 0.6.52.
+- Windows-only PyWinRT Geolocation/Foundation projections are lazy in source
+  and explicit in PyInstaller. The QR phone bridge remains a documented future
+  companion concept, not a dependency or partial protocol.
+- **Software verification:** 348 tests pass. A live unpackaged run reached the
+  Windows service and correctly classified the release machine's disabled
+  desktop permission as denied; an allowed live fix remains a field check.
 
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,

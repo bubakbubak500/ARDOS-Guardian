@@ -390,8 +390,57 @@ def help_topics() -> list[HelpTopic]:
             "route heard sessions ttl relay qsy trasa slyšené relace",
         ),
         _topic(
-            "8. Dependencies and first-run readiness",
-            "8. Závislosti a připravenost",
+            "8. Station map and own position",
+            "8. Mapa stanic a vlastní poloha",
+            """
+            <h2>Station map and own position</h2>
+            <p>The station map remains useful offline: heard locators, relay
+            paths, alert origins and the graticule do not depend on raster
+            tiles. Click a heard row to centre it or double-click to compose.</p>
+            <p><b>My position</b> offers three equal methods. <b>Detect from
+            this PC</b> asks for explicit consent, requests one Windows fix,
+            and previews its Maidenhead locator, reported source and accuracy.
+            Exact coordinates are held only for that preview and are never
+            saved. Press <b>Use locator</b> to accept or <b>Discard</b> to keep
+            the previous value. A result worse than 1 km is marked approximate.
+            Windows location permission can be changed through the link shown
+            after a denial.</p>
+            <p><b>Pick on map</b> arms a crosshair for exactly one click.
+            <b>Locator</b> accepts a known 2, 4, 6, 8 or 10 character Maidenhead
+            square. Both methods work without Windows location or internet.</p>
+            <p><b>Send in beacons</b> is independent. Detecting, picking or
+            typing a locator does not enable beacons and does not transmit.
+            When both beacons and this switch are enabled, only the accepted
+            Maidenhead locator uses the existing presence-beacon field.</p>
+            """,
+            """
+            <h2>Mapa stanic a vlastní poloha</h2>
+            <p>Mapa zůstává užitečná i offline: lokátory slyšených stanic,
+            relay trasy, místa výstrah a souřadnicová síť nezávisí na
+            rastrových dlaždicích. Klepnutím na řádek stanici vystředíte,
+            dvojím klepnutím jí napíšete.</p>
+            <p><b>Moje poloha</b> nabízí tři rovnocenné možnosti. <b>Zjistit z
+            tohoto PC</b> vyžádá výslovný souhlas, jednorázově požádá Windows a
+            ukáže náhled Maidenhead lokátoru, hlášený zdroj a přesnost. Přesné
+            souřadnice existují jen po dobu náhledu a nikdy se neukládají.
+            Volbou <b>Použít lokátor</b> výsledek přijmete, volbou
+            <b>Zahodit</b> zachováte předchozí hodnotu. Výsledek horší než 1 km
+            je označen jako orientační. Po zamítnutí lze odkazem otevřít
+            nastavení polohy Windows.</p>
+            <p><b>Vybrat v mapě</b> zapne křížový kurzor právě pro jedno
+            klepnutí. Pole <b>Lokátor</b> přijímá známý Maidenhead čtverec o 2,
+            4, 6, 8 nebo 10 znacích. Obě cesty fungují bez polohy Windows i bez
+            internetu.</p>
+            <p><b>Posílat v majáku</b> je nezávislé. Detekce, výběr ani ruční
+            zadání nezapnou majáky a nic nevysílají. Teprve při zapnutých
+            majácích i tomto přepínači použije přijatý Maidenhead lokátor
+            stávající pole majáku přítomnosti.</p>
+            """,
+            "map position locator detect windows accuracy mapa poloha lokátor přesnost",
+        ),
+        _topic(
+            "9. Dependencies and first-run readiness",
+            "9. Závislosti a připravenost",
             """
             <h2>Dependencies and readiness</h2>
             <p>Guardian includes Python and Python libraries in the installer.
@@ -426,8 +475,8 @@ def help_topics() -> list[HelpTopic]:
             "dependencies readiness hamlib vara python závislosti připravenost",
         ),
         _topic(
-            "9. Updates, diagnostics and privacy",
-            "9. Aktualizace, diagnostika a soukromí",
+            "10. Updates, diagnostics and privacy",
+            "10. Aktualizace, diagnostika a soukromí",
             """
             <h2>Updates and diagnostics</h2>
             <p>The update check reads a small HTTPS manifest from the trusted
@@ -454,8 +503,8 @@ def help_topics() -> list[HelpTopic]:
             "update sha diagnostics privacy aktualizace diagnostika soukromí",
         ),
         _topic(
-            "10. Troubleshooting",
-            "10. Řešení potíží",
+            "11. Troubleshooting",
+            "11. Řešení potíží",
             """
             <h2>Troubleshooting</h2>
             <h3>Radio does not connect</h3>

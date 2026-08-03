@@ -17,17 +17,28 @@ import math
 import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QFontMetricsF,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QTableWidget,
@@ -38,9 +49,11 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..i18n import dual, tr
+from ..location import LocationFailure, LocationFix
 from ..message import Folder, Status
 from .alerts import alert_headline
 from .mail_workspace import ComposeDialog
+from .location import WindowsLocationRequest
 from .map_tiles import SOURCES, TILE_PIXELS, TileCache, TileSource, tile_for
 from ..routing import (
     MAX_LOCATOR_CHARS,
@@ -80,6 +93,7 @@ class MapCanvas(QWidget):
         self.degrees_across = DEFAULT_DEGREES_ACROSS
         self.picking = False
         self.own_grid = ""
+        self.preview_grid = ""
         self.stations: list[tuple[str, str, float]] = []   # call, grid, age
         self.links: list[tuple[str, str, str]] = []  # call, grid, mail activity
         # Relay paths mail actually travelled: each chain is the mapped grids
@@ -366,6 +380,15 @@ class MapCanvas(QWidget):
             self._draw_station(painter, callsign, grid, age, own=False)
         if self.own_grid:
             self._draw_station(painter, tr("map.you"), self.own_grid, 0.0, own=True)
+        if self.preview_grid and self.preview_grid != self.own_grid:
+            self._draw_station(
+                painter,
+                tr("map.detected_marker"),
+                self.preview_grid,
+                0.0,
+                own=False,
+                preview=True,
+            )
         for grid in self.alert_grids:
             self._draw_alert_ring(painter, grid)
         painter.end()
@@ -399,13 +422,24 @@ class MapCanvas(QWidget):
             line += step
 
     def _draw_station(
-        self, painter: QPainter, label: str, grid: str, age: float, *, own: bool
+        self,
+        painter: QPainter,
+        label: str,
+        grid: str,
+        age: float,
+        *,
+        own: bool,
+        preview: bool = False,
     ) -> None:
         try:
             south, west, north, east = locator_bounds(grid)
         except ValueError:
             return
-        colour = QColor("#1683ff") if own else QColor("#14a83b")
+        colour = (
+            QColor("#ffb000")
+            if preview
+            else QColor("#1683ff") if own else QColor("#14a83b")
+        )
         if age > 600:
             colour = QColor("#66717c")      # heard a while ago, faded back
         top_left = self.to_screen(north, west)
@@ -568,9 +602,23 @@ class MapCanvas(QWidget):
 class MapWindow(QDialog):
     """The map, the operator's own position, and what it will transmit."""
 
-    def __init__(self, runtime, parent=None) -> None:
+    def __init__(
+        self,
+        runtime,
+        parent=None,
+        *,
+        location_request_factory=None,
+        location_consent=None,
+    ) -> None:
         super().__init__(parent)
         self.runtime = runtime
+        self._location_request_factory = (
+            location_request_factory or WindowsLocationRequest
+        )
+        self._location_consent = location_consent or self._ask_location_consent
+        self._location_request = None
+        self._detected_fix: LocationFix | None = None
+        self._detected_grid = ""
         self.setWindowTitle(tr("map.title"))
         self.setMinimumSize(760, 560)
 
@@ -637,33 +685,81 @@ class MapWindow(QDialog):
         self._pulse.timeout.connect(self._pulse_tick)
         self._pulse.start()
 
+        position_group = QGroupBox(tr("map.position_group"))
+        position_layout = QVBoxLayout(position_group)
         controls = QHBoxLayout()
+        self.detect_button = QPushButton(tr("map.detect"))
+        self.detect_button.setToolTip(tr("map.detect_hint"))
+        self.detect_button.clicked.connect(self._detect_location)
+        controls.addWidget(self.detect_button)
+        self.detect_cancel = QPushButton(tr("map.detect_cancel"))
+        self.detect_cancel.clicked.connect(self._cancel_location)
+        self.detect_cancel.hide()
+        controls.addWidget(self.detect_cancel)
         self.pick_button = QPushButton(tr("map.pick"))
         self.pick_button.setCheckable(True)
         self.pick_button.toggled.connect(self._pick_toggled)
         controls.addWidget(self.pick_button)
-        controls.addWidget(QLabel(tr("map.locator")))
+        controls.addStretch(1)
+        position_layout.addLayout(controls)
+
+        locator_controls = QHBoxLayout()
+        locator_controls.addWidget(QLabel(tr("map.locator")))
         self.locator_edit = QLineEdit(self.runtime.config.station_grid)
         self.locator_edit.setMaxLength(MAX_LOCATOR_CHARS)
         self.locator_edit.setPlaceholderText("JN89HE12AB")
         self.locator_edit.setFixedWidth(140)
         self.locator_edit.editingFinished.connect(self._typed)
-        controls.addWidget(self.locator_edit)
+        locator_controls.addWidget(self.locator_edit)
         self.transmit = QCheckBox(tr("map.transmit"))
         self.transmit.setChecked(self.runtime.config.beacon_position)
         self.transmit.setToolTip(tr("map.transmit_hint"))
         self.transmit.toggled.connect(self._transmit_toggled)
-        controls.addWidget(self.transmit)
-        controls.addStretch(1)
+        locator_controls.addWidget(self.transmit)
+        locator_controls.addStretch(1)
+        position_layout.addLayout(locator_controls)
+
+        self.location_status = QLabel()
+        self.location_status.setObjectName("Metadata")
+        self.location_status.setWordWrap(True)
+        self.location_status.hide()
+        position_layout.addWidget(self.location_status)
+
+        self.detected_panel = QFrame()
+        self.detected_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        detected_layout = QHBoxLayout(self.detected_panel)
+        self.detected_text = QLabel()
+        self.detected_text.setWordWrap(True)
+        detected_layout.addWidget(self.detected_text, 1)
+        self.use_detected = QPushButton(tr("map.detect_use"))
+        self.use_detected.setObjectName("primaryAction")
+        self.use_detected.clicked.connect(self._use_detected)
+        detected_layout.addWidget(self.use_detected)
+        discard = QPushButton(tr("map.detect_discard"))
+        discard.clicked.connect(self._discard_detected)
+        detected_layout.addWidget(discard)
+        self.detected_panel.hide()
+        position_layout.addWidget(self.detected_panel)
+
+        self.location_settings = QPushButton(tr("map.location_settings"))
+        self.location_settings.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("ms-settings:privacy-location"))
+        )
+        self.location_settings.hide()
+        position_layout.addWidget(self.location_settings, 0, Qt.AlignmentFlag.AlignLeft)
+        outer.addWidget(position_group)
+
+        map_controls = QHBoxLayout()
+        map_controls.addStretch(1)
         self.background = QCheckBox(tr("map.background"))
         self.background.setChecked(self.runtime.config.map_background)
         self.background.setToolTip(tr("map.background_hint"))
         self.background.toggled.connect(self._background_toggled)
-        controls.addWidget(self.background)
+        map_controls.addWidget(self.background)
         home = QPushButton(tr("map.centre"))
         home.clicked.connect(self._centre)
-        controls.addWidget(home)
-        outer.addLayout(controls)
+        map_controls.addWidget(home)
+        outer.addLayout(map_controls)
 
         self.status = QLabel()
         self.status.setObjectName("Metadata")
@@ -918,6 +1014,109 @@ class MapWindow(QDialog):
         self.status.setText("   ·   ".join(parts))
 
     # --- interaction ------------------------------------------------------ #
+    def _detect_location(self) -> None:
+        if not self._location_consent():
+            self.location_status.setText(tr("map.location_failure_cancelled"))
+            self.location_status.show()
+            return
+        self._discard_detected()
+        self.location_settings.hide()
+        request = self._location_request_factory(self)
+        self._location_request = request
+        request.state_changed.connect(self._location_state_changed)
+        request.fix_ready.connect(self._location_ready)
+        request.failed.connect(self._location_failed)
+        self.detect_button.setEnabled(False)
+        self.detect_cancel.show()
+        request.start()
+
+    def _ask_location_consent(self) -> bool:
+        answer = QMessageBox.question(
+            self,
+            tr("map.location_consent_title"),
+            tr("map.location_consent_body"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _cancel_location(self) -> None:
+        if self._location_request is not None:
+            self._location_request.cancel()
+
+    def _location_state_changed(self, state: str) -> None:
+        key = {"locating": "map.location_locating"}.get(
+            state, "map.location_locating"
+        )
+        self.location_status.setText(tr(key))
+        self.location_status.show()
+
+    def _location_ready(self, fix: LocationFix) -> None:
+        self._location_request = None
+        self.detect_button.setEnabled(True)
+        self.detect_cancel.hide()
+        self.location_settings.hide()
+        grid = to_locator(fix.latitude, fix.longitude, MAX_LOCATOR_CHARS)
+        self._detected_fix = fix
+        self._detected_grid = grid
+        self.canvas.preview_grid = grid
+        self.canvas.look_at(fix.latitude, fix.longitude, 0.08)
+        accuracy = self._accuracy_text(fix.accuracy_m)
+        source = tr(f"map.location_source_{fix.source.value}")
+        warning = " " + tr("map.location_approximate") if fix.is_approximate else ""
+        self.detected_text.setText(
+            tr(
+                "map.location_result",
+                locator=grid,
+                accuracy=accuracy,
+                source=source,
+            ) + warning
+        )
+        self.location_status.setText(tr("map.location_review"))
+        self.location_status.show()
+        self.detected_panel.show()
+        self.canvas.update()
+
+    def _location_failed(self, failure: LocationFailure, _detail: str) -> None:
+        self._location_request = None
+        self.detect_button.setEnabled(True)
+        self.detect_cancel.hide()
+        self.location_status.setText(tr(f"map.location_failure_{failure.value}"))
+        self.location_status.show()
+        self.location_settings.setVisible(
+            failure in (LocationFailure.DENIED, LocationFailure.DISABLED)
+        )
+        self.runtime.events.publish(
+            dual(
+                f"Device location failed: {failure.value}.",
+                f"Zjištění polohy zařízení selhalo: {failure.value}.",
+            ),
+            source="location",
+        )
+
+    @staticmethod
+    def _accuracy_text(accuracy_m: float) -> str:
+        return (
+            f"±{accuracy_m:.0f} m"
+            if accuracy_m < 1_000
+            else f"±{accuracy_m / 1_000:.1f} km"
+        )
+
+    def _use_detected(self) -> None:
+        if self._detected_grid:
+            grid = self._detected_grid
+            self._discard_detected(clear_status=False)
+            self._apply(grid)
+
+    def _discard_detected(self, *, clear_status: bool = True) -> None:
+        self._detected_fix = None
+        self._detected_grid = ""
+        self.canvas.preview_grid = ""
+        self.detected_panel.hide()
+        if clear_status:
+            self.location_status.hide()
+        self.canvas.update()
+
     def _pick_toggled(self, enabled: bool) -> None:
         self.canvas.picking = enabled
         self.canvas.setCursor(
@@ -958,6 +1157,7 @@ class MapWindow(QDialog):
         self._apply(text)
 
     def _apply(self, locator: str) -> None:
+        self._discard_detected(clear_status=False)
         self.runtime.config.station_grid = locator
         self.runtime.config.save()
         self.locator_edit.setText(locator)
@@ -971,6 +1171,12 @@ class MapWindow(QDialog):
             source="map",
         )
         self.refresh()
+
+    def closeEvent(self, event) -> None:
+        if self._location_request is not None:
+            self._location_request.cancel()
+            self._location_request = None
+        super().closeEvent(event)
 
     def _transmit_toggled(self, enabled: bool) -> None:
         self.runtime.config.beacon_position = enabled

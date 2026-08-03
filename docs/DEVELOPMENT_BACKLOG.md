@@ -1,6 +1,6 @@
 # Guardian development backlog
 
-_Aktualizováno: 2026-08-02_
+_Aktualizováno: 2026-08-03_
 
 Tento dokument je jediný pracovní seznam identifikovaných, ale nedokončených
 věcí. Historické plány a release notes popisují stav v okamžiku vydání; pro
@@ -33,6 +33,18 @@ volbu další práce je rozhodující tento backlog.
 2. **Ověřit workflow z v0.6.46 v terénu.** Zaznamenat operátorský test mapových
    vazeb a bezpečného ručního No-CAT QSY na skutečném rádiu; automatické a
    softwarové testy jsou hotové.
+
+## Vydáno v 0.6.53 — určení vlastního lokátoru
+
+Tři cesty nastavení `station_grid` jsou v mapě pohromadě: výběr bodu, ruční
+zadání a jednorázová detekce přes Windows Location Service po výslovném
+kliknutí a consent dialogu Guardianu. Detekovaný fix se před uložením ukáže
+spolu s hlášenou přesností a dočasným bodem v mapě; na disk se uloží pouze
+Maidenhead lokátor a přesné souřadnice se zahodí. Rádiové rámce, beacon i
+přepínač odesílání polohy zůstaly beze změny. Windows přístup zamítnutý na
+release stroji je ověřený; živý přesný fix čeká na provozní ověření na PC s
+povolenou polohou. Privacy pravidla a odložený koncept QR mostu jsou v
+[`LOCATOR_DETECTION.md`](LOCATOR_DETECTION.md).
 
 ## P2 — rozšíření po rozhodnutí operátora
 

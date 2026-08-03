@@ -14,6 +14,8 @@ dependencies = [
   "PySide6-Essentials>=6.7,<7",
   "pyserial>=3.5,<4",
   "sounddevice>=0.4.6,<1",
+  "winrt-Windows.Devices.Geolocation>=3.2,<4; sys_platform == 'win32'",
+  "winrt-Windows.Foundation>=3.2,<4; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
