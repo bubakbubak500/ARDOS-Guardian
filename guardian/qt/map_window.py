@@ -602,6 +602,8 @@ class MapCanvas(QWidget):
 class MapWindow(QDialog):
     """The map, the operator's own position, and what it will transmit."""
 
+    _compose_requested = Signal(str)
+
     def __init__(
         self,
         runtime,
@@ -611,6 +613,10 @@ class MapWindow(QDialog):
         location_consent=None,
     ) -> None:
         super().__init__(parent)
+        self._compose_requested.connect(
+            self._open_compose,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self.runtime = runtime
         self._location_request_factory = (
             location_request_factory or WindowsLocationRequest
@@ -1135,7 +1141,7 @@ class MapWindow(QDialog):
         window stays on screen. Letting the click finish first costs nothing
         and leaves the dialog an ordinary top-level modal window.
         """
-        QTimer.singleShot(0, lambda: self._open_compose(callsign))
+        self._compose_requested.emit(callsign)
 
     def _open_compose(self, callsign: str) -> None:
         dialog = ComposeDialog(self.runtime, self, destination=callsign)
