@@ -145,6 +145,24 @@ class MessageStore:
             p.unlink()
         self._save_index()
 
+    def clear(self) -> int:
+        """Delete every message: bundles on disk and the index.
+
+        The id counter deliberately survives -- message ids reach other
+        stations' session tables and dedup state, and a wiped mailbox is no
+        reason to start minting ids the net has already seen from us.
+        Returns how many indexed messages were removed.
+        """
+        removed = len(self._index)
+        self._index.clear()
+        for bundle in self.root.glob("*.bundle"):
+            try:
+                bundle.unlink()
+            except OSError:
+                pass    # a locked file keeps its bundle; the index entry goes
+        self._save_index()
+        return removed
+
     def store_incoming(self, bundle: bytes, my_callsign: str, *, via: str = "") -> MailMessage:
         """Persist a received bundle into Inbox (for me) or Transit (to relay)."""
         mail = MailMessage.from_bundle(bundle)

@@ -32,6 +32,7 @@ from .routing import HeardStations, RouteTable
 from .services import (
     EventBus,
     LogLevel,
+    MailboxSnapshot,
     NetworkSnapshot,
     RadioSnapshot,
     SnapshotStore,
@@ -476,6 +477,34 @@ class Operations:
             self._update_network_snapshot()
 
         return self.workers.submit(task_name, operation, completed)
+
+    def clear_mailstore(self) -> int:
+        """Delete every stored message; refused while a transfer is running.
+
+        A session mid-flight still reads its message by id, so wiping under it
+        would fail the transfer in a confusing way. Returns the number of
+        messages removed, or -1 for a refusal.
+        """
+        if self._payload_active.is_set() or self._active_session_count():
+            self._log(
+                dual(
+                    "Mail database not cleared: a transfer is in progress.",
+                    "Databáze zpráv nebyla smazána: probíhá přenos.",
+                ),
+                LogLevel.WARNING,
+                source="mail",
+            )
+            return -1
+        removed = self.mailstore.clear()
+        self.snapshots.update(mailbox=MailboxSnapshot())
+        self._log(
+            dual(
+                f"Mail database cleared: {removed} messages deleted.",
+                f"Databáze zpráv smazána: odstraněno {removed} zpráv.",
+            ),
+            source="mail",
+        )
+        return removed
 
     def payload_active(self) -> bool:
         """True while VARA owns the shared audio; the UI keeps quiet then."""

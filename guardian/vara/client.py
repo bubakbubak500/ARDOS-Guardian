@@ -300,6 +300,40 @@ class VaraClient:
         )
         return True
 
+    def drain_stale_data(self) -> int:
+        """Discard bytes already waiting on the persistent data socket.
+
+        Port 8301 stays open across sessions, so a payload from a failed or
+        unclaimed earlier exchange sits in its receive buffer until somebody
+        reads it. The next session then reads the *old* envelope first and
+        leaves its own behind -- every message arrives one behind, forever,
+        which is exactly how the fault presents in the field. Anything
+        readable before this session's RF link exists cannot belong to this
+        session, so it is safe to throw away. Returns the byte count dropped.
+        """
+        sock = self._data
+        if sock is None:
+            return 0
+        dropped = 0
+        try:
+            sock.setblocking(False)
+            while True:
+                try:
+                    chunk = sock.recv(4096)
+                except (BlockingIOError, InterruptedError):
+                    break
+                if not chunk:
+                    break        # closed by VARA; write_data() will reopen
+                dropped += len(chunk)
+        except OSError:
+            pass
+        finally:
+            try:
+                sock.setblocking(True)
+            except OSError:
+                pass
+        return dropped
+
     def write_data(self, data: bytes) -> None:
         """Send payload bytes over the VARA data port."""
         if self._data is None:

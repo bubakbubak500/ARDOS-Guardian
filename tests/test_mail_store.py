@@ -152,3 +152,19 @@ def test_message_ids_are_stable_prefix_and_increasing_counter(tmp_path: Path) ->
 
     assert first >> 20 == second >> 20
     assert (second & 0xFFFFF) == (first & 0xFFFFF) + 1
+
+
+def test_clear_removes_every_message_but_keeps_the_id_counter(tmp_path: Path) -> None:
+    store = MessageStore(tmp_path)
+    store.add(_mail(store.next_id("OK7PS")))
+    store.add(_mail(store.next_id("OK7PS")))
+    before = store.next_id("OK7PS")
+
+    assert store.clear() == 2
+
+    assert store.list() == []
+    assert list(tmp_path.glob("*.bundle")) == []
+    # Ids already reached other stations' session tables; a wiped mailbox is
+    # no reason to mint ids the net has seen from us before.
+    after = MessageStore(tmp_path).next_id("OK7PS")
+    assert (after & 0xFFFFF) == (before & 0xFFFFF) + 1

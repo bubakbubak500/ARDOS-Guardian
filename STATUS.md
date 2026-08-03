@@ -886,6 +886,24 @@ Two defects, both in what 0.6.49 added.
   controls are specified in `docs/MULTIHOP_DISCOVERY.md`; 0.6.55 does not alter
   discovery frames.
 
+## Stale-payload fix and mail wipe (0.6.56)
+
+- **Payloads arrived one behind (field report, 2026-08-03, fixed).** The
+  persistent 8301 data socket kept the envelope of a failed or unclaimed
+  earlier exchange in its receive buffer; the next session read that complete,
+  valid envelope first and left its own behind, shifting every following
+  message by one. Both sides now drain whatever is already readable on the
+  data socket at session start — before this session's RF link exists,
+  anything buffered is provably stale — and log the byte count discarded
+  (`VaraClient.drain_stale_data`, called from both `_send` and `_receive`).
+- **Delete all messages** (Settings → Station): wipes every stored message
+  after a count-stating confirmation; refused while a transfer is running;
+  the id counter survives so the net never sees a reused id from this
+  station; mailbox counters zero immediately.
+- **Software verification:** 377 tests pass, including the one-behind
+  regression reproduced and fixed against a buffered stale envelope, and the
+  socket-pair drain discarding only what was already buffered.
+
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,
   reported from the air 2026-07-30, HF and FM; the alert itself arrived and

@@ -914,6 +914,46 @@ def test_following_a_peer_channel_still_needs_the_opt_in_and_a_cat_radio(
             workers.close(wait=True)
 
 
+def test_clear_mailstore_wipes_messages_and_refuses_mid_transfer(tmp_path) -> None:
+    config = StationConfig(callsign="OK7PS", radio_backend="none")
+    workers = WorkerPool(max_workers=1)
+    mailstore = MessageStore(tmp_path / "mail-clear")
+    snapshots = SnapshotStore()
+    operations = Operations(
+        config,
+        EventBus(),
+        snapshots,
+        workers,
+        mailstore,
+        RouteTable(),
+        HeardStations(),
+    )
+    try:
+        mailstore.add(
+            MailMessage(
+                msg_id=mailstore.next_id(config.callsign),
+                source=config.callsign,
+                final_dest="OK1AAA",
+                created=time.time(),
+                folder=Folder.OUTBOX,
+                status=Status.QUEUED,
+            )
+        )
+        # Mid-transfer the running session still reads its message by id.
+        operations._payload_active.set()
+        assert operations.clear_mailstore() == -1
+        assert len(mailstore.list()) == 1
+
+        operations._payload_active.clear()
+        assert operations.clear_mailstore() == 1
+        assert mailstore.list() == []
+        mailbox = snapshots.read().mailbox
+        assert (mailbox.inbox, mailbox.outbox, mailbox.transit) == (0, 0, 0)
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
 def test_separate_working_channel_refuses_no_cat_automation(tmp_path) -> None:
     config = StationConfig(
         callsign="OK7PS",

@@ -782,6 +782,28 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Přehrává se na výchozím zvukovém zařízení Windows — nikdy na "
         "zařízení nastaveném jako zvukový výstup do rádia.",
     ),
+    "settings.clear_mail": (
+        "Delete all messages…",
+        "Smazat všechny zprávy…",
+    ),
+    "settings.clear_mail_hint": (
+        "Remove every stored message — inbox, outbox, sent and transit — "
+        "from this station. Other stations are not affected.",
+        "Odstraní všechny uložené zprávy — přijaté, odchozí, odeslané i "
+        "tranzitní — z této stanice. Ostatních stanic se to nedotkne.",
+    ),
+    "settings.clear_mail_confirm": (
+        "Delete all {count} stored messages? This cannot be undone.",
+        "Smazat všech {count} uložených zpráv? Tuto akci nelze vrátit.",
+    ),
+    "settings.clear_mail_busy": (
+        "A transfer is in progress; the mail database was not cleared.",
+        "Probíhá přenos; databáze zpráv nebyla smazána.",
+    ),
+    "settings.clear_mail_done": (
+        "{count} messages deleted.",
+        "Odstraněno {count} zpráv.",
+    ),
     "notify.mail_title": (
         "Message from {source}",
         "Zpráva od {source}",

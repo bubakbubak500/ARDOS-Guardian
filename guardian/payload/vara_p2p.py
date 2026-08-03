@@ -129,6 +129,7 @@ class VaraP2PBackend(PayloadBackend):
                     "VARA P2P: using persistent TCP pair 8300/8301 "
                     f"(generation {self.vara.state.data_socket_generation})"
                 )
+                self._drain_stale()
                 # Do NOT toggle LISTEN around a connection.  VARA's native
                 # command reference documents the outbound flow as MYCALL,
                 # LISTEN ON, CONNECT, and warns that either LISTEN ON or
@@ -230,6 +231,28 @@ class VaraP2PBackend(PayloadBackend):
         # only after the shared soundcard has been returned to that modem.
         done(success)
 
+    def _drain_stale(self) -> None:
+        """Throw away leftovers of an earlier exchange before this one starts.
+
+        The 8301 socket is persistent. A payload from a failed or unclaimed
+        session waits in it, and read_exactly() would serve that old envelope
+        to the *next* session -- delivering every message one behind. This
+        session's RF link does not exist yet, so whatever is readable now is
+        provably stale.
+        """
+        drain = getattr(self.vara, "drain_stale_data", None)
+        if drain is None:
+            return          # a stand-in without a data socket to clean
+        try:
+            dropped = drain()
+        except Exception:  # noqa: BLE001 - cleaning must never stop a session
+            return
+        if dropped:
+            self.on_log(
+                f"VARA P2P: discarded {dropped} stale bytes left on the data "
+                "socket by an earlier session"
+            )
+
     @staticmethod
     def _safe(fn) -> None:
         try:
@@ -323,6 +346,7 @@ class VaraP2PBackend(PayloadBackend):
                     "VARA P2P: using persistent TCP pair 8300/8301 "
                     f"(generation {self.vara.state.data_socket_generation})"
                 )
+                self._drain_stale()
                 # LISTEN ON is established once when Guardian connects to
                 # VARA. Reissuing it here can reach VARA while the inbound RF
                 # handshake is already pending; the native protocol explicitly

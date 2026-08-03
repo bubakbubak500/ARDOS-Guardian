@@ -183,6 +183,47 @@ class SettingsDialog(QDialog):
         form.addRow(self.notify_incoming)
         form.addRow(self.notify_sound)
 
+        # Recovery, not housekeeping: when the mailbox state itself is the
+        # problem, the operator needs a way back to a clean slate.
+        self.clear_mail_button = QPushButton(tr("settings.clear_mail"))
+        self.clear_mail_button.setToolTip(tr("settings.clear_mail_hint"))
+        self.clear_mail_button.clicked.connect(self._clear_mail)
+        self.clear_mail_button.setEnabled(self.operations is not None)
+        clear_row = QWidget()
+        clear_layout = QHBoxLayout(clear_row)
+        clear_layout.setContentsMargins(0, 12, 0, 0)
+        clear_layout.setSpacing(6)
+        clear_layout.addWidget(self.clear_mail_button)
+        clear_layout.addStretch(1)
+        form.addRow("", clear_row)
+
+    def _clear_mail(self) -> None:
+        if self.operations is None:
+            return
+        count = len(self.operations.mailstore.list())
+        answer = QMessageBox.question(
+            self,
+            tr("settings.clear_mail"),
+            tr("settings.clear_mail_confirm", count=count),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        removed = self.operations.clear_mailstore()
+        if removed < 0:
+            QMessageBox.warning(
+                self,
+                tr("settings.clear_mail"),
+                tr("settings.clear_mail_busy"),
+            )
+            return
+        QMessageBox.information(
+            self,
+            tr("settings.clear_mail"),
+            tr("settings.clear_mail_done", count=removed),
+        )
+
     def _build_radio(self) -> None:
         form = self._page(
             tr("settings.radio"),

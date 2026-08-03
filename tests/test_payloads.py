@@ -245,6 +245,66 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     assert received.payload_bytes == b"bundle"
 
 
+class BufferedVara(FakeVara):
+    """A data socket with leftovers from an earlier session still buffered."""
+
+    def __init__(self, stale: bytes, fresh: bytes) -> None:
+        super().__init__(stale + fresh)
+        self._stale_length = len(stale)
+
+    def drain_stale_data(self) -> int:
+        dropped = min(self._stale_length, len(self.incoming))
+        del self.incoming[:dropped]
+        self._stale_length = 0
+        return dropped
+
+
+def test_receive_discards_a_previous_sessions_envelope_first() -> None:
+    # The field fault: every message arrived one behind, because the
+    # persistent 8301 socket still held the envelope of an earlier failed or
+    # unclaimed exchange and read_exactly() served that one first.
+    old = encode_envelope(11, b"yesterday's message")
+    fresh = encode_envelope(12, b"today's message")
+    logs: list[str] = []
+    vara = BufferedVara(old, fresh)
+    received = Message(12, "OK7PS", "OK1AAA", "OK1AAA")
+    result: list[bool] = []
+
+    VaraP2PBackend(vara, on_log=logs.append)._receive(received, result.append)
+
+    assert result == [True]
+    assert received.payload_bytes == b"today's message"
+    assert any("stale" in line for line in logs)
+
+    # And the regression this guards against: without the drain, the same
+    # buffer state delivers the previous session's payload.
+    undrained = FakeVara(bytes(old + fresh))
+    behind = Message(12, "OK7PS", "OK1AAA", "OK1AAA")
+    VaraP2PBackend(undrained)._receive(behind, result.append)
+    assert behind.payload_bytes == b"yesterday's message"
+
+
+def test_client_drain_discards_only_what_is_already_buffered() -> None:
+    ours, varas = socket.socketpair()
+    client = VaraClient()
+    client._data = ours
+    try:
+        varas.sendall(b"leftover from a dead session")
+        time.sleep(0.05)
+        assert client.drain_stale_data() == 28
+
+        varas.sendall(encode_envelope(5, b"fresh"))
+        time.sleep(0.05)
+        head = client.read_exactly(12, timeout=2.0)
+        magic, msg_id, length = struct.unpack(">4sII", head)
+        assert (magic, msg_id, length) == (b"GPLD", 5, 5)
+        assert client.read_exactly(length, timeout=2.0) == b"fresh"
+    finally:
+        client._data = None
+        ours.close()
+        varas.close()
+
+
 def test_vara_qsy_happens_after_control_handoff_and_restores_before_release() -> None:
     events = []
     backend = VaraP2PBackend(

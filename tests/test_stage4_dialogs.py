@@ -152,6 +152,45 @@ def test_an_unnamed_radio_profile_is_refused(monkeypatch) -> None:
         dialog.close()
 
 
+def test_clear_mail_asks_first_and_reports_what_it_deleted(monkeypatch) -> None:
+    _application()
+    cleared: list[int] = []
+    operations = SimpleNamespace(
+        mailstore=SimpleNamespace(list=lambda: [1, 2, 3]),
+        clear_mailstore=lambda: cleared.append(3) or 3,
+    )
+    dialog = SettingsDialog(
+        StationConfig(callsign="OK7PS"),
+        ThemePreference.SYSTEM,
+        operations=operations,
+    )
+    try:
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **k: QMessageBox.StandardButton.Cancel,
+        )
+        dialog._clear_mail()
+        assert cleared == []  # Cancel means exactly nothing happens
+
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **k: QMessageBox.StandardButton.Yes,
+        )
+        told: list[str] = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "information",
+            lambda _parent, _title, text: told.append(text),
+        )
+        dialog._clear_mail()
+        assert cleared == [3]
+        assert told and "3" in told[0]
+    finally:
+        dialog.close()
+
+
 def test_separate_working_channels_are_opt_in_and_enable_auto_qsy() -> None:
     _application()
     config = StationConfig(auto_qsy=False)
