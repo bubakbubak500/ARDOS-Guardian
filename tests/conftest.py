@@ -10,9 +10,24 @@ from pathlib import Path
 import shutil
 import tempfile
 
+import pytest
+
 
 _TEST_APPDATA = Path(tempfile.mkdtemp(prefix="guardian-tests-"))
 os.environ["APPDATA"] = str(_TEST_APPDATA)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_shell_dependency_scans():
+    """Keep UI tests independent from real, concurrent filesystem scans."""
+    from guardian.qt.runtime import ShellRuntime
+
+    original = ShellRuntime.request_dependency_refresh
+    ShellRuntime.request_dependency_refresh = lambda self: False
+    try:
+        yield
+    finally:
+        ShellRuntime.request_dependency_refresh = original
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:
