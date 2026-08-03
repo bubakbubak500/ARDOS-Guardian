@@ -28,6 +28,16 @@ def test_route_table_round_trip_and_remove(tmp_path: Path) -> None:
     assert restored.lookup("OK1AAA") is None
 
 
+def test_generated_route_source_survives_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "routes.json"
+    RouteTable([Route("S1", "N1", source="topology")]).save(path)
+
+    restored = RouteTable.load(path).lookup("S1")
+
+    assert restored is not None
+    assert restored.source == "topology"
+
+
 def test_separate_working_channel_is_independent_and_persistent(tmp_path: Path) -> None:
     path = tmp_path / "routes.json"
     table = RouteTable(

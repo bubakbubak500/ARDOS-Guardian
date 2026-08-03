@@ -54,10 +54,12 @@ ACK_TIMEOUT = 8.0
 START_TIMEOUT = 12.0
 TRANSFER_TIMEOUT = 180.0
 BUSY_BACKOFF = 20.0
-# A relayed message sits in CONFIRMED until an end-to-end DELIVERED comes back
-# from the far end. That frame can be lost on RF, and CONFIRMED is not terminal,
-# so without this bound the session would stay "active" forever.
+# A relayed message sits in CONFIRMED until an end-to-end DELIVERED receipt
+# walks back along the reverse hops. If it is lost, close the active transfer
+# as FORWARDED rather than incorrectly claiming final delivery.
 CONFIRM_TIMEOUT = 120.0
+DELIVERY_RECEIPT_TTL = 32
+DELIVERY_RECEIPT_MEMORY = 3600.0
 # Alerts are broadcast with no acknowledgement, so repetition is the only
 # reliability available. Relays are jittered because every station in earshot
 # hears the same alert at the same instant and would otherwise key together.
@@ -192,13 +194,19 @@ class SessionState(Enum):
     RECEIVING = "receiving"        # receiving payload over VARA
     RECEIVED_OK = "received"       # payload received, sent RECEIVED
     # terminal (both)
+    FORWARDED = "forwarded"        # next relay holds it; final receipt absent
     DELIVERED = "delivered"        # reached final destination
     FAILED = "failed"
     CANCELLED = "cancelled"
 
     @property
     def terminal(self) -> bool:
-        return self in (SessionState.DELIVERED, SessionState.FAILED, SessionState.CANCELLED)
+        return self in (
+            SessionState.FORWARDED,
+            SessionState.DELIVERED,
+            SessionState.FAILED,
+            SessionState.CANCELLED,
+        )
 
 
 @dataclass
@@ -235,6 +243,9 @@ class Message:
     working_frequency_hz: int = 0
     working_mode: str = ""
     working_token: str = ""
+    # Reverse breadcrumb for a directed end-to-end delivery receipt.
+    previous_hop: str = ""
+    receipt_forwarded: bool = False
 
 
 class Orchestrator:
@@ -305,10 +316,14 @@ class Orchestrator:
         self.working_channel_accept: Callable[
             [str, str], tuple[int, str] | None
         ] | None = None
+        # Optional persistence bridge: after a restart Operations can recover
+        # the reverse hop from the stored mail history and mark it delivered.
+        self.delivery_receipt_route: Callable[[int, str], str] | None = None
         # Broadcast alerts: what we have already seen (so a flood converges)
         # and what is waiting to go out (repeats and jittered relays).
         self.on_alert: Callable[[ControlFrame, bool], None] | None = None
         self._seen_alerts: dict[int, float] = {}
+        self._seen_delivery_receipts: dict[int, float] = {}
         self._alert_queue: list[tuple[float, ControlFrame]] = []
         self._alert_counter = 0
         self.sessions: dict[int, Message] = {}
@@ -478,7 +493,7 @@ class Orchestrator:
             return
         self._send(FrameType.RECEIVED, msg)
         if self.callsign == msg.final_dest:
-            self._send(FrameType.DELIVERED, msg)
+            self._send_delivery_receipt(msg, msg.source)
             self._enter(msg, SessionState.DELIVERED)
             self._emit(msg, "payload received — I am the final destination")
         else:
@@ -504,6 +519,7 @@ class Orchestrator:
             flags=encode_ptt_delay(inbound.flags, own_delay),
             body=inbound.body,
             payload_bytes=inbound.payload_bytes, direction="out",
+            previous_hop=inbound.source,
         )
         relay.ptt_delay_ms = own_delay
         self.sessions[inbound.msg_id] = relay  # the outbound leg takes over
@@ -534,6 +550,12 @@ class Orchestrator:
         """Drive timeouts/retransmits. Call periodically."""
         self._now = now
         self._tick_alerts(now)
+        if self._seen_delivery_receipts:
+            self._seen_delivery_receipts = {
+                message_id: seen
+                for message_id, seen in self._seen_delivery_receipts.items()
+                if now - seen < DELIVERY_RECEIPT_MEMORY
+            }
         for msg in list(self.sessions.values()):
             if msg.state.terminal:
                 continue
@@ -571,14 +593,11 @@ class Orchestrator:
                 else:
                     self._fail(msg, "working-channel agreement timed out")
             elif msg.state is SessionState.CONFIRMED and elapsed > CONFIRM_TIMEOUT:
-                # The next hop has the message; only the end-to-end receipt is
-                # missing. Close the session rather than count it as an active
-                # transfer for the rest of the run.
-                self._enter(msg, SessionState.DELIVERED)
+                self._enter(msg, SessionState.FORWARDED)
                 self._emit(
                     msg,
-                    "next hop holds the message; no end-to-end DELIVERED "
-                    "arrived before the confirmation timeout",
+                    "next hop holds the message; final delivery is not yet "
+                    "confirmed",
                 )
 
     def _discovery_timeout(self, msg: Message) -> None:
@@ -1003,10 +1022,49 @@ class Orchestrator:
             self._emit(msg, f"{f.source} confirmed RECEIVED")
 
     def _rx_delivered(self, f: ControlFrame) -> None:
+        if f.next_hop and f.next_hop != self.callsign:
+            return
         msg = self.sessions.get(f.message_id)
-        if msg and not msg.state.terminal:
+        if msg is None:
+            if f.message_id in self._seen_delivery_receipts:
+                return
+            previous = ""
+            if self.delivery_receipt_route is not None:
+                try:
+                    previous = self.delivery_receipt_route(
+                        f.message_id,
+                        f.destination,
+                    ) or ""
+                except Exception:  # noqa: BLE001 - receipt must not stop RX
+                    previous = ""
+            self._seen_delivery_receipts[f.message_id] = self._now
+            if previous and f.ttl > 1:
+                self.transport.send(
+                    ControlFrame(
+                        type=FrameType.DELIVERED,
+                        source=self.callsign,
+                        destination=f.destination,
+                        next_hop=previous,
+                        message_id=f.message_id,
+                        priority=f.priority,
+                        ttl=f.ttl - 1,
+                        flags=f.flags,
+                    )
+                )
+            return
+        if f.destination != msg.final_dest:
+            return
+        if msg.state is not SessionState.DELIVERED:
             self._enter(msg, SessionState.DELIVERED)
             self._emit(msg, "end-to-end DELIVERED confirmation received")
+        if msg.previous_hop and f.ttl > 1 and not msg.receipt_forwarded:
+            msg.receipt_forwarded = True
+            self._send_delivery_receipt(
+                msg,
+                msg.previous_hop,
+                ttl=f.ttl - 1,
+            )
+            self._emit(msg, f"delivery receipt forwarded to {msg.previous_hop}")
 
     def _rx_cancel(self, f: ControlFrame) -> None:
         msg = self.sessions.get(f.message_id)
@@ -1031,7 +1089,15 @@ class Orchestrator:
         # Try the configured backup hop once.
         if not msg.tried_backup and self.routes is not None:
             backup = self.routes.next_hop(msg.final_dest, use_backup=True)
-            if backup and backup != msg.next_hop and backup != "ANY":
+            if backup == "ANY" and self.auto_route:
+                msg.tried_backup = True
+                msg.offers.clear()
+                msg.offer_quality.clear()
+                self._enter(msg, SessionState.ROUTE_DISCOVERY)
+                self._send(FrameType.ROUTE_QUERY, msg)
+                self._emit(msg, "no ACK — asking the net for a backup route")
+                return
+            if backup and backup != msg.next_hop:
                 msg.next_hop = backup
                 msg.tried_backup = True
                 msg.attempts = 1
@@ -1063,6 +1129,27 @@ class Orchestrator:
             priority=msg.priority, ttl=msg.ttl, flags=msg.flags,
         )
         self.transport.send(frame)
+
+    def _send_delivery_receipt(
+        self,
+        msg: Message,
+        next_hop: str,
+        *,
+        ttl: int = DELIVERY_RECEIPT_TTL,
+    ) -> None:
+        """Send a directed receipt one step back without changing the frame."""
+        self.transport.send(
+            ControlFrame(
+                type=FrameType.DELIVERED,
+                source=self.callsign,
+                destination=msg.final_dest,
+                next_hop=next_hop,
+                message_id=msg.msg_id,
+                priority=msg.priority,
+                ttl=max(1, int(ttl)),
+                flags=msg.flags,
+            )
+        )
 
     def _emit(self, msg: Message, event: str) -> None:
         if self.on_event:

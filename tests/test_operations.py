@@ -206,6 +206,125 @@ def test_auto_delivery_waits_for_the_next_hop_to_be_heard(tmp_path) -> None:
         workers.close(wait=True)
 
 
+def test_transit_retry_resolves_and_persists_the_current_next_hop(tmp_path) -> None:
+    operations, workers, mailstore = _operations(tmp_path, auto_deliver=True)
+    operations.routes.add(Route("S1", "N2"))
+    operations.heard.record("N2", 1_000.0)
+    operations.audio_transport = SimpleNamespace(pump=lambda: 0)
+    mailstore.add(
+        MailMessage(
+            msg_id=77,
+            source="S6",
+            final_dest="S1",
+            folder=Folder.TRANSIT,
+            status=Status.WAITING_PICKUP,
+        )
+    )
+    attempts: list[int] = []
+    operations.send_queued = lambda msg_id: attempts.append(msg_id) or True
+    try:
+        operations.net.tick(1_000.0)
+        operations._tick_auto_deliver(1_000.0)
+        assert attempts == [77]
+        assert mailstore.get(77).next_hop == "N2"
+
+        operations._tick_auto_deliver(1_100.0)
+        assert attempts == [77]
+        operations.heard.record("N2", 1_301.0)
+        operations.net.tick(1_301.0)
+        operations._tick_auto_deliver(1_301.0)
+        assert attempts == [77, 77]
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_failed_transit_handoff_stays_waiting_and_later_receipt_upgrades_status(
+    tmp_path,
+) -> None:
+    operations, workers, mailstore = _operations(tmp_path)
+    mailstore.add(
+        MailMessage(
+            msg_id=78,
+            source="S6",
+            final_dest="S1",
+            folder=Folder.TRANSIT,
+            status=Status.WAITING_PICKUP,
+        )
+    )
+    message = SimpleNamespace(
+        source="N1",
+        msg_id=78,
+        direction="out",
+        next_hop="N2",
+        state=SessionState.ANNOUNCING,
+    )
+    try:
+        operations._session_event(message, "relaying")
+        assert mailstore.get(78).next_hop == "N2"
+
+        message.state = SessionState.FAILED
+        operations._session_event(message, "failed")
+        stored = mailstore.get(78)
+        assert (stored.folder, stored.status) == (
+            Folder.TRANSIT,
+            Status.WAITING_PICKUP,
+        )
+
+        message.state = SessionState.CONFIRMED
+        operations._session_event(message, "next relay received")
+        stored = mailstore.get(78)
+        assert (stored.folder, stored.status) == (Folder.SENT, Status.FORWARDED)
+
+        message.state = SessionState.DELIVERED
+        operations._session_event(message, "final receipt")
+        assert mailstore.get(78).status == Status.DELIVERED
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_inbound_relay_reserialises_every_hop_into_the_forwarded_bundle(tmp_path) -> None:
+    operations, workers, mailstore = _operations(tmp_path)
+    original = MailMessage(msg_id=79, source="S6", final_dest="S1")
+    inbound = SimpleNamespace(
+        source="N1",
+        msg_id=79,
+        direction="in",
+        state=SessionState.RECEIVED_OK,
+        payload_bytes=original.to_bundle(),
+    )
+    try:
+        operations._session_event(inbound, "received for relay")
+        assert MailMessage.from_bundle(inbound.payload_bytes).hops == ["N1"]
+        assert mailstore.get(79).hops == ["N1"]
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_persisted_mail_supplies_reverse_hop_for_a_late_delivery_receipt(tmp_path) -> None:
+    operations, workers, mailstore = _operations(tmp_path)
+    mailstore.add(
+        MailMessage(
+            msg_id=80,
+            source="S6",
+            final_dest="S1",
+            hops=["S6", "N1"],
+            folder=Folder.SENT,
+            status=Status.FORWARDED,
+        )
+    )
+    try:
+        assert operations._delivery_receipt_route(80, "S1") == "N1"
+        assert mailstore.get(80).status == Status.DELIVERED
+        assert operations._delivery_receipt_route(80, "WRONG") == ""
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
 def test_session_timeouts_follow_the_control_modem(tmp_path) -> None:
     # The budget must cover announce + reply on whichever modem is running.
     # MFSK was 5 s a frame at the original 31.25 baud and needed far more than
@@ -400,6 +519,9 @@ def test_direct_route_qsy_happens_before_message_announcement(
             ),
             "peer confirmed RECEIVED",
         )
+        restored = mailstore.get(message.msg_id)
+        assert restored.status == Status.FORWARDED
+        assert restored.folder == Folder.SENT
         assert events[-1] == ("frequency", 145_500_000)
         assert operations._qsy_previous is None
     finally:

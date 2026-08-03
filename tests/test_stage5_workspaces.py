@@ -28,9 +28,8 @@ from guardian.qt.mail_workspace import (
 )
 from guardian.qt.network_workspace import NetworkWorkspace
 from guardian.qt.runtime import ShellRuntime
-from guardian.radio import Channel
-from guardian.routing import Route, RouteTable
-from guardian.services import NetworkSnapshot
+from guardian.qt.topology_wizard import TopologyWizard
+from guardian.routing import Link, Route, RouteTable, Topology
 
 
 def _application() -> QApplication:
@@ -488,41 +487,68 @@ def test_network_workspace_allows_direct_route_and_formats_operator_inputs() -> 
         runtime.close()
 
 
-def test_network_workspace_exposes_live_scanner_state(monkeypatch) -> None:
+def test_network_workspace_replaces_scanner_page_with_shared_topology_builder(
+    monkeypatch,
+) -> None:
     _application()
     runtime = ShellRuntime()
-    monkeypatch.setattr(
-        runtime.operations,
-        "scanner_channels",
-        lambda: [
-            Channel("Home", 145_500_000, "FM"),
-            Channel("145.5500 MHz", 145_550_000, "FM"),
-        ],
+    runtime.config.callsign = "S6"
+    runtime.topology = Topology(
+        [
+            Link("S6", "N1", freq_hz=145_500_000, mode="FM"),
+            Link("N1", "S1", freq_hz=145_550_000, mode="FM"),
+        ]
     )
+    runtime.routes = RouteTable()
+    runtime.operations.routes = runtime.routes
+    monkeypatch.setattr(runtime.routes, "save", lambda *args, **kwargs: None)
     workspace = NetworkWorkspace(runtime)
     try:
         workspace.refresh()
-        assert workspace.scanner_channels.text() == "2"
-        assert workspace.scanner_toggle.text() == tr("network.scanner_start")
+        assert workspace.topology_table.rowCount() == 2
+        assert "2" in workspace.topology_summary.text()
 
-        runtime.snapshots.update(
-            network=NetworkSnapshot(
-                control_channel_active=True,
-                scanner_active=True,
-                scanner_holding=True,
-                scanner_channel="145.5500 MHz",
-                scanner_frequency_hz=145_550_000,
-                scanner_channels=2,
-            )
+        workspace._apply_topology()
+        route = runtime.routes.lookup("S1")
+        assert route is not None
+        assert route.preferred == "N1"
+        assert route.source == "topology"
+        assert workspace.routes_table.item(1, 7).text() == tr(
+            "network.source_topology"
         )
-        workspace.refresh()
-        assert workspace.scanner_status.text() == tr("network.scanner_holding")
-        assert "145.5500" in workspace.scanner_current.text()
-        assert workspace.scanner_toggle.text() == tr("network.scanner_stop")
-        assert not workspace.scanner_dwell.isEnabled()
     finally:
         workspace.close()
         runtime.close()
+
+
+def test_topology_wizard_previews_routes_from_the_local_station() -> None:
+    _application()
+    wizard = TopologyWizard(
+        Topology(
+            [
+                Link("S6", "N1", freq_hz=145_500_000, mode="FM"),
+                Link("N1", "N2", freq_hz=145_525_000, mode="FM"),
+                Link("N2", "S1", freq_hz=145_550_000, mode="FM"),
+            ]
+        ),
+        "S6",
+        {"N1"},
+    )
+    try:
+        assert len(wizard.pageIds()) == 3
+        wizard.preview_page.initializePage()
+        assert wizard.preview_page.routes.rowCount() == 3
+        rows = {
+            wizard.preview_page.routes.item(row, 0).text():
+            wizard.preview_page.routes.item(row, 1).text()
+            for row in range(wizard.preview_page.routes.rowCount())
+        }
+        assert rows == {"N1": "N1", "N2": "N1", "S1": "N1"}
+        assert wizard.preview_page.warnings.text() == tr(
+            "network.topology_no_warnings"
+        )
+    finally:
+        wizard.close()
 
 
 def test_heard_stations_show_the_signal_and_the_channel_they_arrived_on() -> None:

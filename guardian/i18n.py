@@ -177,12 +177,12 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Znovu připojuji VARA kvůli novému režimu nebo portům…",
     ),
     "menu.network_import": (
-        "Import network from CSV…",
-        "Importovat síť z CSV…",
+        "Import manual routes from CSV…",
+        "Importovat ruční trasy z CSV…",
     ),
     "menu.network_export": (
-        "Export network to CSV…",
-        "Exportovat síť do CSV…",
+        "Export effective routes to CSV…",
+        "Exportovat výsledné trasy do CSV…",
     ),
     "menu.network_template": (
         "Save network template…",
@@ -389,6 +389,58 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.scanner_threshold": ("S-meter threshold", "Práh S-metru"),
     "network.scanner_start": ("Start scanner", "Spustit scanner"),
     "network.scanner_stop": ("Stop and return home", "Zastavit a vrátit domů"),
+    "network.topology": ("Network builder", "Sestavovač sítě"),
+    "network.topology_hint": (
+        "Import one topology for the whole network or build its station links in "
+        "the wizard. Guardian derives this PC's local next-hop routes without "
+        "changing the on-air protocol. Manual routes remain overrides.",
+        "Importujte jednu topologii pro celou síť nebo sestavte její linky v "
+        "průvodci. Guardian pro tento počítač odvodí místní next-hop trasy bez "
+        "změny rádiového protokolu. Ruční trasy zůstávají nadřazené.",
+    ),
+    "network.topology_wizard": (
+        "Open builder / import…",
+        "Otevřít sestavovač / import…",
+    ),
+    "network.topology_recompute": (
+        "Recompute local routes",
+        "Přepočítat místní trasy",
+    ),
+    "network.topology_export": (
+        "Export shared topology…",
+        "Exportovat sdílenou topologii…",
+    ),
+    "network.topology_applied": (
+        "Generated {count} routes for {callsign} from the shared topology.",
+        "Ze sdílené topologie bylo pro {callsign} odvozeno {count} tras.",
+    ),
+    "network.topology_summary": (
+        "Local station {callsign}: {nodes} stations, {links} links, {routes} "
+        "generated routes.",
+        "Místní stanice {callsign}: {nodes} stanic, {links} linek, {routes} "
+        "odvozených tras.",
+    ),
+    "network.topology_no_warnings": (
+        "No topology warnings.",
+        "Topologie je bez upozornění.",
+    ),
+    "network.topology_remove_hint": (
+        "This route is generated. Edit the corresponding link in Network builder "
+        "or save the row as a manual override.",
+        "Tato trasa je odvozená. Upravte odpovídající linku v Sestavovači sítě "
+        "nebo řádek uložte jako ruční override.",
+    ),
+    "network.route_source": ("Source", "Zdroj"),
+    "network.source_manual": ("Manual", "Ruční"),
+    "network.source_topology": ("Topology", "Topologie"),
+    "network.station_a": ("Station A", "Stanice A"),
+    "network.station_b": ("Station B", "Stanice B"),
+    "network.direction": ("Direction", "Směr"),
+    "network.direction_both": ("Both", "Oba směry"),
+    "network.direction_a_to_b": ("A to B", "A do B"),
+    "network.direction_b_to_a": ("B to A", "B do A"),
+    "network.cost": ("Cost", "Cena"),
+    "network.enabled": ("Enabled", "Povoleno"),
     "network.destination": ("Destination", "Cíl"),
     "network.preferred": ("Preferred hop", "Upřednostněný mezilehlý bod"),
     "network.backup": ("Backup", "Záložní bod"),

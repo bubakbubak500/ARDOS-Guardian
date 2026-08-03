@@ -46,16 +46,13 @@ QR mostu jsou v
 
 ## P2 — rozšíření po rozhodnutí operátora
 
-1. **Import sdílené mesh topologie.** Importovat odkazy místo lokálních tras,
-   odvodit směrování z pohledu každé stanice, podporovat ceny/asymetrii a varovat
-   před next-hopem, který stanice nikdy neslyšela. Návrh je v `MESH_ROUTING.md`.
-2. **Dokončit význam protokolových příznaků šifrování a komprese.** Příznaky
+1. **Dokončit význam protokolových příznaků šifrování a komprese.** Příznaky
    `ENCRYPTED` a `COMPRESSED` jsou rezervované, ale nejsou aplikované na obsah.
    Nejdřív určit kompatibilitu, správu klíčů a chování vůči starším verzím.
-3. **Rozhodnout o VARA `COMPRESSION FILES`.** Změřit přínos pro běžné přílohy a
+2. **Rozhodnout o VARA `COMPRESSION FILES`.** Změřit přínos pro běžné přílohy a
    ověřit, zda musí být nastavení shodné na obou stranách. Bez měření funkci
    nezapínat.
-4. **Rozšířit validaci konfigurace.** First-run readiness a základní UI validace
+3. **Rozšířit validaci konfigurace.** First-run readiness a základní UI validace
    jsou hotové; doplnit centrální kontrolu typů, rozsahů a neplatných kombinací
    při načtení nebo importu konfigurace.
 
@@ -84,6 +81,27 @@ plánu odstraněn rozhodnutím operátora.
 Zamítnuto (nezapadá do offline filozofie ARDOS): odhad pokrytí z výškového
 modelu terénu — vyžaduje stovky MB dat SRTM nebo síť.
 
+## Vydáno v 0.6.55 — sestavovač sítě a spolehlivý Transit
+
+- **Jedna topologie pro celou síť:** nový průvodce na místě stránky scanneru
+  importuje sdílené CSV nebo sestaví linky ručně. Linka nese směr, cenu,
+  dostupnost, volací a volitelný pracovní kanál.
+- **Lokální derivace:** Dijkstra s deterministickým pořadím ceny/hopů/cesty
+  odvodí pro každou volací značku jiný next hop. Alternativní první hop se
+  stane zálohou; ruční trasy se při přepočtu nepřepisují.
+- **Pravdivý stav:** převzetí dalším relayem je `Forwarded`, nikoli
+  `Delivered`. Koncové potvrzení se vrací směrovaně po reverzních hopech a může
+  později stav povýšit na `Delivered` bez změny wire formátu.
+- **Transit retry:** vypočtený next hop se uloží, po změně tras znovu odvodí,
+  selhání zprávu ponechá v Transit a automatický retry má pětiminutovou ochranu
+  proti opakovanému klíčování. Přenášený bundle nyní skutečně nese všechny
+  průchozí hopy.
+- **`ANY` fallback:** dokumentovaná záloha nově po selhání preferred hopu
+  opravdu spustí jednoskokový `ROUTE_QUERY`.
+- **Vícehopové discovery pouze návrh:** RREQ/RREP, deduplikace, airtime limity,
+  metrika, důvěra a smíšené verze jsou rozpracované v
+  `MULTIHOP_DISCOVERY.md`; rádiový protokol 0.6.55 se nemění.
+
 ## P3 — release hardening a sledovaná rizika
 
 1. **Authenticode podpis instalátoru.** Vývojové releasy jsou záměrně nepodepsané
@@ -100,9 +118,9 @@ modelu terénu — vyžaduje stovky MB dat SRTM nebo síť.
 - **Vícekanálový scanner byl provozně ověřen na skutečném CAT rádiu:** ladění
   frekvence a módu, dwell/hold i návrat na domácí kanál fungují správně
   (potvrzeno operátorem).
-- Současný scanner je tímto uzavřený, ale není dlouhodobým směrem dalšího
-  vývoje. Později jej nahradí **sestavovač sítě**; význam, workflow a migrační
-  postup doplní operátor v samostatném zadání.
+- Scannerový backend zůstává kvůli kompatibilitě, ale jeho Network UI v 0.6.55
+  nahradil **sestavovač sítě**. Odvozené linky/kanály jsou zdrojem pro routing a
+  případné pozdější automatické plánování poslechu.
 
 ## Potvrzeně dokončeno 2026-08-01
 

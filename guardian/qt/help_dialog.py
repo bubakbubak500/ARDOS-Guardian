@@ -320,6 +320,16 @@ def help_topics() -> list[HelpTopic]:
             and forward traffic for another destination. Auto QSY uses the
             route frequency before VARA P2P and restores the prior frequency
             afterwards when supported by the radio driver.</p>
+            <p><b>Network builder</b> imports one shared link topology or builds
+            it in a three-step wizard. Each PC derives its own routes from its
+            configured callsign. Links may be directional, disabled or carry a
+            positive cost and calling/working channels. Generated routes are
+            labelled Topology; saving the same destination manually creates an
+            override.</p>
+            <p>A relay's RECEIVED means <b>Forwarded</b>, not final delivery.
+            The final station sends a directed DELIVERED receipt back over the
+            reverse hops. Transit mail keeps its resolved next hop across
+            failure/restart and retries no more often than every five minutes.</p>
             <p>Separate VARA working channels are an advanced opt-in under
             Network behavior and require real CAT on both peers. Until enabled,
             their route fields are hidden and single-channel operation is
@@ -340,12 +350,10 @@ def help_topics() -> list[HelpTopic]:
             each of them, repeats the same alert, and returns to the frequency
             and mode it started on. Only channels compatible with the active
             FM or HF control modem are visited.</p>
-            <p>The Channel scanner page uses the current frequency as home and
-            adds compatible route frequencies. Start is always explicit and
-            requires a live control channel plus a CAT-controlled Hamlib radio.
-            Activity or a configured S-meter threshold holds the channel. Stop
-            returns home. Stop scanning before sending mail, an alert or a PTT
-            test; incoming sessions pause it automatically.</p>
+            <p>The previously tested scanner engine remains compatible in the
+            backend, but its Network page is now the topology builder. Generated
+            local routes provide the channel plan for routing and any future
+            automatic listening workflow.</p>
             """,
             """
             <h2>Trasy a stav sítě</h2>
@@ -361,6 +369,15 @@ def help_topics() -> list[HelpTopic]:
             <p>TTL omezuje hloubku předávání. Automatický relay dovolí stanici
             podržet a předat provoz jinému cíli. Auto QSY před VARA P2P použije
             frekvenci z trasy a po skončení podle možností rádia obnoví původní.</p>
+            <p><b>Sestavovač sítě</b> importuje jednu sdílenou topologii linek
+            nebo ji vytvoří v tříkrokovém průvodci. Každý počítač odvodí vlastní
+            trasy podle nastavené značky. Linka může být jednosměrná, zakázaná,
+            mít kladnou cenu a volací/pracovní kanál. Odvozené trasy jsou
+            označené Topologie; ruční uložení stejného cíle vytvoří override.</p>
+            <p>RECEIVED od relaye znamená <b>Předáno</b>, nikoli koncové
+            doručení. Cílová stanice pošle směrované DELIVERED zpět po reverzních
+            hopech. Transit zpráva zachová vypočtený next hop i po selhání nebo
+            restartu a neopakuje automatický pokus častěji než po pěti minutách.</p>
             <p>Samostatné pracovní kanály VARA jsou pokročilá volitelná funkce
             v Chování sítě a na obou stranách vyžadují skutečné CAT. Dokud ji
             nezapnete, její pole tras jsou skrytá a jednokanálový provoz se
@@ -380,12 +397,10 @@ def help_topics() -> list[HelpTopic]:
             navštíví každý z nich, zopakuje tam stejnou výstrahu a vrátí se na
             původní kmitočet i režim. Navštíví jen kanály kompatibilní s právě
             aktivním řídicím modemem pro FM nebo HF.</p>
-            <p>Stránka Scanner kanálů používá současnou frekvenci jako domácí a
-            doplní kompatibilní frekvence tras. Spuštění je vždy výslovné a
-            vyžaduje živý řídicí kanál a rádio ovládané přes Hamlib CAT. Aktivita
-            nebo nastavený práh S-metru kanál podrží. Zastavení vrátí rádio domů.
-            Před odesláním pošty, výstrahy nebo testem PTT scanner zastavte;
-            příchozí relace jej pozastaví automaticky.</p>
+            <p>Dříve ověřený scannerový engine zůstává kompatibilní v backendu,
+            ale jeho stránku v Síti nahradil sestavovač topologie. Odvozené
+            místní trasy poskytují plán kanálů pro routing a případný budoucí
+            automatický poslech.</p>
             """,
             "route heard sessions ttl relay qsy trasa slyšené relace",
         ),

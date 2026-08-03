@@ -35,12 +35,11 @@ RTS/DTR VOX fallback — no per-radio CAT reverse-engineering.
 
 **Phases 4 and 5 are done.** The
 heard-stations registry, ROUTE_QUERY/ROUTE_OFFER discovery, learned paths and
-multi-hop auto-relay are tested over the loopback bus. The production channel
-scanner has explicit Network UI, snapshot state, worker-based CAT tuning,
-activity/S-meter hold and safety pauses around sessions and payloads. A
-physical-radio pass confirmed tune/mode, dwell/hold and home return on
-2026-08-03. The scanner is complete; a future operator-defined network builder
-will replace it after its workflow is specified.
+multi-hop auto-relay are tested over the loopback bus and the relay chain was
+confirmed in field operation. The former scanner page is now a shared network
+topology builder: one imported/built set of links derives a different local
+route table for every callsign while manual rows remain overrides. The tested
+scanner engine remains in the backend but is no longer the primary Network UI.
 
 **Phase 3 done.** Built + tested: AFSK 1200 modem, MFSK-16 HF modem
 (decodes to ~0 dB SNR in loopback), rate-1/2 K=7 convolutional FEC + Viterbi,
@@ -183,8 +182,6 @@ ARM (0.6.42) and the AFSK control channel there, handshake both ways at
 
 **Remaining real hardware/peer verification:**
 
-- **Multi-hop relay on air.** Only the two-station direct case has flown; the
-  A→B→C chain is loopback-tested only.
 - Alert frequency sweep on HF and FM.
 
 ---
@@ -341,7 +338,8 @@ are considered sufficient for operations.
 - **Mail tab**: folder sidebar with counts, message list, reading pane with
   per-attachment Save/Open, Compose dialog (To/Subject/Body/Attach/Priority)
   with a size + estimated on-air-time hint. Outbound status tracks the session
-  (Outbox→Sent on delivery); inbound bundles auto-file to Inbox or Transit.
+  (Outbox→Sent on handoff, with **Forwarded** distinct from final
+  **Delivered**); inbound bundles auto-file to Inbox or Transit.
   "Simulate receive (demo)" lets you exercise the receive/read/attachment UX on
   one PC without a radio.
 
@@ -352,8 +350,9 @@ are considered sufficient for operations.
   open. **Reply** button on Inbox messages prefills a quoted reply.
 - **Presence beacon + auto-deliver** — a station can beacon "I'm here"; holders
   auto-send waiting Outbox/Transit mail when the next hop becomes *heard*
-  (Mesh-tab toggles: auto-deliver, beacon). This is the "pickup when the
-  recipient shows up" behaviour.
+  (Network-behavior toggles: auto-deliver, beacon). Transit keeps its resolved
+  next hop across restart/failure and retries with a five-minute guard instead
+  of waiting incorrectly for the final destination.
 - **Forms** — ICS-213 and SITREP templates in Compose render to clean,
   fixed-layout bodies with auto subjects.
 
@@ -857,6 +856,35 @@ Two defects, both in what 0.6.49 added.
   missing data, and stamps Guardian version, local time and source attribution.
 - M5 mobile trails are deliberately deferred. The proposed day/night
   terminator was removed from the roadmap by operator decision.
+
+## Shared topology and truthful relay delivery (0.6.55)
+
+- The Network workspace replaces its scanner tab with a three-step network
+  builder. The operator can import one semicolon CSV for the whole net or add
+  links manually, including direction, calling/working channels, enabled state
+  and positive cost.
+- A deterministic cost/hop/path calculation derives ordinary Guardian routes
+  from the local configured callsign. Direct neighbours become direct rows;
+  remote destinations name the first hop and a distinct alternative first hop
+  becomes backup. Manual route rows remain authoritative overrides.
+- Topology JSON persists beside the existing station config, generated route
+  rows are marked by source, and startup recomputes them when a saved topology
+  exists. The builder previews the local result and warns about unreachable
+  nodes or next hops not yet heard.
+- Relay handoff and final delivery are no longer conflated. `RECEIVED` from an
+  intermediate hop yields **Forwarded**; a directed `DELIVERED` receipt walks
+  back over local reverse breadcrumbs, recovers them from persisted hop
+  history after a restart, and upgrades every stored copy to **Delivered**.
+  No control-frame field or version changed.
+- Every relay reserialises the bundle with its hop history before forwarding.
+  A failed Transit handoff remains in Transit, stores/recomputes its next hop
+  and may retry after a bounded five-minute interval.
+- A documented `backup=ANY` now actually enters `ROUTE_QUERY` discovery after
+  the preferred hop exhausts its announces.
+- True multi-hop RREQ/RREP flooding remains theoretical. Airtime limits,
+  deduplication, reverse replies, metrics, mixed-version behaviour and trust
+  controls are specified in `docs/MULTIHOP_DISCOVERY.md`; 0.6.55 does not alter
+  discovery frames.
 
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,

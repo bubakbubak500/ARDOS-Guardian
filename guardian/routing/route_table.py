@@ -37,8 +37,12 @@ class Route:
     # separate working channels, so old route files retain their exact meaning.
     working_freq_hz: int = 0
     working_mode: str = ""
+    # Manual rows remain operator overrides.  Rows generated from the shared
+    # network topology are replaceable as a group when the graph changes.
+    source: str = "manual"
 
     def normalised(self) -> "Route":
+        source = (self.source or "manual").strip().lower()
         return Route(
             destination=self.destination.strip().upper(),
             preferred=self.preferred.strip().upper(),
@@ -47,6 +51,7 @@ class Route:
             mode=(self.mode or "").strip().upper(),
             working_freq_hz=int(self.working_freq_hz or 0),
             working_mode=(self.working_mode or "").strip().upper(),
+            source="topology" if source == "topology" else "manual",
         )
 
 
@@ -69,6 +74,17 @@ class RouteTable:
         # Replace an existing route for the same destination.
         self._routes = [r for r in self._routes if r.destination != route.destination]
         self._routes.append(route)
+
+    def replace_topology(self, routes: list[Route]) -> None:
+        """Replace generated rows without disturbing manual operator routes."""
+        manual = [route for route in self._routes if route.source != "topology"]
+        manual_destinations = {route.destination for route in manual}
+        generated = []
+        for route in routes:
+            route = route.normalised()
+            if route.destination not in manual_destinations:
+                generated.append(route)
+        self._routes = manual + generated
 
     def remove(self, destination: str) -> None:
         dest = destination.strip().upper()

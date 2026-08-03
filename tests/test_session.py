@@ -290,7 +290,88 @@ def test_a_relay_confirmation_stops_counting_as_an_active_transfer() -> None:
     assert message.state is SessionState.CONFIRMED
 
     sender.tick(message.t_state + CONFIRM_TIMEOUT + 1)
+    assert message.state is SessionState.FORWARDED
+
+
+def test_end_to_end_receipt_walks_back_over_three_relays() -> None:
+    bus = LoopbackBus()
+    s6 = Orchestrator(
+        "S6", bus.endpoint("s6"),
+        routes=RouteTable([Route("S1", "N1")]),
+        auto_route=False,
+    )
+    n1 = Orchestrator(
+        "N1", bus.endpoint("n1"),
+        routes=RouteTable([Route("S1", "N2")]),
+        auto_complete=True,
+        auto_route=False,
+        relay=True,
+    )
+    n2 = Orchestrator(
+        "N2", bus.endpoint("n2"),
+        routes=RouteTable([Route("S1", "N3")]),
+        auto_complete=True,
+        auto_route=False,
+        relay=True,
+    )
+    n3 = Orchestrator(
+        "N3", bus.endpoint("n3"),
+        routes=RouteTable([Route("S1", "")]),
+        auto_complete=True,
+        auto_route=False,
+        relay=True,
+    )
+    s1 = Orchestrator(
+        "S1", bus.endpoint("s1"),
+        auto_complete=True,
+        auto_route=False,
+    )
+    sent = {station.callsign: _spy(station) for station in (s6, n1, n2, n3, s1)}
+
+    message = s6.send_message("S1", "four legs", msg_id=202, ttl=5)
+    _drain(bus, s6, n1, n2, n3, s1)
+
     assert message.state is SessionState.DELIVERED
+    assert s1.sessions[202].state is SessionState.DELIVERED
+    assert n1.sessions[202].previous_hop == "S6"
+    assert n2.sessions[202].previous_hop == "N1"
+    assert n3.sessions[202].previous_hop == "N2"
+    receipts = {
+        callsign: [
+            (frame.source, frame.next_hop)
+            for frame in frames
+            if frame.type is FrameType.DELIVERED
+        ]
+        for callsign, frames in sent.items()
+    }
+    assert receipts["S1"] == [("S1", "N3")]
+    assert receipts["N3"] == [("N3", "N2")]
+    assert receipts["N2"] == [("N2", "N1")]
+    assert receipts["N1"] == [("N1", "S6")]
+
+
+def test_delivery_receipt_recovers_a_persisted_reverse_hop_after_restart() -> None:
+    station = Orchestrator("N2", LoopbackBus().endpoint("n2"))
+    sent = _spy(station)
+    recovered: list[tuple[int, str]] = []
+    station.delivery_receipt_route = lambda message_id, destination: (
+        recovered.append((message_id, destination)) or "N1"
+    )
+    receipt = ControlFrame(
+        FrameType.DELIVERED,
+        source="N3",
+        destination="S1",
+        next_hop="N2",
+        message_id=203,
+        ttl=5,
+    )
+
+    station._on_frame(receipt)
+    station._on_frame(receipt)
+
+    assert recovered == [(203, "S1")]
+    assert len(sent) == 1
+    assert (sent[0].source, sent[0].next_hop, sent[0].ttl) == ("N2", "N1", 4)
 
 
 def test_no_route_with_auto_route_disabled_attempts_destination_directly() -> None:
@@ -456,6 +537,22 @@ def test_a_vouched_hop_keeps_all_three_announces() -> None:
 
     announces = [f for f in sent if f.type is FrameType.HAVE_MSG]
     assert len(announces) == 3
+
+
+def test_any_backup_enters_route_discovery_after_primary_fails() -> None:
+    bus = LoopbackBus()
+    routes = RouteTable([Route("OK9ZZZ", "OK2IPW", "ANY")])
+    station = Orchestrator("OK7PS", bus.endpoint("a"), routes=routes, auto_route=True)
+    sent = _spy(station)
+    station.tick(0.0)
+    message = station.send_message("OK9ZZZ", "hello", msg_id=302)
+
+    for now in (station.ack_timeout + 1, station.ack_timeout * 2 + 2, station.ack_timeout * 3 + 3):
+        station.tick(now)
+
+    assert message.state is SessionState.ROUTE_DISCOVERY
+    assert message.tried_backup
+    assert [frame.type for frame in sent].count(FrameType.ROUTE_QUERY) == 1
 
 
 def test_a_repeated_announce_is_answered_again_instead_of_ignored() -> None:

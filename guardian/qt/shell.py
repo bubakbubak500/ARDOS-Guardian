@@ -807,6 +807,13 @@ class GuardianMainWindow(QMainWindow):
 
             self.runtime.operations.configure_vara_host_ptt()
             self.runtime.operations.apply_network_settings()
+            if self.runtime.topology.links:
+                self.runtime.routes.replace_topology(
+                    self.runtime.topology.derive_routes(
+                        self.runtime.config.callsign
+                    )
+                )
+                self.runtime.routes.save()
             self.theme_controller.set_preference(dialog.selected_theme)
             self._rebuild_translated_ui()
             self.runtime.refresh()

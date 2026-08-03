@@ -15,7 +15,7 @@ from ..install.dependencies import inspect_dependencies
 from ..i18n import dual
 from ..message import Folder, MessageStore
 from ..operations import Operations
-from ..routing import HeardStations, RouteTable
+from ..routing import HeardStations, RouteTable, Topology
 from ..updates import UpdateInfo, check_for_update, download_installer
 from ..services import (
     DependencySnapshot,
@@ -39,6 +39,12 @@ class ShellRuntime:
         self.dependency_statuses: tuple[DependencyStatus, ...] = ()
         self.mailstore = MessageStore()
         self.routes = RouteTable.load()
+        self.topology = Topology.load()
+        if self.topology.links:
+            self.routes.replace_topology(
+                self.topology.derive_routes(self.config.callsign)
+            )
+            self.routes.save()
         self.heard = HeardStations()
         self.operations = Operations(
             self.config,

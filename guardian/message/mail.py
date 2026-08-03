@@ -37,10 +37,10 @@ class Status:
     DRAFT = "draft"
     QUEUED = "queued"
     SENDING = "sending"
-    DELIVERED = "delivered"      # confirmed to next hop / end-to-end
+    DELIVERED = "delivered"      # confirmed by the final destination
     RECEIVED = "received"        # arrived for me
     WAITING_PICKUP = "waiting"   # in transit, awaiting onward hop
-    FORWARDED = "forwarded"      # relayed onward
+    FORWARDED = "forwarded"      # next relay holds it; final receipt pending
     FAILED = "failed"
 
 

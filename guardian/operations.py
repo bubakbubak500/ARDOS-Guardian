@@ -107,6 +107,9 @@ class Operations:
 
     # Auto-delivery sweeps this often; a heard peer is not going anywhere.
     _AUTO_DELIVER_INTERVAL = 10.0
+    # A failed automatic handoff stays queued and may be retried, but never in
+    # a tight keying loop against a peer that remains visible in Heard.
+    _AUTO_DELIVER_RETRY = 300.0
 
     def __init__(
         self,
@@ -143,8 +146,7 @@ class Operations:
         self._qsy_previous_mode: str = ""
         self._last_beacon = 0.0
         self._last_auto_deliver = 0.0
-        # Sent once per run so a peer that stays heard is not hammered.
-        self._auto_delivered: set[int] = set()
+        self._auto_delivery_attempted: dict[int, float] = {}
         self._vara_process: subprocess.Popen | None = None
         # Negotiated slow-keying hold-off for the payload session in flight.
         self._payload_ptt_delay_ms = 0
@@ -200,11 +202,34 @@ class Operations:
         net.position = self.beacon_position
         net.working_channel_offer = self._working_channel_offer
         net.working_channel_accept = self._working_channel_accept
+        net.delivery_receipt_route = self._delivery_receipt_route
         self._scale_session_timeouts(net, transport)
         return net
 
+    def _delivery_receipt_route(self, message_id: int, final_dest: str) -> str:
+        """Recover a receipt's reverse hop from persistent mail after restart."""
+        mail = self.mailstore.get(message_id)
+        if mail is None or mail.final_dest.strip().upper() != final_dest.strip().upper():
+            return ""
+        if mail.folder not in (Folder.OUTBOX, Folder.TRANSIT, Folder.SENT):
+            return ""
+        self.mailstore.set_status(
+            message_id,
+            status=Status.DELIVERED,
+            folder=Folder.SENT,
+        )
+        self._log(
+            dual(
+                f"Final delivery of message #{message_id} confirmed.",
+                f"Potvrzeno koncové doručení zprávy #{message_id}.",
+            ),
+            source="mail",
+        )
+        return mail.hops[-1] if mail.hops else ""
+
     def apply_network_settings(self) -> None:
         """Apply saved routing/channel behaviour without restarting control RX."""
+        self.net.callsign = self.config.callsign.strip().upper()
         self.net.auto_route = self.config.auto_route
         self.net.relay = self.config.auto_relay
         self.net.working_channel_offer = self._working_channel_offer
@@ -1385,12 +1410,20 @@ class Operations:
                 if meta.get("status") == Status.FAILED:
                     continue          # a failure is the operator's to retry
                 msg_id = meta["msg_id"]
-                if msg_id in self._auto_delivered:
+                last_attempt = self._auto_delivery_attempted.get(msg_id)
+                if (
+                    last_attempt is not None
+                    and now - last_attempt < self._AUTO_DELIVER_RETRY
+                ):
                     continue
-                hop = meta.get("next_hop") or meta.get("final_dest") or ""
+                destination = meta.get("final_dest") or ""
+                resolved, _how = self.net._resolve_next_hop(destination)
+                hop = resolved or meta.get("next_hop") or destination
                 if hop.upper() not in heard:
                     continue
-                self._auto_delivered.add(msg_id)
+                if hop != meta.get("next_hop"):
+                    self.mailstore.set_status(msg_id, next_hop=hop)
+                self._auto_delivery_attempted[msg_id] = now
                 self._log(
                     dual(
                         f"{hop} is heard — sending waiting message #{msg_id}.",
@@ -1534,22 +1567,44 @@ class Operations:
                     )
         elif message.state.terminal:
             self._payload_ptt_delay_ms = 0
-        if message.direction == "out" and self.mailstore.get(message.msg_id):
-            if message.state in (SessionState.DELIVERED, SessionState.CONFIRMED):
+        stored = self.mailstore.get(message.msg_id)
+        if message.direction == "out" and stored:
+            next_hop = getattr(message, "next_hop", "")
+            if next_hop and stored.next_hop != next_hop:
+                self.mailstore.set_status(
+                    message.msg_id,
+                    next_hop=next_hop,
+                )
+                stored.next_hop = next_hop
+            if message.state is SessionState.DELIVERED:
                 self.mailstore.set_status(
                     message.msg_id,
                     status=Status.DELIVERED,
                     folder=Folder.SENT,
                 )
-            elif message.state is SessionState.FAILED:
+            elif message.state in (SessionState.CONFIRMED, SessionState.FORWARDED):
                 self.mailstore.set_status(
                     message.msg_id,
-                    status=Status.FAILED,
+                    status=Status.FORWARDED,
+                    folder=Folder.SENT,
                 )
+            elif message.state in (SessionState.FAILED, SessionState.CANCELLED):
+                if stored.folder == Folder.TRANSIT:
+                    self.mailstore.set_status(
+                        message.msg_id,
+                        status=Status.WAITING_PICKUP,
+                        folder=Folder.TRANSIT,
+                    )
+                else:
+                    self.mailstore.set_status(
+                        message.msg_id,
+                        status=Status.FAILED,
+                    )
             if (
                 message.state
                 in (
                     SessionState.CONFIRMED,
+                    SessionState.FORWARDED,
                     SessionState.DELIVERED,
                     SessionState.FAILED,
                     SessionState.CANCELLED,
@@ -1565,11 +1620,15 @@ class Operations:
         ):
             self._stored_inbound.add(message.msg_id)
             try:
-                self.mailstore.store_incoming(
+                stored_inbound = self.mailstore.store_incoming(
                     message.payload_bytes,
                     self.config.callsign,
                     via=message.source,
                 )
+                # _maybe_relay() runs after this event callback returns. Feed
+                # it the reserialised bundle so every hop becomes part of the
+                # route history carried to the final destination.
+                message.payload_bytes = stored_inbound.to_bundle()
             except Exception as exc:
                 self._log(
                     dual(

@@ -1,7 +1,10 @@
 # Importing routing into a mesh
 
-Open design note, written 2026-07-28 after CSV network import landed in 0.6.26.
-Nothing here is implemented yet.
+Design note written 2026-07-28 after CSV route import landed in 0.6.26.
+**Implemented in 0.6.55:** shared link topology, direction/cost, CSV + wizard,
+per-station route derivation, manual overrides and heard-next-hop warnings.
+True multi-hop over-the-air discovery remains a separate theoretical proposal
+in [`MULTIHOP_DISCOVERY.md`](MULTIHOP_DISCOVERY.md).
 
 ## The problem
 
@@ -87,18 +90,19 @@ station has never heard."* That catches the copy-paste-the-wrong-file mistake
 at import time instead of at the first failed message. A warning, never a
 block — the operator may be importing hours before anyone powers up.
 
-## Recommendation
+## Implemented resolution (0.6.55)
 
-1. Keep the 0.6.26 per-station route CSV. It is the right tool when an operator
-   knows exactly what one station should do, and it needs no inference.
-2. Add a **topology CSV** (links, symmetric, one file for the whole net) with
-   per-station derivation. This is the answer to the question that prompted
-   this note.
-3. Add the heard-stations sanity check at import.
-4. Let the derived table stay derived: recompute on import, on route change,
-   and when a learned path contradicts the plan — rather than freezing it into
-   `routes.json` where it can drift.
+1. The original per-station route CSV remains available for exact manual
+   overrides.
+2. The Network builder imports/exports **topology CSV** and also edits links in
+   a wizard.
+3. Each PC derives routes from its configured callsign. Generated rows carry a
+   topology source marker; a manual row for the same destination wins.
+4. Direction, positive link cost, disabled links, alternate first-hop backup,
+   calling and working channels are supported.
+5. Startup and the explicit Recompute action rebuild generated rows from the
+   saved topology. The builder previews the result and warns about unreachable
+   or not-yet-heard first hops.
 
-Not urgent. Two stations do not need it, and the direct case works today. It
-becomes worth building at four or five stations, or the first time a net is
-configured by someone other than the operator running it.
+Propagation remains runtime evidence rather than a property of the file.
+Heard/learned paths and one-hop discovery continue to complement the plan.

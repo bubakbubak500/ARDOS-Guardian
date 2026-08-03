@@ -37,6 +37,9 @@ manifest, and asks again before launching it.
   `WORKING_OFFER`, `WORKING_ACK`, `RECEIVED`, `DELIVERED`, `CANCEL`), priorities and flags. Message composer
   builds and self-tests real bursts.
 - **Configurable route table** (destination/group → preferred + backup hop)
+- **Shared network topology builder**: import one link CSV for the whole net or
+  add directed/costed links in a three-step wizard. Each PC derives its own
+  next-hop table from its configured callsign; manual routes remain overrides.
 - **Radio drivers**: Hamlib/rigctld TCP backend (freq/mode/PTT/S-meter) and a
   generic serial VOX PTT backend
 - **VARA client**: TCP command/data connection with async notification reader
@@ -88,7 +91,8 @@ manifest, and asks again before launching it.
   Python icon
 - **Winlink-like mail**: store-and-forward mailbox (Inbox / Outbox / Sent /
   Transit), text **+ attachments** in a compressed bundle, Compose/read UI with
-  attachment Save/Open, route-history tracking, held-for-relay queue
+  attachment Save/Open, route-history tracking, held-for-relay queue, persistent
+  retry next hops and a directed end-to-end delivery receipt across relays
 - **Structured traffic**: interoperable plaintext ICS-213, ICS-214 and IARU
   emergency-message templates, plus a clearly identified local SITREP template
 
@@ -111,12 +115,12 @@ Heard-stations registry (built from every received control frame),
 **ROUTE_QUERY/ROUTE_OFFER** route discovery when no manual route exists,
 learned-path memory and **multi-hop auto-relay** (TTL + loop avoidance) are
 built and tested. Dynamic relay offers are ranked by direct reach, measured
-S/N, freshness and a deterministic callsign tie-break. The production
-**channel scanner** has explicit Network UI,
-dwell + activity/S-meter hold, session/payload safety pauses and worker-based
-CAT tuning. Its physical-radio tuning, hold and home-return path was confirmed
-working on 2026-08-03. The scanner is considered complete, but a future
-operator-designed **network builder** is planned to replace it.
+S/N, freshness and a deterministic callsign tie-break. The Network workspace
+now uses the former scanner page for a shared **network builder**: one topology
+derives a different local route table at every station. The scanner engine
+remains compatible with generated route channels but is no longer a primary
+operator workflow. A bounded RREQ/RREP extension is intentionally documentation
+only; see [the multi-hop discovery proposal](docs/MULTIHOP_DISCOVERY.md).
 
 Phase 3 is complete: AFSK 1200 (FM) and MFSK-16 (HF, ~0 dB SNR) modems
 with rate-1/2 K=7 convolutional FEC and audio device pickers. The production UI

@@ -1,29 +1,30 @@
-"""Network routes and heard-stations workspace."""
+"""Network routes, shared topology and heard-stations workspace."""
 
 from __future__ import annotations
 
 import time
 
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
+    QDialog,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QTabWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from ..routing import Route, locator_distance_bearing
 from ..i18n import dual, tr
+from ..routing import Route, Topology, locator_distance_bearing, write_topology_csv
 from .inputs import FrequencySpinBox, RowTable, UppercaseLineEdit
 from .runtime import ShellRuntime
+from .topology_wizard import TOPOLOGY_FILTER, TopologyWizard, topology_warning_text
 
 
 class NetworkWorkspace(QWidget):
@@ -38,14 +39,14 @@ class NetworkWorkspace(QWidget):
         tabs = QTabWidget()
         tabs.addTab(self._routes_page(), tr("network.routes"))
         tabs.addTab(self._heard_page(), tr("network.heard"))
-        tabs.addTab(self._scanner_page(), tr("network.scanner"))
+        tabs.addTab(self._topology_page(), tr("network.topology"))
         outer.addWidget(tabs, 1)
         self.refresh()
 
     def _routes_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        self.routes_table = RowTable(0, 7)
+        self.routes_table = RowTable(0, 8)
         self.routes_table.setHorizontalHeaderLabels(
             [
                 tr("network.destination"),
@@ -55,20 +56,17 @@ class NetworkWorkspace(QWidget):
                 tr("network.mode"),
                 tr("network.working_frequency"),
                 tr("network.working_mode"),
+                tr("network.route_source"),
             ]
         )
-        # Selecting a row loads it into the form below, so an existing entry
-        # can be corrected in place instead of being retyped from scratch.
         self.routes_table.itemSelectionChanged.connect(self._load_selected_route)
-        route_header = self.routes_table.horizontalHeader()
-        route_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        route_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in (2, 3, 4, 5, 6):
-            route_header.setSectionResizeMode(
-                column,
-                QHeaderView.ResizeMode.ResizeToContents,
-            )
+        header = self.routes_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column in (2, 3, 4, 5, 6, 7):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.routes_table, 1)
+
         form = QFormLayout()
         self.destination = UppercaseLineEdit()
         self.preferred = UppercaseLineEdit()
@@ -119,9 +117,7 @@ class NetworkWorkspace(QWidget):
     def _heard_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        detail = QLabel(
-            tr("network.heard_hint")
-        )
+        detail = QLabel(tr("network.heard_hint"))
         detail.setObjectName("Metadata")
         layout.addWidget(detail)
         self.heard_table = RowTable(0, 8)
@@ -143,63 +139,103 @@ class NetworkWorkspace(QWidget):
         layout.addWidget(self.heard_table, 1)
         return page
 
-    def _scanner_page(self) -> QWidget:
+    def _topology_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        hint = QLabel(tr("network.scanner_hint"))
+        hint = QLabel(tr("network.topology_hint"))
         hint.setWordWrap(True)
         hint.setObjectName("Metadata")
         layout.addWidget(hint)
-        form = QFormLayout()
-        self.scanner_status = QLabel()
-        self.scanner_current = QLabel("—")
-        self.scanner_channels = QLabel("0")
-        self.scanner_dwell = QSpinBox()
-        self.scanner_dwell.setRange(1, 300)
-        self.scanner_dwell.setValue(max(1, int(self.runtime.config.scan_dwell)))
-        self.scanner_use_signal = QCheckBox(tr("network.scanner_use_signal"))
-        self.scanner_threshold = QSpinBox()
-        self.scanner_threshold.setRange(-200, 200)
-        threshold = self.runtime.config.scan_signal_threshold
-        self.scanner_use_signal.setChecked(threshold is not None)
-        self.scanner_threshold.setValue(int(threshold or 0))
-        self.scanner_threshold.setEnabled(threshold is not None)
-        self.scanner_use_signal.toggled.connect(self.scanner_threshold.setEnabled)
-        form.addRow(tr("network.scanner_status"), self.scanner_status)
-        form.addRow(tr("network.scanner_current"), self.scanner_current)
-        form.addRow(tr("network.scanner_channels"), self.scanner_channels)
-        form.addRow(tr("network.scanner_dwell"), self.scanner_dwell)
-        form.addRow(self.scanner_use_signal)
-        form.addRow(tr("network.scanner_threshold"), self.scanner_threshold)
-        layout.addLayout(form)
-        self.scanner_toggle = QPushButton()
-        self.scanner_toggle.setObjectName("primaryAction")
-        self.scanner_toggle.clicked.connect(self._toggle_scanner)
-        layout.addWidget(self.scanner_toggle)
-        layout.addStretch()
+        self.topology_summary = QLabel()
+        self.topology_summary.setWordWrap(True)
+        layout.addWidget(self.topology_summary)
+        self.topology_table = RowTable(0, 7)
+        self.topology_table.setHorizontalHeaderLabels(
+            [
+                tr("network.station_a"),
+                tr("network.station_b"),
+                tr("network.direction"),
+                tr("network.frequency"),
+                tr("network.mode"),
+                tr("network.cost"),
+                tr("network.enabled"),
+            ]
+        )
+        header = self.topology_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column in range(2, 7):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.topology_table, 1)
+        self.topology_warnings = QLabel()
+        self.topology_warnings.setWordWrap(True)
+        self.topology_warnings.setObjectName("Metadata")
+        layout.addWidget(self.topology_warnings)
+        actions = QHBoxLayout()
+        wizard = QPushButton(tr("network.topology_wizard"))
+        wizard.setObjectName("primaryAction")
+        wizard.clicked.connect(self._open_topology_wizard)
+        recompute = QPushButton(tr("network.topology_recompute"))
+        recompute.clicked.connect(self._apply_topology)
+        export = QPushButton(tr("network.topology_export"))
+        export.clicked.connect(self._export_topology)
+        actions.addWidget(wizard)
+        actions.addWidget(recompute)
+        actions.addStretch()
+        actions.addWidget(export)
+        layout.addLayout(actions)
         return page
 
-    def _toggle_scanner(self) -> None:
-        operations = self.runtime.operations
-        if operations.scanner is not None:
-            operations.stop_scanner()
-        else:
-            self.runtime.config.scan_dwell = float(self.scanner_dwell.value())
-            self.runtime.config.scan_signal_threshold = (
-                int(self.scanner_threshold.value())
-                if self.scanner_use_signal.isChecked()
-                else None
-            )
-            self.runtime.config.save()
-            operations.start_scanner()
+    def _open_topology_wizard(self) -> None:
+        heard = {
+            station.callsign
+            for station in self.runtime.heard.active(time.monotonic())
+        }
+        wizard = TopologyWizard(
+            self.runtime.topology,
+            self.runtime.config.callsign,
+            heard,
+            self,
+        )
+        if wizard.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.runtime.topology = Topology(wizard.topology.links)
+        self.runtime.topology.save()
+        self._apply_topology()
+
+    def _apply_topology(self) -> None:
+        routes = self.runtime.topology.derive_routes(self.runtime.config.callsign)
+        self.runtime.routes.replace_topology(routes)
+        self.runtime.routes.save()
+        self.runtime.events.publish(
+            tr(
+                "network.topology_applied",
+                count=len(routes),
+                callsign=self.runtime.config.callsign,
+            ),
+            source="network",
+        )
+        self.runtime.refresh()
         self.refresh()
+
+    def _export_topology(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            tr("network.topology_export"),
+            "guardian-topology.csv",
+            TOPOLOGY_FILTER,
+        )
+        if not path:
+            return
+        try:
+            write_topology_csv(path, self.runtime.topology)
+        except OSError as exc:
+            QMessageBox.warning(self, tr("network.topology"), str(exc))
 
     def _selected_route(self) -> Route | None:
         row = self.routes_table.currentRow()
         item = self.routes_table.item(row, 0) if row >= 0 else None
-        if item is None:
-            return None
-        return self.runtime.routes.lookup(item.text())
+        return self.runtime.routes.lookup(item.text()) if item is not None else None
 
     def _load_selected_route(self) -> None:
         route = self._selected_route()
@@ -230,11 +266,7 @@ class NetworkWorkspace(QWidget):
         destination = self.destination.text().strip().upper()
         preferred = self.preferred.text().strip().upper()
         if not destination:
-            QMessageBox.warning(
-                self,
-                tr("network.routes"),
-                tr("network.route_required"),
-            )
+            QMessageBox.warning(self, tr("network.routes"), tr("network.route_required"))
             return
         self.runtime.routes.add(
             Route(
@@ -245,6 +277,7 @@ class NetworkWorkspace(QWidget):
                 self.mode.currentData(),
                 self.working_frequency.value(),
                 self.working_mode.currentData(),
+                "manual",
             )
         )
         self.runtime.routes.save()
@@ -265,6 +298,13 @@ class NetworkWorkspace(QWidget):
     def _remove_route(self) -> None:
         route = self._selected_route()
         if route is None:
+            return
+        if route.source == "topology":
+            QMessageBox.information(
+                self,
+                tr("network.topology"),
+                tr("network.topology_remove_hint"),
+            )
             return
         destination = route.destination
         self.runtime.routes.remove(destination)
@@ -288,11 +328,7 @@ class NetworkWorkspace(QWidget):
                 route.destination,
                 route.preferred,
                 route.backup,
-                (
-                    self.frequency.textFromValue(route.freq_hz)
-                    if route.freq_hz
-                    else ""
-                ),
+                self.frequency.textFromValue(route.freq_hz) if route.freq_hz else "",
                 route.mode,
                 (
                     self.working_frequency.textFromValue(route.working_freq_hz)
@@ -300,66 +336,67 @@ class NetworkWorkspace(QWidget):
                     else ""
                 ),
                 route.working_mode,
+                tr(f"network.source_{route.source}"),
             )
             for column, value in enumerate(values):
                 self.routes_table.setItem(row, column, QTableWidgetItem(value))
+
         now = time.monotonic()
         heard = self.runtime.heard.active(now)
         own_grid = (self.runtime.config.station_grid or "").upper()
         self.heard_table.setRowCount(len(heard))
         for row, station in enumerate(heard):
-            # Distance needs both ends of the path, so it stays empty until
-            # this station knows where it is itself.
-            relative = locator_distance_bearing(own_grid, station.grid) if (
-                own_grid and station.grid
-            ) else None
+            relative = (
+                locator_distance_bearing(own_grid, station.grid)
+                if own_grid and station.grid
+                else None
+            )
             values = (
                 station.callsign,
                 f"{station.age(now):.0f} s",
                 str(station.count),
                 "-" if station.last_snr is None else f"{station.last_snr:.1f} dB",
-                (
-                    self.frequency.textFromValue(station.last_freq_hz)
-                    if station.last_freq_hz
-                    else "-"
-                ),
+                self.frequency.textFromValue(station.last_freq_hz) if station.last_freq_hz else "-",
                 station.grid or "-",
                 "-" if relative is None else f"{relative[0]:.0f} km  {relative[1]:.0f}°",
                 station.last_frame,
             )
             for column, value in enumerate(values):
                 self.heard_table.setItem(row, column, QTableWidgetItem(value))
-        network = self.runtime.snapshots.read().network
-        if network.scanner_paused:
-            scanner_status = tr("network.scanner_paused")
-        elif network.scanner_holding:
-            scanner_status = tr("network.scanner_holding")
-        elif network.scanner_active:
-            scanner_status = tr("network.scanner_scanning")
-        else:
-            scanner_status = tr("network.scanner_stopped")
-        self.scanner_status.setText(scanner_status)
-        self.scanner_current.setText(
-            (
-                f"{network.scanner_frequency_hz / 1_000_000:.4f} MHz"
-                + (f" — {network.scanner_channel}" if network.scanner_channel else "")
+
+        topology = self.runtime.topology
+        derived = topology.derive_routes(self.runtime.config.callsign)
+        self.topology_summary.setText(
+            tr(
+                "network.topology_summary",
+                nodes=len(topology.nodes),
+                links=len(topology.links),
+                routes=len(derived),
+                callsign=self.runtime.config.callsign or "—",
             )
-            if network.scanner_frequency_hz
-            else "—"
         )
-        available = (
-            network.scanner_channels
-            if network.scanner_active
-            else len(self.runtime.operations.scanner_channels())
+        links = topology.links
+        self.topology_table.setRowCount(len(links))
+        for row, link in enumerate(links):
+            values = (
+                link.station_a,
+                link.station_b,
+                tr(f"network.direction_{link.direction}"),
+                self.frequency.textFromValue(link.freq_hz) if link.freq_hz else "",
+                link.mode,
+                f"{link.cost:g}",
+                tr("common.yes") if link.enabled else tr("common.no"),
+            )
+            for column, value in enumerate(values):
+                self.topology_table.setItem(row, column, QTableWidgetItem(value))
+        heard_callsigns = {station.callsign for station in heard}
+        warnings = (
+            topology.warnings(self.runtime.config.callsign, heard_callsigns)
+            if links
+            else []
         )
-        self.scanner_channels.setText(str(available))
-        self.scanner_toggle.setText(
-            tr("network.scanner_stop")
-            if network.scanner_active
-            else tr("network.scanner_start")
-        )
-        self.scanner_dwell.setEnabled(not network.scanner_active)
-        self.scanner_use_signal.setEnabled(not network.scanner_active)
-        self.scanner_threshold.setEnabled(
-            not network.scanner_active and self.scanner_use_signal.isChecked()
+        self.topology_warnings.setText(
+            "\n".join(f"• {topology_warning_text(warning)}" for warning in warnings)
+            if warnings
+            else tr("network.topology_no_warnings")
         )
