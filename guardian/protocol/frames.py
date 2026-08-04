@@ -71,6 +71,11 @@ class FrameType(IntEnum):
     # frame types and therefore never leave their current single channel.
     WORKING_OFFER = 12  # propose a separately configured payload channel
     WORKING_ACK = 13    # peer independently configured the same channel
+    # Multi-hop discovery is intentionally distinct from legacy one-hop
+    # ROUTE_QUERY/OFFER. Older releases reject these unknown types instead of
+    # accidentally flooding a query they do not understand.
+    MULTIHOP_RREQ = 14  # bounded broadcast seeking a path to destination
+    MULTIHOP_RREP = 15  # directed answer following reverse breadcrumbs
 
     @property
     def label(self) -> str:

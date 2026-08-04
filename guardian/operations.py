@@ -185,6 +185,20 @@ class Operations:
         exchange = 2 * airtime(self._CONTROL_FRAME_BYTES) + self._TURNAROUND
         net.ack_timeout = max(net.ack_timeout, exchange)
         net.start_timeout = max(net.start_timeout, exchange)
+        # A worst-case RREQ walks outward and its RREP walks back. Give every
+        # hop one full frame plus radio turnaround; on MFSK this is much longer
+        # than the legacy fixed eight-second one-hop offer window.
+        discovery = getattr(net, "discovery", None)
+        if discovery is None:
+            return
+        frame_time = airtime(self._CONTROL_FRAME_BYTES)
+        legs = 2 * max(2, int(self.config.discovery_ttl))
+        discovery.query_timeout = max(
+            discovery.query_timeout,
+            legs * (frame_time + self._TURNAROUND),
+        )
+        discovery.jitter_min = max(discovery.jitter_min, frame_time * 0.2)
+        discovery.jitter_max = max(discovery.jitter_max, frame_time * 0.6)
 
     def _build_net(self, transport) -> Orchestrator:
         net = Orchestrator(
@@ -196,8 +210,16 @@ class Operations:
             heard=self.heard,
             auto_route=self.config.auto_route,
             relay=self.config.auto_relay,
+            discovery_mode=self.config.discovery_mode,
+            discovery_forward=self.config.discovery_forward,
+            discovery_ttl=self.config.discovery_ttl,
+            discovery_route_lifetime=self.config.discovery_route_lifetime,
+            discovery_frame_budget=self.config.discovery_frame_budget,
+            discovery_allowlist=set(self.config.discovery_allowlist),
+            discovery_denylist=set(self.config.discovery_denylist),
         )
         net.on_alert = self._on_alert
+        net.on_discovery_event = self._on_discovery_event
         net.channel_frequency = self.current_frequency
         net.ptt_delay_request = self._vara_keying_delay_request
         net.position = self.beacon_position
@@ -233,11 +255,52 @@ class Operations:
         self.net.callsign = self.config.callsign.strip().upper()
         self.net.auto_route = self.config.auto_route
         self.net.relay = self.config.auto_relay
+        self.net.configure_discovery(
+            mode=self.config.discovery_mode,
+            forward=self.config.discovery_forward,
+            relay_enabled=self.config.auto_relay,
+            max_ttl=self.config.discovery_ttl,
+            route_lifetime=self.config.discovery_route_lifetime,
+            frame_budget=self.config.discovery_frame_budget,
+            allowlist=set(self.config.discovery_allowlist),
+            denylist=set(self.config.discovery_denylist),
+        )
         self.net.working_channel_offer = self._working_channel_offer
         self.net.working_channel_accept = self._working_channel_accept
         # A backend already executing owns its own reference. Replacing this
         # one therefore affects the next session without disrupting RF now.
         self.net.payload = self._make_payload_backend()
+
+    def _on_discovery_event(self, event) -> None:
+        self._log(
+            dual(
+                f"Discovery {event.kind}: {event.source} → "
+                f"{event.destination or 'network'} ({event.detail}).",
+                f"Discovery {event.kind}: {event.source} → "
+                f"{event.destination or 'síť'} ({event.detail}).",
+            ),
+            source="discovery",
+        )
+
+    def discover_route(self, destination: str):
+        """Start an operator-requested query only on a running control net."""
+        if self.audio_transport is None:
+            self._log(
+                dual(
+                    "Route discovery not started: the control channel is off.",
+                    "Hledání trasy nebylo spuštěno: řídicí kanál je vypnutý.",
+                ),
+                level=LogLevel.WARNING,
+                source="discovery",
+            )
+            return None
+        return self.net.discover_route(destination)
+
+    def approve_discovered_route(self, destination: str):
+        return self.net.approve_discovered_route(destination)
+
+    def clear_discovered_routes(self) -> None:
+        self.net.discovery.clear_routes()
 
     def beacon_position(self) -> str:
         """The locator our beacons carry, or "" to keep it off the air."""

@@ -1,6 +1,6 @@
 # Guardian development backlog
 
-_Aktualizováno: 2026-08-03_
+_Aktualizováno: 2026-08-04_
 
 Tento dokument je jediný pracovní seznam identifikovaných, ale nedokončených
 věcí. Historické plány a release notes popisují stav v okamžiku vydání; pro
@@ -29,6 +29,10 @@ volbu další práce je rozhodující tento backlog.
 2. **Ověřit workflow z v0.6.46 v terénu.** Zaznamenat operátorský test mapových
    vazeb a bezpečného ručního No-CAT QSY na skutečném rádiu; automatické a
    softwarové testy jsou hotové.
+3. **Ověřit 0.6.57 discovery na rádiu.** Začít v režimu Pouze sledovat, potom
+   na řetězci alespoň tří RF segmentů zkusit asistovaný RREQ/RREP, ruční
+   schválení, předání payloadu a návrat `DELIVERED`. Změřit skutečný airtime a
+   případně upravit TTL, jitter a rozpočet před automatizací.
 
 ## Vydáno v 0.6.53 — určení vlastního lokátoru
 
@@ -101,6 +105,26 @@ modelu terénu — vyžaduje stovky MB dat SRTM nebo síť.
 - **Vícehopové discovery pouze návrh:** RREQ/RREP, deduplikace, airtime limity,
   metrika, důvěra a smíšené verze jsou rozpracované v
   `MULTIHOP_DISCOVERY.md`; rádiový protokol 0.6.55 se nemění.
+
+## Vydáno v 0.6.57 — sledované a asistované vícehopové discovery
+
+- Nové typy `MULTIHOP_RREQ/RREP` používají expanding-ring TTL, deduplikaci,
+  jitter, reverse breadcrumbs, omezený opakovaný RREP a vysílací rozpočet.
+- Volatilní dynamické trasy expirují, mají metriku hopů/kvality a jsou oddělené
+  od ručních i topologických řádků. Zdroj je musí před payloadem schválit.
+- Nová podzáložka **Automatická síť** obsahuje režimy Vypnuto / Pouze sledovat /
+  Asistovaný, stav dotazů, tabulku tras, trust seznamy a ruční akce.
+- RF graf testuje přesnou síť S6–N1–N2–N3–S1, větve, smyčku, ztráty, duplikáty,
+  souběh a mezeru tvořenou starší verzí.
+
+### Navazující síťové kroky — záměrně mimo 0.6.57
+
+1. **Krok 9 — automatické použití discovery trasy.** Zapnout až po on-air
+   ověření asistovaného režimu; zachovat možnost monitor-only a nikdy
+   nepřepisovat ruční override.
+2. **Krok 10 — `LINK_ADVERT` / regenerace celé topologie.** RREQ umí najít
+   cestu jen ke známému cíli. Pro stanice, na které se nikdo nezeptal, navrhnout
+   verzovanou a airtime-omezenou výměnu skutečně potvrzených sousedů.
 
 ## P3 — release hardening a sledovaná rizika
 

@@ -11,6 +11,19 @@ from .grid import (
     to_locator,
 )
 from .heard import HeardStation, HeardStations
+from .discovery import (
+    DISCOVERY_ASSISTED,
+    DISCOVERY_MODES,
+    DISCOVERY_MONITOR,
+    DISCOVERY_OFF,
+    DynamicRoute,
+    DynamicRouteStore,
+    DiscoveryEngine,
+    DiscoveryEvent,
+    PendingQuery,
+    decode_discovery_metric,
+    encode_discovery_metric,
+)
 from .route_table import Route, RouteTable
 from .topology import DIRECTIONS, Link, Topology
 from .topology_csv import (
@@ -26,6 +39,17 @@ __all__ = [
     "RouteTable",
     "HeardStation",
     "HeardStations",
+    "DISCOVERY_ASSISTED",
+    "DISCOVERY_MODES",
+    "DISCOVERY_MONITOR",
+    "DISCOVERY_OFF",
+    "DynamicRoute",
+    "DynamicRouteStore",
+    "DiscoveryEngine",
+    "DiscoveryEvent",
+    "PendingQuery",
+    "decode_discovery_metric",
+    "encode_discovery_metric",
     "Link",
     "Topology",
     "DIRECTIONS",

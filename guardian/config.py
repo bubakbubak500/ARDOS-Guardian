@@ -162,6 +162,18 @@ class StationConfig:
     auto_route: bool = True    # discover a next hop (ROUTE_QUERY) when none known
     auto_relay: bool = False   # forward received messages toward their final dest
     auto_deliver: bool = True  # send waiting Outbox/Transit mail when the hop is heard
+    # Bounded multi-hop discovery is a separate, explicitly opt-in plane.
+    # "monitor" records compatible RREQ/RREP without transmitting; "assisted"
+    # may discover, but an originating station still needs operator approval
+    # before a learned route carries payload. Automatic mode is deliberately
+    # reserved for a later field-tested release.
+    discovery_mode: str = "monitor"  # "off" | "monitor" | "assisted"
+    discovery_forward: bool = False
+    discovery_ttl: int = 4
+    discovery_route_lifetime: float = 1800.0
+    discovery_frame_budget: int = 12
+    discovery_allowlist: list[str] = field(default_factory=list)
+    discovery_denylist: list[str] = field(default_factory=list)
     beacon_enabled: bool = False
     beacon_interval: float = 120.0   # seconds between presence beacons
     # This station's Maidenhead locator ("" = unknown). Set from the map or
@@ -239,6 +251,18 @@ class StationConfig:
             }
         else:
             clean.pop("radio_profiles", None)
+        if clean.get("discovery_mode") not in {"off", "monitor", "assisted"}:
+            clean["discovery_mode"] = "monitor"
+        for name in ("discovery_allowlist", "discovery_denylist"):
+            values = clean.get(name)
+            if isinstance(values, list):
+                clean[name] = [
+                    str(value).strip().upper()
+                    for value in values
+                    if str(value).strip()
+                ]
+            else:
+                clean.pop(name, None)
         return cls(**clean)
 
     def save(self, path: Path | str | None = None) -> Path:

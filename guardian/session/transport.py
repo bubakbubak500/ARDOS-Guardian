@@ -93,3 +93,77 @@ class LoopbackBus:
     @property
     def idle(self) -> bool:
         return not self._queue
+
+
+class GraphRadioBus:
+    """Deterministic RF graph where an endpoint hears only linked neighbours.
+
+    Unlike :class:`LoopbackBus`, this models hidden stations and real relay
+    depth.  It is useful both for protocol tests and operator-facing dry-run
+    simulations.  Links are undirected by default; ``directed=True`` keeps the
+    exact supplied direction.  A drop callback can emulate selective loss.
+    """
+
+    def __init__(
+        self,
+        links: list[tuple[str, str]] | set[tuple[str, str]],
+        *,
+        directed: bool = False,
+        drop: Callable[[str, str, ControlFrame], bool] | None = None,
+        snr: dict[tuple[str, str], float] | None = None,
+        monitor: Callable[[str, ControlFrame], None] | None = None,
+    ) -> None:
+        self._links = {
+            (left.strip().upper(), right.strip().upper()) for left, right in links
+        }
+        if not directed:
+            self._links |= {(right, left) for left, right in self._links}
+        self._endpoints: dict[str, _GraphEndpoint] = {}
+        self._queue: deque[tuple[_GraphEndpoint, ControlFrame]] = deque()
+        self.drop = drop
+        self.snr = {
+            (left.strip().upper(), right.strip().upper()): value
+            for (left, right), value in (snr or {}).items()
+        }
+        self.monitor = monitor
+
+    def endpoint(self, callsign: str) -> "_GraphEndpoint":
+        call = callsign.strip().upper()
+        endpoint = _GraphEndpoint(self, call)
+        self._endpoints[call] = endpoint
+        return endpoint
+
+    def _enqueue(self, sender: "_GraphEndpoint", frame: ControlFrame) -> None:
+        self._queue.append((sender, frame))
+
+    def pump(self, max_frames: int = 1000) -> int:
+        delivered = 0
+        while self._queue and delivered < max_frames:
+            sender, frame = self._queue.popleft()
+            if self.monitor is not None:
+                self.monitor(sender.callsign, frame)
+            for receiver, endpoint in self._endpoints.items():
+                if (sender.callsign, receiver) not in self._links:
+                    continue
+                if self.drop is not None and self.drop(sender.callsign, receiver, frame):
+                    continue
+                endpoint.last_frame_snr = self.snr.get((sender.callsign, receiver))
+                if endpoint.on_frame is not None:
+                    endpoint.on_frame(frame)
+            delivered += 1
+        return delivered
+
+    @property
+    def idle(self) -> bool:
+        return not self._queue
+
+
+class _GraphEndpoint(ControlTransport):
+    def __init__(self, bus: GraphRadioBus, callsign: str) -> None:
+        self._bus = bus
+        self.callsign = callsign
+        self.on_frame = None
+        self.last_frame_snr = None
+
+    def send(self, frame: ControlFrame) -> None:
+        self._bus._enqueue(self, frame)

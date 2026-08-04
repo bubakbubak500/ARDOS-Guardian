@@ -3,8 +3,10 @@
 Design note written 2026-07-28 after CSV route import landed in 0.6.26.
 **Implemented in 0.6.55:** shared link topology, direction/cost, CSV + wizard,
 per-station route derivation, manual overrides and heard-next-hop warnings.
-True multi-hop over-the-air discovery remains a separate theoretical proposal
-in [`MULTIHOP_DISCOVERY.md`](MULTIHOP_DISCOVERY.md).
+**Implemented in 0.6.57:** bounded multi-hop RREQ/RREP, expiring dynamic routes,
+monitor-only and assisted operation, reverse breadcrumbs and airtime/trust
+limits. Automatic route use and link advertisements remain later steps; see
+[`MULTIHOP_DISCOVERY.md`](MULTIHOP_DISCOVERY.md).
 
 ## The problem
 
@@ -105,4 +107,5 @@ block — the operator may be importing hours before anyone powers up.
    or not-yet-heard first hops.
 
 Propagation remains runtime evidence rather than a property of the file.
-Heard/learned paths and one-hop discovery continue to complement the plan.
+Heard/learned paths, one-hop discovery and the separately expiring assisted
+multi-hop layer continue to complement the plan. None overwrites manual rows.

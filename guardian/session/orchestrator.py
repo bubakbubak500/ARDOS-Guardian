@@ -44,7 +44,17 @@ from ..protocol import (
     encode_alert,
     encode_ptt_delay,
 )
-from ..routing import MAX_LOCATOR_CHARS, HeardStations, is_locator
+from ..routing import (
+    DISCOVERY_ASSISTED,
+    DISCOVERY_MONITOR,
+    MAX_LOCATOR_CHARS,
+    DiscoveryEngine,
+    DiscoveryEvent,
+    DynamicRoute,
+    HeardStations,
+    PendingQuery,
+    is_locator,
+)
 from .transport import ControlTransport
 
 DISCOVERY_TIMEOUT = 8.0
@@ -182,6 +192,8 @@ class SessionState(Enum):
     IDLE = "idle"
     # initiator
     ROUTE_DISCOVERY = "discovery"  # no route known; ROUTE_QUERY out, gathering offers
+    MULTIHOP_DISCOVERY = "multihop-discovery"  # bounded RREQ/RREP in progress
+    WAITING_ROUTE_APPROVAL = "route-approval"  # assisted result awaits operator
     ANNOUNCING = "announcing"      # sent HAVE_MSG, waiting for ACK
     NEGOTIATING_WORKING = "working"  # both peers prove the same opt-in payload channel
     WAITING_BUSY = "waiting"       # peer was busy, will retry
@@ -246,6 +258,7 @@ class Message:
     # Reverse breadcrumb for a directed end-to-end delivery receipt.
     previous_hop: str = ""
     receipt_forwarded: bool = False
+    discovery_attempted: bool = False
 
 
 class Orchestrator:
@@ -277,6 +290,13 @@ class Orchestrator:
         auto_route: bool = True,
         relay: bool = False,
         clock: Callable[[], float] | None = None,
+        discovery_mode: str = DISCOVERY_MONITOR,
+        discovery_forward: bool = False,
+        discovery_ttl: int = 4,
+        discovery_route_lifetime: float = 1800.0,
+        discovery_frame_budget: int = 12,
+        discovery_allowlist: set[str] | None = None,
+        discovery_denylist: set[str] | None = None,
     ):
         self.callsign = callsign.strip().upper()
         self.transport = transport
@@ -328,6 +348,22 @@ class Orchestrator:
         self._alert_counter = 0
         self.sessions: dict[int, Message] = {}
         self._now = 0.0  # last tick time, used when reacting to frames
+        self.on_discovery_event: Callable[[DiscoveryEvent], None] | None = None
+        self.discovery = DiscoveryEngine(
+            self.callsign,
+            self.transport.send,
+            mode=discovery_mode,
+            forward=discovery_forward,
+            relay_enabled=relay,
+            max_ttl=discovery_ttl,
+            route_lifetime=discovery_route_lifetime,
+            frame_budget=discovery_frame_budget,
+            allowlist=discovery_allowlist,
+            denylist=discovery_denylist,
+            on_event=self._on_discovery_event,
+            on_result=self._on_discovery_result,
+            on_failure=self._on_discovery_failure,
+        )
 
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
@@ -360,6 +396,8 @@ class Orchestrator:
             msg.next_hop = hop
             self._begin_announce(msg)
             self._emit(msg, f"announcing to {hop} (final {final_dest}, via {how})")
+        elif self._start_multihop(msg, "message"):
+            pass
         elif self.auto_route:
             # No route known — discover one with a ROUTE_QUERY broadcast.
             self._enter(msg, SessionState.ROUTE_DISCOVERY)
@@ -380,22 +418,100 @@ class Orchestrator:
         except Exception:       # noqa: BLE001 - a config fault must not stop mail
             return 0
 
-    def _resolve_next_hop(self, final_dest: str, explicit: str | None = None) -> tuple[str | None, str]:
-        """Pick a next hop: explicit > manual route > learned > directly heard."""
+    def _resolve_next_hop(
+        self,
+        final_dest: str,
+        explicit: str | None = None,
+        *,
+        for_relay: bool = False,
+    ) -> tuple[str | None, str]:
+        """Pick a next hop without letting volatile evidence replace a lock."""
         hop = (explicit or "").strip().upper()
         if hop:
             return hop, "manual"
         if self.routes is not None:
             route = self.routes.lookup(final_dest)
-            if route is not None:
+            if route is not None and route.source == "manual":
                 if route.preferred:
-                    return route.preferred, "route"
-                return final_dest, "direct route"
-        if final_dest in self.learned_paths:
-            return self.learned_paths[final_dest], "learned"
+                    return route.preferred, "manual route"
+                return final_dest, "manual direct route"
         if self.heard.is_heard(final_dest, self._now):
             return final_dest, "heard"
+        dynamic = self.discovery.routes.best(
+            final_dest,
+            self._now,
+            approved_only=not for_relay,
+        )
+        if dynamic is not None:
+            return dynamic.next_hop, "assisted discovery" if dynamic.approved else "relay discovery"
+        if self.routes is not None:
+            route = self.routes.lookup(final_dest)
+            if route is not None:
+                if route.preferred:
+                    return route.preferred, "topology"
+                return final_dest, "topology direct"
+        if final_dest in self.learned_paths:
+            return self.learned_paths[final_dest], "learned"
         return None, "none"
+
+    def configure_discovery(self, **settings) -> None:
+        """Apply operator discovery settings without rebuilding the radio."""
+        settings.setdefault("relay_enabled", self.relay)
+        self.discovery.configure(callsign=self.callsign, **settings)
+
+    def discover_route(self, destination: str) -> PendingQuery | None:
+        """Operator-requested assisted discovery, independent of a message."""
+        return self.discovery.start(destination, context="manual")
+
+    def approve_discovered_route(self, destination: str) -> DynamicRoute | None:
+        route = self.discovery.approve(destination)
+        if route is None:
+            return None
+        for msg in list(self.sessions.values()):
+            if (
+                msg.direction == "out"
+                and msg.final_dest == route.destination
+                and msg.state is SessionState.WAITING_ROUTE_APPROVAL
+            ):
+                msg.next_hop = route.next_hop
+                self._begin_announce(msg)
+                self._emit(msg, f"operator accepted discovered route via {route.next_hop}")
+        return route
+
+    def _start_multihop(self, msg: Message, context: str) -> bool:
+        if not self.discovery.can_transmit or msg.discovery_attempted:
+            return False
+        msg.discovery_attempted = True
+        pending = self.discovery.start(
+            msg.final_dest,
+            query_id=msg.msg_id,
+            context=context,
+            priority=msg.priority,
+        )
+        if pending is None:
+            return False
+        self._enter(msg, SessionState.MULTIHOP_DISCOVERY)
+        self._emit(msg, f"multi-hop discovery started for {msg.final_dest}")
+        return True
+
+    def _on_discovery_event(self, event: DiscoveryEvent) -> None:
+        if self.on_discovery_event is not None:
+            self.on_discovery_event(event)
+
+    def _on_discovery_result(self, route: DynamicRoute, query: PendingQuery) -> None:
+        msg = self.sessions.get(query.query_id)
+        if msg is None or msg.state is not SessionState.MULTIHOP_DISCOVERY:
+            return
+        self._enter(msg, SessionState.WAITING_ROUTE_APPROVAL)
+        self._emit(
+            msg,
+            f"route found via {route.next_hop} ({route.hops} hops); awaiting operator approval",
+        )
+
+    def _on_discovery_failure(self, query: PendingQuery, reason: str) -> None:
+        msg = self.sessions.get(query.query_id)
+        if msg is not None and msg.state is SessionState.MULTIHOP_DISCOVERY:
+            self._fail(msg, reason)
 
     def _begin_announce(self, msg: Message) -> None:
         self._enter(msg, SessionState.ANNOUNCING)
@@ -523,11 +639,13 @@ class Orchestrator:
         )
         relay.ptt_delay_ms = own_delay
         self.sessions[inbound.msg_id] = relay  # the outbound leg takes over
-        hop, how = self._resolve_next_hop(relay.final_dest)
+        hop, how = self._resolve_next_hop(relay.final_dest, for_relay=True)
         if hop:
             relay.next_hop = hop
             self._begin_announce(relay)
             self._emit(relay, f"relaying to {hop} (final {relay.final_dest}, ttl {relay.ttl})")
+        elif self._start_multihop(relay, "relay"):
+            pass
         elif self.auto_route:
             self._enter(relay, SessionState.ROUTE_DISCOVERY)
             self._send(FrameType.ROUTE_QUERY, relay)
@@ -549,6 +667,7 @@ class Orchestrator:
     def tick(self, now: float) -> None:
         """Drive timeouts/retransmits. Call periodically."""
         self._now = now
+        self.discovery.tick(now)
         self._tick_alerts(now)
         if self._seen_delivery_receipts:
             self._seen_delivery_receipts = {
@@ -667,6 +786,11 @@ class Orchestrator:
                 grid=grid if is_locator(grid) else "",
                 frame=frame.type.name,
             )
+        if self.discovery.receive(
+            frame,
+            snr=getattr(self.transport, "last_frame_snr", None),
+        ):
+            return
         self._dispatch(frame)
 
     def _current_frequency(self) -> int | None:
@@ -1010,6 +1134,9 @@ class Orchestrator:
             # Learn that this next hop reaches this destination (for next time).
             if msg.next_hop:
                 self.learned_paths[msg.final_dest] = msg.next_hop
+                self.discovery.routes.mark_success(
+                    msg.final_dest, msg.next_hop, self._now
+                )
             if msg.next_hop == msg.final_dest:
                 # The station confirming receipt *is* the final destination, so
                 # RECEIVED already proves end-to-end delivery. Waiting for a
@@ -1105,6 +1232,11 @@ class Orchestrator:
                 self._send(FrameType.HAVE_MSG, msg)
                 self._emit(msg, f"no ACK — trying backup hop {backup}")
                 return
+        if msg.next_hop:
+            self.discovery.routes.mark_failure(msg.final_dest, msg.next_hop)
+        if self._start_multihop(msg, "failed-route"):
+            self._emit(msg, "configured/learned hop failed — seeking an assisted route")
+            return
         self._fail(msg, "no ACK from next hop")
 
     def _mine(self, f: ControlFrame, direction: str) -> Message | None:

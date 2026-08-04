@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import time
+import re
 
 from PySide6.QtWidgets import (
     QComboBox,
+    QCheckBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -14,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTabWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -36,11 +39,12 @@ class NetworkWorkspace(QWidget):
         title = QLabel(tr("network.title"))
         title.setObjectName("PanelHeader")
         outer.addWidget(title)
-        tabs = QTabWidget()
-        tabs.addTab(self._routes_page(), tr("network.routes"))
-        tabs.addTab(self._heard_page(), tr("network.heard"))
-        tabs.addTab(self._topology_page(), tr("network.topology"))
-        outer.addWidget(tabs, 1)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._routes_page(), tr("network.routes"))
+        self.tabs.addTab(self._heard_page(), tr("network.heard"))
+        self.tabs.addTab(self._topology_page(), tr("network.topology"))
+        self.tabs.addTab(self._discovery_page(), tr("network.discovery"))
+        outer.addWidget(self.tabs, 1)
         self.refresh()
 
     def _routes_page(self) -> QWidget:
@@ -185,6 +189,195 @@ class NetworkWorkspace(QWidget):
         actions.addWidget(export)
         layout.addLayout(actions)
         return page
+
+    def _discovery_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        hint = QLabel(tr("network.discovery_hint"))
+        hint.setWordWrap(True)
+        hint.setObjectName("Metadata")
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        self.discovery_mode = QComboBox()
+        for mode in ("off", "monitor", "assisted"):
+            self.discovery_mode.addItem(tr(f"network.discovery_mode_{mode}"), mode)
+        index = self.discovery_mode.findData(self.runtime.config.discovery_mode)
+        self.discovery_mode.setCurrentIndex(max(0, index))
+        self.discovery_forward = QCheckBox(tr("network.discovery_forward"))
+        self.discovery_forward.setChecked(self.runtime.config.discovery_forward)
+        self.discovery_ttl = QSpinBox()
+        self.discovery_ttl.setRange(2, 8)
+        self.discovery_ttl.setValue(self.runtime.config.discovery_ttl)
+        self.discovery_lifetime = QSpinBox()
+        self.discovery_lifetime.setRange(1, 1440)
+        self.discovery_lifetime.setSuffix(" min")
+        self.discovery_lifetime.setValue(
+            max(1, int(self.runtime.config.discovery_route_lifetime / 60))
+        )
+        self.discovery_budget = QSpinBox()
+        self.discovery_budget.setRange(1, 120)
+        self.discovery_budget.setSuffix(tr("network.discovery_frames_minute_suffix"))
+        self.discovery_budget.setValue(self.runtime.config.discovery_frame_budget)
+        self.discovery_allowlist = UppercaseLineEdit(
+            ", ".join(self.runtime.config.discovery_allowlist)
+        )
+        self.discovery_denylist = UppercaseLineEdit(
+            ", ".join(self.runtime.config.discovery_denylist)
+        )
+        form.addRow(tr("network.discovery_mode"), self.discovery_mode)
+        form.addRow(self.discovery_forward)
+        form.addRow(tr("network.discovery_ttl"), self.discovery_ttl)
+        form.addRow(tr("network.discovery_lifetime"), self.discovery_lifetime)
+        form.addRow(tr("network.discovery_budget"), self.discovery_budget)
+        form.addRow(tr("network.discovery_allowlist"), self.discovery_allowlist)
+        form.addRow(tr("network.discovery_denylist"), self.discovery_denylist)
+        layout.addLayout(form)
+
+        settings_row = QHBoxLayout()
+        save = QPushButton(tr("network.discovery_save"))
+        save.clicked.connect(self._save_discovery_settings)
+        self.discovery_status = QLabel()
+        self.discovery_status.setWordWrap(True)
+        self.discovery_status.setObjectName("Metadata")
+        settings_row.addWidget(save)
+        settings_row.addWidget(self.discovery_status, 1)
+        layout.addLayout(settings_row)
+
+        query_row = QHBoxLayout()
+        self.discovery_destination = UppercaseLineEdit()
+        self.discovery_destination.setPlaceholderText("S1 / OK1AAA")
+        query = QPushButton(tr("network.discovery_start"))
+        query.setObjectName("primaryAction")
+        query.clicked.connect(self._start_discovery)
+        query_row.addWidget(QLabel(tr("network.destination")))
+        query_row.addWidget(self.discovery_destination, 1)
+        query_row.addWidget(query)
+        layout.addLayout(query_row)
+
+        self.discovery_routes = RowTable(0, 8)
+        self.discovery_routes.setHorizontalHeaderLabels(
+            [
+                tr("network.destination"),
+                tr("network.preferred"),
+                tr("network.discovery_hops"),
+                tr("network.discovery_metric"),
+                tr("network.age"),
+                tr("network.discovery_expires"),
+                tr("network.discovery_approved"),
+                tr("network.discovery_state"),
+            ]
+        )
+        discovery_header = self.discovery_routes.horizontalHeader()
+        discovery_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        discovery_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column in range(2, 8):
+            discovery_header.setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents
+            )
+        layout.addWidget(self.discovery_routes, 1)
+
+        route_actions = QHBoxLayout()
+        approve = QPushButton(tr("network.discovery_approve"))
+        approve.clicked.connect(self._approve_discovered_route)
+        clear = QPushButton(tr("network.discovery_clear"))
+        clear.clicked.connect(self._clear_discovered_routes)
+        route_actions.addWidget(approve)
+        route_actions.addStretch()
+        route_actions.addWidget(clear)
+        layout.addLayout(route_actions)
+
+        self.discovery_pending = RowTable(0, 5)
+        self.discovery_pending.setMaximumHeight(130)
+        self.discovery_pending.setHorizontalHeaderLabels(
+            [
+                tr("network.discovery_query_id"),
+                tr("network.destination"),
+                tr("network.discovery_ttl"),
+                tr("network.discovery_context"),
+                tr("network.discovery_state"),
+            ]
+        )
+        self.discovery_pending.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.Stretch
+        )
+        layout.addWidget(self.discovery_pending)
+        self.discovery_recent = QLabel()
+        self.discovery_recent.setWordWrap(True)
+        self.discovery_recent.setObjectName("Metadata")
+        layout.addWidget(self.discovery_recent)
+        return page
+
+    @staticmethod
+    def _callsign_list(text: str) -> list[str]:
+        return [
+            item.strip().upper()
+            for item in re.split(r"[,;\s]+", text or "")
+            if item.strip()
+        ]
+
+    def _save_discovery_settings(self) -> None:
+        config = self.runtime.config
+        config.discovery_mode = self.discovery_mode.currentData()
+        config.discovery_forward = self.discovery_forward.isChecked()
+        config.discovery_ttl = self.discovery_ttl.value()
+        config.discovery_route_lifetime = float(self.discovery_lifetime.value() * 60)
+        config.discovery_frame_budget = self.discovery_budget.value()
+        config.discovery_allowlist = self._callsign_list(
+            self.discovery_allowlist.text()
+        )
+        config.discovery_denylist = self._callsign_list(
+            self.discovery_denylist.text()
+        )
+        config.save()
+        self.runtime.operations.apply_network_settings()
+        self.runtime.events.publish(
+            tr("network.discovery_saved"), source="discovery"
+        )
+        self.refresh()
+
+    def _start_discovery(self) -> None:
+        destination = self.discovery_destination.text().strip().upper()
+        if not destination:
+            QMessageBox.warning(
+                self, tr("network.discovery"), tr("network.route_required")
+            )
+            return
+        pending = self.runtime.operations.discover_route(destination)
+        if pending is None:
+            QMessageBox.information(
+                self,
+                tr("network.discovery"),
+                tr("network.discovery_not_started"),
+            )
+            return
+        self.refresh()
+
+    def _selected_discovered_destination(self) -> str:
+        row = self.discovery_routes.currentRow()
+        item = self.discovery_routes.item(row, 0) if row >= 0 else None
+        return item.text() if item is not None else ""
+
+    def _approve_discovered_route(self) -> None:
+        destination = self._selected_discovered_destination()
+        if not destination:
+            return
+        route = self.runtime.operations.approve_discovered_route(destination)
+        if route is None:
+            return
+        self.runtime.events.publish(
+            tr(
+                "network.discovery_route_approved",
+                destination=route.destination,
+                next_hop=route.next_hop,
+            ),
+            source="discovery",
+        )
+        self.refresh()
+
+    def _clear_discovered_routes(self) -> None:
+        self.runtime.operations.clear_discovered_routes()
+        self.refresh()
 
     def _open_topology_wizard(self) -> None:
         heard = {
@@ -399,4 +592,76 @@ class NetworkWorkspace(QWidget):
             "\n".join(f"• {topology_warning_text(warning)}" for warning in warnings)
             if warnings
             else tr("network.topology_no_warnings")
+        )
+
+        discovery = self.runtime.operations.net.discovery
+        routes = discovery.routes.routes(now, include_expired=True)
+        self.discovery_routes.setRowCount(len(routes))
+        for row, route in enumerate(routes):
+            remaining = max(0.0, route.expires_at - now)
+            state = (
+                tr("network.discovery_state_expired")
+                if not route.active(now)
+                else tr("network.discovery_state_degraded")
+                if route.failures
+                else tr("network.discovery_state_live")
+            )
+            values = (
+                route.destination,
+                route.next_hop,
+                str(route.hops),
+                str(route.metric),
+                f"{max(0.0, now - route.learned_at):.0f} s",
+                f"{remaining / 60:.0f} min",
+                tr("common.yes") if route.approved else tr("common.no"),
+                state,
+            )
+            for column, value in enumerate(values):
+                self.discovery_routes.setItem(
+                    row, column, QTableWidgetItem(value)
+                )
+
+        pending = list(discovery.pending.values())
+        self.discovery_pending.setRowCount(len(pending))
+        for row, query in enumerate(pending):
+            state = (
+                tr("network.discovery_state_settling")
+                if query.best_route is not None
+                else tr("network.discovery_state_querying")
+            )
+            values = (
+                f"{query.query_id:08X}",
+                query.destination,
+                str(query.round_ttl),
+                query.context,
+                state,
+            )
+            for column, value in enumerate(values):
+                self.discovery_pending.setItem(
+                    row, column, QTableWidgetItem(value)
+                )
+        recent = list(discovery.events)[:5]
+        self.discovery_recent.setText(
+            "\n".join(
+                f"• {event.kind}: {event.source} → "
+                f"{event.destination or '—'} · {event.detail}"
+                for event in recent
+            )
+            if recent
+            else tr("network.discovery_no_activity")
+        )
+        relay_warning = (
+            tr("network.discovery_relay_warning")
+            if self.runtime.config.discovery_forward
+            and not self.runtime.config.auto_relay
+            else ""
+        )
+        self.discovery_status.setText(
+            tr(
+                "network.discovery_status",
+                mode=tr(f"network.discovery_mode_{discovery.mode}"),
+                routes=len([route for route in routes if route.active(now)]),
+                pending=len(pending),
+            )
+            + (f"  {relay_warning}" if relay_warning else "")
         )

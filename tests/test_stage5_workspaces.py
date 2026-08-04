@@ -326,7 +326,12 @@ def test_network_tables_are_read_only_row_selectors() -> None:
     runtime.routes = RouteTable()
     workspace = NetworkWorkspace(runtime)
     try:
-        for table in (workspace.routes_table, workspace.heard_table):
+        for table in (
+            workspace.routes_table,
+            workspace.heard_table,
+            workspace.discovery_routes,
+            workspace.discovery_pending,
+        ):
             assert (
                 table.selectionBehavior()
                 == QAbstractItemView.SelectionBehavior.SelectRows
@@ -336,6 +341,92 @@ def test_network_tables_are_read_only_row_selectors() -> None:
                 == QAbstractItemView.EditTrigger.NoEditTriggers
             )
             assert not table.showGrid()
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_network_workspace_has_automatic_network_tab_in_monitor_mode() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.config.discovery_mode = "monitor"
+    workspace = NetworkWorkspace(runtime)
+    try:
+        labels = [workspace.tabs.tabText(index) for index in range(workspace.tabs.count())]
+        assert labels[-1] == tr("network.discovery")
+        assert workspace.discovery_mode.currentData() == "monitor"
+        assert workspace.discovery_routes.rowCount() == 0
+        assert "0" in workspace.discovery_status.text()
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_discovery_tab_saves_assisted_limits_without_enabling_automatic_use(
+    monkeypatch,
+) -> None:
+    _application()
+    runtime = ShellRuntime()
+    monkeypatch.setattr(runtime.config, "save", lambda *args, **kwargs: None)
+    workspace = NetworkWorkspace(runtime)
+    try:
+        workspace.discovery_mode.setCurrentIndex(
+            workspace.discovery_mode.findData("assisted")
+        )
+        workspace.discovery_forward.setChecked(True)
+        workspace.discovery_ttl.setValue(6)
+        workspace.discovery_lifetime.setValue(45)
+        workspace.discovery_budget.setValue(9)
+        workspace.discovery_allowlist.setText("n1, n2")
+        workspace.discovery_denylist.setText("bad")
+        workspace._save_discovery_settings()
+
+        assert runtime.config.discovery_mode == "assisted"
+        assert runtime.config.discovery_forward is True
+        assert runtime.config.discovery_ttl == 6
+        assert runtime.config.discovery_route_lifetime == 2700
+        assert runtime.config.discovery_frame_budget == 9
+        assert runtime.config.discovery_allowlist == ["N1", "N2"]
+        assert runtime.config.discovery_denylist == ["BAD"]
+        assert runtime.operations.net.discovery.mode == "assisted"
+        assert runtime.operations.net.discovery.max_ttl == 6
+        # This release has no automatic mode: a learned path still needs approval.
+        learned = runtime.operations.net.discovery.routes.learn(
+            "S1", "N1", 4, 1, 99, time.monotonic()
+        )
+        assert learned.approved is False
+        assert runtime.operations.net._resolve_next_hop("S1") == (None, "none")
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_discovery_tab_displays_and_approves_a_volatile_route() -> None:
+    _application()
+    runtime = ShellRuntime()
+    workspace = NetworkWorkspace(runtime)
+    try:
+        now = time.monotonic()
+        runtime.operations.net.tick(now)
+        runtime.operations.net.discovery.routes.learn("S1", "N1", 4, 2, 101, now)
+        workspace.refresh()
+        assert workspace.discovery_routes.rowCount() == 1
+        assert workspace.discovery_routes.item(0, 0).text() == "S1"
+        assert workspace.discovery_routes.item(0, 1).text() == "N1"
+        assert workspace.discovery_routes.item(0, 6).text() == tr("common.no")
+
+        workspace.discovery_routes.selectRow(0)
+        workspace._approve_discovered_route()
+        route = runtime.operations.net.discovery.routes.best(
+            "S1", now, approved_only=True
+        )
+        assert route is not None
+        assert runtime.operations.net._resolve_next_hop("S1") == (
+            "N1",
+            "assisted discovery",
+        )
+        # Approval affects only the volatile store, never the planned route table.
+        assert runtime.routes.lookup("S1") is None
     finally:
         workspace.close()
         runtime.close()

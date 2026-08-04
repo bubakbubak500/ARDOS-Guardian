@@ -430,6 +430,81 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Tato trasa je odvozená. Upravte odpovídající linku v Sestavovači sítě "
         "nebo řádek uložte jako ruční override.",
     ),
+    "network.discovery": ("Automatic network", "Automatická síť"),
+    "network.discovery_hint": (
+        "Monitor or explicitly run bounded multi-hop RREQ/RREP discovery. "
+        "Learned routes expire and never overwrite manual or imported topology. "
+        "Assisted routes carry payload only after operator approval.",
+        "Sledujte nebo výslovně spusťte omezené vícehopové hledání RREQ/RREP. "
+        "Naučené trasy expirují a nikdy nepřepisují ruční ani importovanou "
+        "topologii. Asistovaná trasa přenese obsah až po schválení operátorem.",
+    ),
+    "network.discovery_mode": ("Operating mode", "Provozní režim"),
+    "network.discovery_mode_off": ("Off", "Vypnuto"),
+    "network.discovery_mode_monitor": ("Monitor only", "Pouze sledovat"),
+    "network.discovery_mode_assisted": ("Assisted", "Asistovaný"),
+    "network.discovery_forward": (
+        "Forward bounded discovery requests",
+        "Předávat omezené discovery dotazy",
+    ),
+    "network.discovery_ttl": ("Maximum discovery TTL", "Maximální discovery TTL"),
+    "network.discovery_lifetime": ("Route lifetime", "Životnost trasy"),
+    "network.discovery_budget": (
+        "Transmit budget",
+        "Vysílací rozpočet",
+    ),
+    "network.discovery_frames_minute_suffix": (
+        " frames/min",
+        " rámců/min",
+    ),
+    "network.discovery_allowlist": (
+        "Relay allowlist (optional)",
+        "Povolené relay stanice (volitelné)",
+    ),
+    "network.discovery_denylist": (
+        "Relay denylist",
+        "Zakázané relay stanice",
+    ),
+    "network.discovery_save": ("Save discovery settings", "Uložit discovery nastavení"),
+    "network.discovery_saved": (
+        "Multi-hop discovery settings saved.",
+        "Nastavení vícehopového discovery bylo uloženo.",
+    ),
+    "network.discovery_start": ("Find route", "Najít trasu"),
+    "network.discovery_not_started": (
+        "Discovery needs Assisted mode and a running control channel.",
+        "Discovery vyžaduje Asistovaný režim a spuštěný řídicí kanál.",
+    ),
+    "network.discovery_hops": ("Hops", "Skoky"),
+    "network.discovery_metric": ("Metric", "Metrika"),
+    "network.discovery_expires": ("Expires in", "Expiruje za"),
+    "network.discovery_approved": ("Approved", "Schválená"),
+    "network.discovery_state": ("State", "Stav"),
+    "network.discovery_state_live": ("Live", "Živá"),
+    "network.discovery_state_degraded": ("Failed / unapproved", "Po selhání / neschválená"),
+    "network.discovery_state_expired": ("Expired", "Expirovaná"),
+    "network.discovery_state_querying": ("Querying", "Hledá se"),
+    "network.discovery_state_settling": ("Collecting replies", "Sbírá odpovědi"),
+    "network.discovery_approve": ("Approve selected route", "Schválit vybranou trasu"),
+    "network.discovery_clear": ("Clear dynamic routes", "Vymazat dynamické trasy"),
+    "network.discovery_query_id": ("Query ID", "ID dotazu"),
+    "network.discovery_context": ("Reason", "Důvod"),
+    "network.discovery_no_activity": (
+        "No multi-hop discovery activity in this run.",
+        "V tomto spuštění zatím neproběhla vícehopová discovery aktivita.",
+    ),
+    "network.discovery_relay_warning": (
+        "Forwarding remains inactive until message relay is enabled in Station settings.",
+        "Předávání zůstane neaktivní, dokud není v Nastavení stanice povoleno předávání zpráv.",
+    ),
+    "network.discovery_status": (
+        "Mode: {mode} · live routes: {routes} · active queries: {pending}",
+        "Režim: {mode} · živé trasy: {routes} · aktivní dotazy: {pending}",
+    ),
+    "network.discovery_route_approved": (
+        "Route to {destination} via {next_hop} approved for assisted use.",
+        "Trasa k {destination} přes {next_hop} byla schválena pro asistované použití.",
+    ),
     "network.route_source": ("Source", "Zdroj"),
     "network.source_manual": ("Manual", "Ruční"),
     "network.source_topology": ("Topology", "Topologie"),

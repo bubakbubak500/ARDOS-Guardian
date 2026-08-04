@@ -33,13 +33,17 @@ manifest, and asks again before launching it.
 - Task-oriented Home, Mail, Network and Log workspaces with native menus
 - Station profile (JSON) — load/save, lives in `%APPDATA%\Guardian\config.json`
 - **Control-burst protocol**: binary `ARD` frames with CRC-16, all frame types
-  (`HAVE_MSG`, `ACK_HAVE`, `BUSY`, `ROUTE_QUERY`, `ROUTE_OFFER`, `START_VARA`,
+  (`HAVE_MSG`, `ACK_HAVE`, `BUSY`, `ROUTE_QUERY`, `ROUTE_OFFER`,
+  `MULTIHOP_RREQ`, `MULTIHOP_RREP`, `START_VARA`,
   `WORKING_OFFER`, `WORKING_ACK`, `RECEIVED`, `DELIVERED`, `CANCEL`), priorities and flags. Message composer
   builds and self-tests real bursts.
 - **Configurable route table** (destination/group → preferred + backup hop)
 - **Shared network topology builder**: import one link CSV for the whole net or
   add directed/costed links in a three-step wizard. Each PC derives its own
   next-hop table from its configured callsign; manual routes remain overrides.
+- **Assisted multi-hop discovery**: bounded RREQ/RREP flooding, directed reverse
+  replies, expiring live routes, trust lists and airtime limits. Monitor mode
+  is receive-only and assisted routes require operator approval before payload.
 - **Radio drivers**: Hamlib/rigctld TCP backend (freq/mode/PTT/S-meter) and a
   generic serial VOX PTT backend
 - **VARA client**: TCP command/data connection with async notification reader
@@ -119,8 +123,11 @@ S/N, freshness and a deterministic callsign tie-break. The Network workspace
 now uses the former scanner page for a shared **network builder**: one topology
 derives a different local route table at every station. The scanner engine
 remains compatible with generated route channels but is no longer a primary
-operator workflow. A bounded RREQ/RREP extension is intentionally documentation
-only; see [the multi-hop discovery proposal](docs/MULTIHOP_DISCOVERY.md).
+operator workflow. Guardian 0.6.57 adds bounded multi-hop RREQ/RREP in
+**monitor-only and assisted modes**. Dynamic routes expire, stay separate from
+the planned topology and need operator approval at their source. Automatic use
+and whole-network link advertisements remain later steps; see
+[the multi-hop discovery design](docs/MULTIHOP_DISCOVERY.md).
 
 Phase 3 is complete: AFSK 1200 (FM) and MFSK-16 (HF, ~0 dB SNR) modems
 with rate-1/2 K=7 convolutional FEC and audio device pickers. The production UI

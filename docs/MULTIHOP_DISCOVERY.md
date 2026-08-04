@@ -1,8 +1,30 @@
-# Teoretický návrh vícehopového route discovery
+# Vícehopové route discovery
 
-Stav k verzi 0.6.55: **návrh, nikoliv implementace**. Guardian 0.6.55 používá
-pro známou síť společnou topologii a z ní odvozené lokální trasy. Rádiové rámce
-zůstávají beze změny.
+Stav k verzi 0.6.57: **implementováno ve sledovacím a asistovaném režimu**.
+Automatické použití bez souhlasu operátora a celosíťové `LINK_ADVERT` jsou
+záměrně odložené následné kroky. Známá síť nadále používá společnou topologii
+a z ní odvozené lokální trasy; živé discovery je oddělená, expirovatelná vrstva.
+
+## Implementovaný rozsah 0.6.57
+
+- samostatné rámce `MULTIHOP_RREQ=14` a `MULTIHOP_RREP=15`, takže starý
+  jednoskokový `ROUTE_QUERY/ROUTE_OFFER` zůstává kompatibilní;
+- expanding ring TTL 2, 4, případně 6 a 8 podle operátorského stropu;
+- deduplikace podle původce, ID a cíle, včetně přijetí lepší nebo rozšířené kopie;
+- deterministický jitter, pevná životnost breadcrumbů a rozpočet rámců za minutu;
+- směrovaný návrat RREP po reverzních breadcrumbech a jeden omezený opakovaný
+  RREP místo opakování celého floodu;
+- metrika `počet hopů + kumulovaná hrubá penalizace S/N`;
+- volatilní dynamické trasy s expirací, stavem selhání a výslovným schválením;
+- allowlist/denylist bez tvrzení o kryptografickém ověření identity;
+- podzáložka **Síť → Automatická síť** se stavem dotazů, trasami a provozními
+  limity;
+- realistický RF graf, na kterém každý uzel slyší jen své sousedy.
+
+Monitorovací režim nic nevysílá. Asistovaný režim dovolí dotaz, odpověď a relay
+discovery rámců, ale zdroj nezačne přes nalezenou cestu posílat payload, dokud
+ji operátor neschválí. Mezilehlé uzly smějí nalezenou cestu použít pro relay jen
+tehdy, když mají povolené předávání zpráv i discovery.
 
 ## Proč současný `ROUTE_QUERY` nestačí
 
@@ -19,14 +41,15 @@ nepotřebuje zaplavovat kanál a cesta je kontrolovatelná ještě před provoze
 Vícehopové discovery má význam pro dočasné/ad-hoc sítě, jejichž stav předem
 neznáme.
 
-## Navrhované chování RREQ/RREP
+## Chování RREQ/RREP
 
 1. Zdroj vyšle `RREQ` s globálně prakticky jedinečným ID zprávy, cílem a TTL.
 2. Každý uzel si na omezenou dobu zapamatuje `(message_id, destination)`,
    předchozí hop a nejlepší dosavadní metriku.
 3. První přijatou nebo prokazatelně lepší kopii po krátkém deterministickém
    jitteru odvysílá s TTL−1. Ostatní kopie zahodí.
-4. Cíl nebo uzel s věrohodnou trasou vytvoří `RREP`.
+4. V 0.6.57 vytvoří `RREP` pouze skutečný cíl. Odpověď prostředníka z cache je
+   záměrně vypnutá, dokud nebude existovat silnější model důvěry a zdraví trasy.
 5. `RREP` nejde broadcastem přes celou síť. Vrací se po uložených reverzních
    breadcrumbech až ke zdroji.
 6. Každý uzel po cestě si může krátkodobě naučit: „k cíli pokračuj přes hop,
@@ -34,7 +57,7 @@ neznáme.
 7. Zdroj po krátkém sběrném okně zvolí nabídku podle metriky a zahájí běžný
    `HAVE_MSG`/VARA přenos. Samotný payload se nikdy neflooduje.
 
-## Co musí nést protokol
+## Co nese protokol
 
 Minimálně:
 
@@ -46,11 +69,16 @@ Minimálně:
   příjmu);
 - u odpovědi identitu cíle a metriku celé nabízené cesty.
 
-Současný rámec už má `message_id`, `destination`, `next_hop` a TTL. Základní
-prototyp by tedy mohl použít nové rezervované flagové znaménko a lokální tabulku
-reverzních breadcrumbů bez zvětšení rámce. Pro kvalitní metriku a jasnou
-interoperabilitu je ale čistší nová verze protokolu nebo nové typy rámců. Starší
-stanice musí neznámý režim ignorovat, nikdy jej začít samy relayovat.
+RREQ používá `source` jako aktuálního vysílače, `destination` jako hledaný cíl a
+`next_hop` jako původce dotazu. RREP používá `source` jako aktuálního vysílače,
+`destination` jako původce a `next_hop` jako bezprostřední bod reverzní cesty.
+`message_id` je ID dotazu. U těchto dvou typů nese horní půlbyte `flags` počet
+hopů a dolní půlbyte kumulovanou hrubou penalizaci kvality; běžné message flags
+se tím nemění. TTL zůstává skutečným rozpočtem relaye.
+
+Formát a protokolová verze zůstávají 1, ale nové typy 14/15 starší verze nezná,
+takže je zahodí a nikdy samy nezačnou floodovat. Smíšená síť proto bezpečně
+vytvoří mezeru v cestě místo nekontrolovaného provozu.
 
 ## Mantinely proti zahlcení
 
@@ -73,10 +101,13 @@ Navržené pořadí rozhodování:
 1. explicitní next hop zvolený operátorem;
 2. ruční zamknutý override;
 3. čerstvý přímo slyšený cíl;
-4. použitelná trasa ze společné topologie;
-5. nedávno úspěšná naučená cesta;
-6. vícehopový RREQ/RREP výsledek;
+4. operátorem schválená a dosud živá RREQ/RREP trasa;
+5. použitelná trasa ze společné topologie;
+6. nedávno úspěšná naučená cesta;
 7. jednoskokový fallback nebo řízené selhání.
+
+Schválená živá trasa topologii nepřepisuje; pouze ji po dobu své expirace
+dočasně předchází. Bez schválení zůstává společná topologie cold-start plánem.
 
 Metrika celé cesty nemá být prostým S/N posledního hopu. Praktický základ je
 `součet ceny linek + penalizace za hop + penalizace za stáří/selhání`. Nouzové
@@ -104,18 +135,23 @@ vícehopového discovery je proto potřeba alespoň:
 - operátorský režim „jen zobrazit, nepoužít“;
 - pozdější návrh autentizace nezávislý na rezervovaném příznaku `ENCRYPTED`.
 
-## Doporučené ověření před implementací
+## Ověření implementace
 
-1. Simulace RF grafu, kde endpoint slyší jen své sousedy, nikoliv dnešní plně
-   propojený loopback bus.
-2. Řetězec S6–N1–N2–N3–S1, rozvětvení přes S2/S3/S4 a jedna úmyslná smyčka.
-3. Ztracený RREQ, ztracený RREP, duplicitní rámce a současné dotazy dvou zdrojů.
-4. Smíšená síť nové/staré verze.
-5. Měření skutečného airtime na AFSK i MFSK před stanovením TTL a jitteru.
-6. Teprve potom on-air test s nejdříve vypnutým automatickým použitím nabídky.
+Automatické testy používají RF graf S6–N1–N2–N3–S1 s větvemi S2/S3/S4/S5,
+úmyslnou smyčku, ztracený první RREQ i RREP, duplikáty, stejné ID od dvou zdrojů,
+starší nepodporující uzel, allow/deny pravidla a rozpočet vysílání. Samostatný
+end-to-end test po schválení provede existující store-and-forward payload cestu
+a vrátí finální `DELIVERED` až k S6.
 
-## Rozhodnutí pro současnou verzi
+Časové okno v živé aplikaci se škáluje z airtime aktivního AFSK/MFSK modemu a
+počtu hopů. Před případným automatickým režimem stále zbývá skutečný on-air test
+nejprve v monitorovacím a potom asistovaném režimu.
 
-0.6.55 RREQ/RREP neimplementuje. Známá síť se importuje jako linková topologie,
-každá stanice si z ní odvodí vlastní route tabulku a stávající jednoskokové
-`ROUTE_QUERY/ROUTE_OFFER` zůstává kompatibilním lokálním fallbackem.
+## Co zůstává odložené
+
+0.6.57 nemá režim „automaticky použít každou objevenou trasu“. Tato možnost je
+bod 9 a vznikne až po provozním ověření. RREQ/RREP také hledá cestu jen ke
+známému cíli; samo neobjeví stanici, na kterou se nikdo nezeptá. Bod 10 proto
+počítá s omezeným `LINK_ADVERT` nebo obdobnou výměnou potvrzených sousedů pro
+skutečnou regeneraci celé topologie. Ani budoucí živá vrstva nesmí bez výslovné
+akce přepsat ruční či importovanou topologii.

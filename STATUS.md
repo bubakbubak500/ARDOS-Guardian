@@ -40,6 +40,9 @@ confirmed in field operation. The former scanner page is now a shared network
 topology builder: one imported/built set of links derives a different local
 route table for every callsign while manual rows remain overrides. The tested
 scanner engine remains in the backend but is no longer the primary Network UI.
+Guardian 0.6.57 additionally implements bounded multi-hop RREQ/RREP over a
+neighbour-only RF graph. Its new Automatic network tab is monitor-only by
+default; assisted routes expire and require explicit operator approval.
 
 **Phase 3 done.** Built + tested: AFSK 1200 modem, MFSK-16 HF modem
 (decodes to ~0 dB SNR in loopback), rate-1/2 K=7 convolutional FEC + Viterbi,
@@ -903,6 +906,37 @@ Two defects, both in what 0.6.49 added.
 - **Software verification:** 377 tests pass, including the one-behind
   regression reproduced and fixed against a buffered stale envelope, and the
   socket-pair drain discarding only what was already buffered.
+
+## Assisted multi-hop route discovery (0.6.57)
+
+- New protocol types `MULTIHOP_RREQ=14` and `MULTIHOP_RREP=15` are separate
+  from legacy one-hop discovery. A mixed network therefore stops cleanly at an
+  older node instead of teaching it to flood a known frame differently.
+- RREQ uses expanding rings (TTL 2 then 4/6/8), per-origin/query/target
+  deduplication, deterministic jitter, a per-minute transmit budget and
+  allow/deny lists. A better or genuinely expanded copy may replace the cached
+  breadcrumb; ordinary duplicates do not relay again.
+- RREP returns only along reverse breadcrumbs and has one bounded directed
+  repeat to tolerate a lost reply without repeating the flood. Each station
+  along the return path learns its own next hop toward the target.
+- The compact discovery-only metric records hop count and accumulated coarse
+  S/N penalty. Dynamic routes are runtime-only, expire, retain short tombstones
+  for diagnosis and never overwrite manual or topology rows.
+- Network → Automatic network provides Off, Monitor only and Assisted modes,
+  TTL/lifetime/budget/trust settings, manual Find route, active-query and live
+  route tables, explicit approval and clearing. Monitor mode never transmits.
+- Assisted message delivery pauses after route discovery until the source
+  operator approves the route. Participating relay nodes may use the returned
+  breadcrumb only when both message relay and discovery forwarding are enabled.
+  A failed topology/learned hop can enter the same assisted repair path.
+- Discovery timeouts and jitter scale from the active control modem airtime.
+  No failed assisted search falls back to a blind direct `HAVE_MSG`.
+- Verification uses a neighbour-only RF graph for S6–N1–N2–N3–S1 plus branches
+  and a loop; it covers lost RREQ/RREP, duplicates, concurrent equal IDs,
+  mixed-version gaps, trust and budget limits, expiry, explicit approval and a
+  full existing payload/`DELIVERED` round trip.
+- Automatic unapproved use (step 9) and whole-network `LINK_ADVERT` regeneration
+  (step 10) remain explicitly deferred until assisted on-air validation.
 
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,
