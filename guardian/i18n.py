@@ -434,10 +434,12 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.discovery_hint": (
         "Monitor or explicitly run bounded multi-hop RREQ/RREP discovery. "
         "Learned routes expire and never overwrite manual or imported topology. "
-        "Assisted routes carry payload only after operator approval.",
+        "Assisted routes normally require operator approval unless the separate "
+        "experimental automatic-use switch is enabled.",
         "Sledujte nebo výslovně spusťte omezené vícehopové hledání RREQ/RREP. "
         "Naučené trasy expirují a nikdy nepřepisují ruční ani importovanou "
-        "topologii. Asistovaná trasa přenese obsah až po schválení operátorem.",
+        "topologii. Asistovaná trasa běžně čeká na schválení operátorem, pokud "
+        "není zapnutý samostatný experimentální přepínač automatického použití.",
     ),
     "network.discovery_mode": ("Operating mode", "Provozní režim"),
     "network.discovery_mode_off": ("Off", "Vypnuto"),
@@ -476,6 +478,8 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Discovery vyžaduje Asistovaný režim a spuštěný řídicí kanál.",
     ),
     "network.discovery_hops": ("Hops", "Skoky"),
+    "network.discovery_next_hop": ("Next hop", "Další hop"),
+    "network.discovery_ttl_short": ("TTL", "TTL"),
     "network.discovery_metric": ("Metric", "Metrika"),
     "network.discovery_expires": ("Expires in", "Expiruje za"),
     "network.discovery_approved": ("Approved", "Schválená"),
@@ -504,6 +508,54 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.discovery_route_approved": (
         "Route to {destination} via {next_hop} approved for assisted use.",
         "Trasa k {destination} přes {next_hop} byla schválena pro asistované použití.",
+    ),
+    "network.discovery_routes_tab": ("Route discovery", "Vyhledání trasy"),
+    "network.discovery_live_tab": ("Live topology", "Živá topologie"),
+    "network.discovery_settings_tab": (
+        "Settings and limits",
+        "Nastavení a limity",
+    ),
+    "network.discovery_auto_use": (
+        "Experimental: automatically use fresh discovered routes",
+        "Experimentální: automaticky použít čerstvé nalezené trasy",
+    ),
+    "network.discovery_auto_inactive": (
+        "Automatic use is inactive until Assisted mode is selected.",
+        "Automatické použití je neaktivní, dokud není zvolen Asistovaný režim.",
+    ),
+    "network.link_advert_hint": (
+        "LINK_ADVERT exchanges recent direct observations. Only links independently "
+        "confirmed from both sides may create routes; all evidence expires and stays "
+        "separate from Network builder.",
+        "LINK_ADVERT vyměňuje čerstvá přímá pozorování. Trasu mohou vytvořit jen "
+        "vazby nezávisle potvrzené z obou stran; všechna zjištění expirují a "
+        "zůstávají oddělená od Sestavovače sítě.",
+    ),
+    "network.link_advert_enabled": (
+        "Experimental: exchange LINK_ADVERT live topology",
+        "Experimentální: vyměňovat živou topologii LINK_ADVERT",
+    ),
+    "network.link_advert_monitor_warning": (
+        "Live observations are monitor-only until Assisted mode is selected.",
+        "Živá pozorování se jen sledují, dokud není zvolen Asistovaný režim.",
+    ),
+    "network.link_advert_interval": ("Advertisement interval", "Interval oznámení"),
+    "network.link_owner": ("Station", "Stanice"),
+    "network.link_neighbor": ("Neighbour", "Soused"),
+    "network.link_reciprocal": ("Confirmed both ways", "Potvrzeno obousměrně"),
+    "network.link_quality": ("Penalty", "Penalizace"),
+    "network.link_last_sender": ("Last relayed by", "Naposledy předal"),
+    "network.link_advert_now": ("Advertise neighbours now", "Oznámit sousedy nyní"),
+    "network.link_advert_clear": ("Clear live topology", "Vymazat živou topologii"),
+    "network.link_advert_sent": (
+        "Transmitted {count} neighbour advertisements.",
+        "Odvysíláno oznámení sousedů: {count}.",
+    ),
+    "network.link_advert_status": (
+        "Active observations: {observations} · reciprocal links: {reciprocal} · "
+        "derived routes: {routes}",
+        "Aktivní pozorování: {observations} · obousměrné vazby: {reciprocal} · "
+        "odvozené trasy: {routes}",
     ),
     "network.route_source": ("Source", "Zdroj"),
     "network.source_manual": ("Manual", "Ruční"),

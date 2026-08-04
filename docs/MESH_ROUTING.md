@@ -5,8 +5,9 @@ Design note written 2026-07-28 after CSV route import landed in 0.6.26.
 per-station route derivation, manual overrides and heard-next-hop warnings.
 **Implemented in 0.6.57:** bounded multi-hop RREQ/RREP, expiring dynamic routes,
 monitor-only and assisted operation, reverse breadcrumbs and airtime/trust
-limits. Automatic route use and link advertisements remain later steps; see
-[`MULTIHOP_DISCOVERY.md`](MULTIHOP_DISCOVERY.md).
+limits. **Implemented experimentally in 0.6.58:** independent automatic-route
+use and reciprocal `LINK_ADVERT` live-topology regeneration, both default off;
+see [`MULTIHOP_DISCOVERY.md`](MULTIHOP_DISCOVERY.md).
 
 ## The problem
 

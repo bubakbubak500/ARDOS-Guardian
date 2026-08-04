@@ -76,6 +76,9 @@ class FrameType(IntEnum):
     # accidentally flooding a query they do not understand.
     MULTIHOP_RREQ = 14  # bounded broadcast seeking a path to destination
     MULTIHOP_RREP = 15  # directed answer following reverse breadcrumbs
+    # Experimental, bounded advertisement of one directly-heard neighbour.
+    # Older releases reject the unknown type, creating a safe discovery gap.
+    LINK_ADVERT = 16
 
     @property
     def label(self) -> str:

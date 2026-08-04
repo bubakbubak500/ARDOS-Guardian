@@ -198,6 +198,9 @@ class NetworkWorkspace(QWidget):
         hint.setObjectName("Metadata")
         layout.addWidget(hint)
 
+        self.discovery_sections = QTabWidget()
+        settings_page = QWidget()
+        settings_layout = QVBoxLayout(settings_page)
         form = QFormLayout()
         self.discovery_mode = QComboBox()
         for mode in ("off", "monitor", "assisted"):
@@ -232,7 +235,7 @@ class NetworkWorkspace(QWidget):
         form.addRow(tr("network.discovery_budget"), self.discovery_budget)
         form.addRow(tr("network.discovery_allowlist"), self.discovery_allowlist)
         form.addRow(tr("network.discovery_denylist"), self.discovery_denylist)
-        layout.addLayout(form)
+        settings_layout.addLayout(form)
 
         settings_row = QHBoxLayout()
         save = QPushButton(tr("network.discovery_save"))
@@ -242,7 +245,13 @@ class NetworkWorkspace(QWidget):
         self.discovery_status.setObjectName("Metadata")
         settings_row.addWidget(save)
         settings_row.addWidget(self.discovery_status, 1)
-        layout.addLayout(settings_row)
+        settings_layout.addStretch()
+
+        route_page = QWidget()
+        route_layout = QVBoxLayout(route_page)
+        self.discovery_auto_use = QCheckBox(tr("network.discovery_auto_use"))
+        self.discovery_auto_use.setChecked(self.runtime.config.discovery_auto_use)
+        route_layout.addWidget(self.discovery_auto_use)
 
         query_row = QHBoxLayout()
         self.discovery_destination = UppercaseLineEdit()
@@ -253,29 +262,30 @@ class NetworkWorkspace(QWidget):
         query_row.addWidget(QLabel(tr("network.destination")))
         query_row.addWidget(self.discovery_destination, 1)
         query_row.addWidget(query)
-        layout.addLayout(query_row)
+        route_layout.addLayout(query_row)
 
-        self.discovery_routes = RowTable(0, 8)
+        self.discovery_routes = RowTable(0, 9)
         self.discovery_routes.setHorizontalHeaderLabels(
             [
                 tr("network.destination"),
-                tr("network.preferred"),
+                tr("network.discovery_next_hop"),
                 tr("network.discovery_hops"),
                 tr("network.discovery_metric"),
                 tr("network.age"),
                 tr("network.discovery_expires"),
                 tr("network.discovery_approved"),
                 tr("network.discovery_state"),
+                tr("network.route_source"),
             ]
         )
         discovery_header = self.discovery_routes.horizontalHeader()
         discovery_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         discovery_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in range(2, 8):
+        for column in range(2, 9):
             discovery_header.setSectionResizeMode(
                 column, QHeaderView.ResizeMode.ResizeToContents
             )
-        layout.addWidget(self.discovery_routes, 1)
+        route_layout.addWidget(self.discovery_routes, 1)
 
         route_actions = QHBoxLayout()
         approve = QPushButton(tr("network.discovery_approve"))
@@ -285,7 +295,7 @@ class NetworkWorkspace(QWidget):
         route_actions.addWidget(approve)
         route_actions.addStretch()
         route_actions.addWidget(clear)
-        layout.addLayout(route_actions)
+        route_layout.addLayout(route_actions)
 
         self.discovery_pending = RowTable(0, 5)
         self.discovery_pending.setMaximumHeight(130)
@@ -293,7 +303,7 @@ class NetworkWorkspace(QWidget):
             [
                 tr("network.discovery_query_id"),
                 tr("network.destination"),
-                tr("network.discovery_ttl"),
+                tr("network.discovery_ttl_short"),
                 tr("network.discovery_context"),
                 tr("network.discovery_state"),
             ]
@@ -301,11 +311,79 @@ class NetworkWorkspace(QWidget):
         self.discovery_pending.horizontalHeader().setSectionResizeMode(
             4, QHeaderView.ResizeMode.Stretch
         )
-        layout.addWidget(self.discovery_pending)
+        route_layout.addWidget(self.discovery_pending)
         self.discovery_recent = QLabel()
         self.discovery_recent.setWordWrap(True)
         self.discovery_recent.setObjectName("Metadata")
-        layout.addWidget(self.discovery_recent)
+        route_layout.addWidget(self.discovery_recent)
+        self.discovery_sections.addTab(
+            route_page, tr("network.discovery_routes_tab")
+        )
+
+        live_page = QWidget()
+        live_layout = QVBoxLayout(live_page)
+        live_hint = QLabel(tr("network.link_advert_hint"))
+        live_hint.setWordWrap(True)
+        live_hint.setObjectName("Metadata")
+        live_layout.addWidget(live_hint)
+        live_form = QFormLayout()
+        self.link_advert_enabled = QCheckBox(tr("network.link_advert_enabled"))
+        self.link_advert_enabled.setChecked(
+            self.runtime.config.link_advert_enabled
+        )
+        self.link_advert_interval = QSpinBox()
+        self.link_advert_interval.setRange(1, 1440)
+        self.link_advert_interval.setSuffix(" min")
+        self.link_advert_interval.setValue(
+            max(1, int(self.runtime.config.link_advert_interval / 60))
+        )
+        live_form.addRow(self.link_advert_enabled)
+        live_form.addRow(
+            tr("network.link_advert_interval"), self.link_advert_interval
+        )
+        live_layout.addLayout(live_form)
+        self.live_links = RowTable(0, 7)
+        self.live_links.setHorizontalHeaderLabels(
+            [
+                tr("network.link_owner"),
+                tr("network.link_neighbor"),
+                tr("network.link_reciprocal"),
+                tr("network.link_quality"),
+                tr("network.age"),
+                tr("network.discovery_expires"),
+                tr("network.link_last_sender"),
+            ]
+        )
+        live_header = self.live_links.horizontalHeader()
+        live_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        live_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column in range(2, 7):
+            live_header.setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents
+            )
+        live_layout.addWidget(self.live_links, 1)
+        self.live_status = QLabel()
+        self.live_status.setWordWrap(True)
+        self.live_status.setObjectName("Metadata")
+        live_layout.addWidget(self.live_status)
+        live_actions = QHBoxLayout()
+        advertise = QPushButton(tr("network.link_advert_now"))
+        advertise.setObjectName("primaryAction")
+        advertise.clicked.connect(self._advertise_live_links)
+        clear_live = QPushButton(tr("network.link_advert_clear"))
+        clear_live.clicked.connect(self._clear_live_topology)
+        live_actions.addWidget(advertise)
+        live_actions.addStretch()
+        live_actions.addWidget(clear_live)
+        live_layout.addLayout(live_actions)
+        self.discovery_sections.addTab(
+            live_page, tr("network.discovery_live_tab")
+        )
+        self.discovery_sections.addTab(
+            settings_page, tr("network.discovery_settings_tab")
+        )
+        layout.addWidget(self.discovery_sections, 1)
+        layout.addLayout(settings_row)
         return page
 
     @staticmethod
@@ -329,6 +407,9 @@ class NetworkWorkspace(QWidget):
         config.discovery_denylist = self._callsign_list(
             self.discovery_denylist.text()
         )
+        config.discovery_auto_use = self.discovery_auto_use.isChecked()
+        config.link_advert_enabled = self.link_advert_enabled.isChecked()
+        config.link_advert_interval = float(self.link_advert_interval.value() * 60)
         config.save()
         self.runtime.operations.apply_network_settings()
         self.runtime.events.publish(
@@ -377,6 +458,17 @@ class NetworkWorkspace(QWidget):
 
     def _clear_discovered_routes(self) -> None:
         self.runtime.operations.clear_discovered_routes()
+        self.refresh()
+
+    def _advertise_live_links(self) -> None:
+        sent = self.runtime.operations.advertise_live_links()
+        self.runtime.events.publish(
+            tr("network.link_advert_sent", count=sent), source="discovery"
+        )
+        self.refresh()
+
+    def _clear_live_topology(self) -> None:
+        self.runtime.operations.clear_live_topology()
         self.refresh()
 
     def _open_topology_wizard(self) -> None:
@@ -615,6 +707,7 @@ class NetworkWorkspace(QWidget):
                 f"{remaining / 60:.0f} min",
                 tr("common.yes") if route.approved else tr("common.no"),
                 state,
+                route.source,
             )
             for column, value in enumerate(values):
                 self.discovery_routes.setItem(
@@ -650,12 +743,19 @@ class NetworkWorkspace(QWidget):
             if recent
             else tr("network.discovery_no_activity")
         )
-        relay_warning = (
-            tr("network.discovery_relay_warning")
-            if self.runtime.config.discovery_forward
-            and not self.runtime.config.auto_relay
-            else ""
-        )
+        warnings = []
+        if self.runtime.config.discovery_forward and not self.runtime.config.auto_relay:
+            warnings.append(tr("network.discovery_relay_warning"))
+        if (
+            self.runtime.config.discovery_auto_use
+            and discovery.mode != "assisted"
+        ):
+            warnings.append(tr("network.discovery_auto_inactive"))
+        if (
+            self.runtime.config.link_advert_enabled
+            and discovery.mode != "assisted"
+        ):
+            warnings.append(tr("network.link_advert_monitor_warning"))
         self.discovery_status.setText(
             tr(
                 "network.discovery_status",
@@ -663,5 +763,37 @@ class NetworkWorkspace(QWidget):
                 routes=len([route for route in routes if route.active(now)]),
                 pending=len(pending),
             )
-            + (f"  {relay_warning}" if relay_warning else "")
+            + (f"  {' '.join(warnings)}" if warnings else "")
+        )
+
+        links = discovery.live_topology.links(now, include_expired=True)
+        self.live_links.setRowCount(len(links))
+        reciprocal_count = 0
+        for row, link in enumerate(links):
+            reciprocal = discovery.live_topology.reciprocal(link, now)
+            if reciprocal:
+                reciprocal_count += 1
+            values = (
+                link.owner,
+                link.neighbor,
+                tr("common.yes") if reciprocal else tr("common.no"),
+                str(link.penalty),
+                f"{max(0.0, now - link.learned_at):.0f} s",
+                f"{max(0.0, link.expires_at - now) / 60:.0f} min",
+                link.last_sender,
+            )
+            for column, value in enumerate(values):
+                self.live_links.setItem(row, column, QTableWidgetItem(value))
+        live_routes = [
+            route
+            for route in routes
+            if route.source == "link-advert" and route.active(now)
+        ]
+        self.live_status.setText(
+            tr(
+                "network.link_advert_status",
+                observations=len([link for link in links if link.active(now)]),
+                reciprocal=reciprocal_count // 2,
+                routes=len(live_routes),
+            )
         )

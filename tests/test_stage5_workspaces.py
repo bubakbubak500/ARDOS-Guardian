@@ -388,6 +388,8 @@ def test_discovery_tab_saves_assisted_limits_without_enabling_automatic_use(
         assert runtime.config.discovery_frame_budget == 9
         assert runtime.config.discovery_allowlist == ["N1", "N2"]
         assert runtime.config.discovery_denylist == ["BAD"]
+        assert runtime.config.discovery_auto_use is False
+        assert runtime.config.link_advert_enabled is False
         assert runtime.operations.net.discovery.mode == "assisted"
         assert runtime.operations.net.discovery.max_ttl == 6
         # This release has no automatic mode: a learned path still needs approval.
@@ -396,6 +398,47 @@ def test_discovery_tab_saves_assisted_limits_without_enabling_automatic_use(
         )
         assert learned.approved is False
         assert runtime.operations.net._resolve_next_hop("S1") == (None, "none")
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_automatic_network_subtabs_save_independent_experimental_flags(
+    monkeypatch,
+) -> None:
+    _application()
+    runtime = ShellRuntime()
+    monkeypatch.setattr(runtime.config, "save", lambda *args, **kwargs: None)
+    workspace = NetworkWorkspace(runtime)
+    try:
+        assert workspace.discovery_sections.count() == 3
+        assert workspace.discovery_sections.tabText(0) == tr(
+            "network.discovery_routes_tab"
+        )
+        assert workspace.discovery_sections.tabText(1) == tr(
+            "network.discovery_live_tab"
+        )
+        assert workspace.discovery_sections.tabText(2) == tr(
+            "network.discovery_settings_tab"
+        )
+        workspace.discovery_auto_use.setChecked(True)
+        workspace.link_advert_enabled.setChecked(False)
+        workspace.link_advert_interval.setValue(12)
+        workspace._save_discovery_settings()
+
+        assert runtime.config.discovery_auto_use is True
+        assert runtime.config.link_advert_enabled is False
+        assert runtime.config.link_advert_interval == 720.0
+        assert runtime.operations.net.discovery.auto_use is True
+        assert runtime.operations.net.discovery.link_advert_enabled is False
+
+        workspace.discovery_auto_use.setChecked(False)
+        workspace.link_advert_enabled.setChecked(True)
+        workspace._save_discovery_settings()
+        assert runtime.config.discovery_auto_use is False
+        assert runtime.config.link_advert_enabled is True
+        assert runtime.operations.net.discovery.auto_use is False
+        assert runtime.operations.net.discovery.link_advert_enabled is True
     finally:
         workspace.close()
         runtime.close()

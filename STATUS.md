@@ -1,6 +1,6 @@
 # Guardian (ARDOS) — Project Status & Plan
 
-_Last updated: 2026-08-03_
+_Last updated: 2026-08-04_
 
 A resumable snapshot: what Guardian is, what's built, what's verified, the key
 decisions and why, and what comes next. Read this first when picking the project
@@ -43,6 +43,9 @@ scanner engine remains in the backend but is no longer the primary Network UI.
 Guardian 0.6.57 additionally implements bounded multi-hop RREQ/RREP over a
 neighbour-only RF graph. Its new Automatic network tab is monitor-only by
 default; assisted routes expire and require explicit operator approval.
+Guardian 0.6.58 completes steps 9 and 10 as two default-off experiments:
+automatic use of fresh discovery routes and reciprocal `LINK_ADVERT`
+regeneration of a separate volatile live topology.
 
 **Phase 3 done.** Built + tested: AFSK 1200 modem, MFSK-16 HF modem
 (decodes to ~0 dB SNR in loopback), rate-1/2 K=7 convolutional FEC + Viterbi,
@@ -935,8 +938,36 @@ Two defects, both in what 0.6.49 added.
   and a loop; it covers lost RREQ/RREP, duplicates, concurrent equal IDs,
   mixed-version gaps, trust and budget limits, expiry, explicit approval and a
   full existing payload/`DELIVERED` round trip.
-- Automatic unapproved use (step 9) and whole-network `LINK_ADVERT` regeneration
-  (step 10) remain explicitly deferred until assisted on-air validation.
+- Automatic unapproved use and whole-network regeneration remain off by default
+  and require assisted on-air validation before any production default changes.
+
+## Experimental automatic use and live topology (0.6.58)
+
+- Two independent feature flags allow RREQ/RREP automatic route use and
+  `LINK_ADVERT=16` exchange to be tested separately. Both default off and
+  automatic use is effective only in Assisted mode.
+- Automatically approved routes proceed through the unchanged HAVE_MSG / VARA /
+  RECEIVED / DELIVERED pipeline. Turning the flag or Assisted mode off removes
+  only automatic approvals; manual approvals and route-table overrides survive.
+- LINK_ADVERT first emits a one-hop presence frame so a completely quiet net can
+  bootstrap itself. Stations then advertise actual fresh Heard neighbours;
+  changed neighbour sets transmit immediately and stable sets use the configured
+  interval.
+- A one-way observation remains diagnostic only. Dijkstra derives a route only
+  from independently reciprocal observations, and its expiry is capped by the
+  oldest link evidence along that path.
+- Adverts share the RREQ/RREP TTL, deterministic jitter, deduplication, trust
+  lists and frames-per-minute budget. Multihop forwarding additionally requires
+  both discovery forwarding and message relay.
+- Automatic network now contains Route discovery, Live topology and Settings
+  and limits sub-tabs, including independent switches, interval,
+  reciprocal/age/expiry diagnostics, advertise-now and clear-live-state actions.
+- Disabling LINK_ADVERT removes only its volatile graph and `link-advert` routes.
+  Manual routes, imported Network builder topology and RREQ/RREP state are not
+  rewritten.
+- Verification covers automatic end-to-end delivery, a quiet network detecting
+  itself, the S6–N1–N2–N3–S1 graph with branches/loops, one-way evidence,
+  bounded flooding, expiry, mode/flag transitions and selective state removal.
 
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,

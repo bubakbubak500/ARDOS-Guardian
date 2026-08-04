@@ -124,9 +124,10 @@ now uses the former scanner page for a shared **network builder**: one topology
 derives a different local route table at every station. The scanner engine
 remains compatible with generated route channels but is no longer a primary
 operator workflow. Guardian 0.6.57 adds bounded multi-hop RREQ/RREP in
-**monitor-only and assisted modes**. Dynamic routes expire, stay separate from
-the planned topology and need operator approval at their source. Automatic use
-and whole-network link advertisements remain later steps; see
+**monitor-only and assisted modes**. Guardian 0.6.58 adds two independent,
+default-off experiments: automatic use of fresh discovery routes and reciprocal
+`LINK_ADVERT` regeneration of a volatile live topology. Dynamic evidence
+expires and always stays separate from the planned topology; see
 [the multi-hop discovery design](docs/MULTIHOP_DISCOVERY.md).
 
 Phase 3 is complete: AFSK 1200 (FM) and MFSK-16 (HF, ~0 dB SNR) modems

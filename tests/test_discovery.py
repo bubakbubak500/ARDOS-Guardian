@@ -403,3 +403,396 @@ def test_assisted_route_failure_does_not_blindly_announce_directly() -> None:
         engine.tick(now)
     assert message.state is SessionState.FAILED
     assert [frame.type for frame in sent] == [FrameType.MULTIHOP_RREQ]
+
+
+def test_experimental_auto_use_delivers_without_operator_approval() -> None:
+    bus = _sample_bus()
+    stations = {}
+    for call in ("S6", "N1", "N2", "N3", "S1"):
+        station = Orchestrator(
+            call,
+            bus.endpoint(call),
+            auto_route=False,
+            auto_complete=True,
+            relay=call in {"N1", "N2", "N3"},
+            discovery_mode=DISCOVERY_ASSISTED,
+            discovery_forward=call in {"N1", "N2", "N3"},
+            discovery_ttl=4,
+            discovery_auto_use=True,
+        )
+        station.discovery.query_timeout = 2
+        station.discovery.settle_time = 0
+        station.discovery.jitter_min = 0
+        station.discovery.jitter_max = 0
+        stations[call] = station
+
+    message = stations["S6"].send_message("S1", "automatic", msg_id=7010, ttl=8)
+    now = 0.0
+    while now <= 40 and message.state is not SessionState.DELIVERED:
+        for station in stations.values():
+            station.tick(now)
+        bus.pump()
+        now += 0.25
+
+    assert message.state is SessionState.DELIVERED
+    route = stations["S6"].discovery.routes.best(
+        "S1", now, approved_only=True
+    )
+    assert route is not None
+    assert (route.next_hop, route.source) == ("N1", "rreq")
+
+
+def test_link_advert_flag_off_consumes_frame_without_learning_or_relaying() -> None:
+    sent = []
+    engine = DiscoveryEngine(
+        "N1",
+        sent.append,
+        mode=DISCOVERY_ASSISTED,
+        forward=True,
+        relay_enabled=True,
+        link_advert_enabled=False,
+    )
+    engine.tick(1)
+    assert engine.receive(
+        ControlFrame(
+            FrameType.LINK_ADVERT,
+            source="S6",
+            destination="S6",
+            next_hop="N1",
+            message_id=44,
+            ttl=4,
+        )
+    )
+    engine.tick(5)
+    assert engine.live_topology.links(5) == []
+    assert sent == []
+
+
+def test_link_advert_presence_bootstraps_two_previously_quiet_stations() -> None:
+    frames = []
+    bus = GraphRadioBus(
+        {("S6", "N1")},
+        monitor=lambda sender, frame: frames.append((sender, frame)),
+    )
+    stations = {
+        call: Orchestrator(
+            call,
+            bus.endpoint(call),
+            discovery_mode=DISCOVERY_ASSISTED,
+            discovery_auto_use=True,
+            link_advert_enabled=True,
+        )
+        for call in ("S6", "N1")
+    }
+    for now in (0.0, 0.1, 0.2):
+        for station in stations.values():
+            station.tick(now)
+        bus.pump()
+
+    route = stations["S6"].discovery.routes.best(
+        "N1", 0.2, approved_only=True
+    )
+    assert route is not None
+    assert (route.next_hop, route.hops, route.source) == (
+        "N1",
+        1,
+        "link-advert",
+    )
+    assert len(frames) == 4  # two one-hop presence + two changed-neighbour adverts
+
+
+def test_quiet_three_node_network_self_detects_and_regenerates_multihop_route() -> None:
+    frames = []
+    bus = GraphRadioBus(
+        {("S6", "N1"), ("N1", "N2")},
+        monitor=lambda sender, frame: frames.append((sender, frame)),
+    )
+    stations = {}
+    for call in ("S6", "N1", "N2"):
+        station = Orchestrator(
+            call,
+            bus.endpoint(call),
+            relay=call == "N1",
+            discovery_mode=DISCOVERY_ASSISTED,
+            discovery_forward=call == "N1",
+            discovery_auto_use=True,
+            link_advert_enabled=True,
+            discovery_frame_budget=40,
+        )
+        station.discovery.jitter_min = 0
+        station.discovery.jitter_max = 0
+        stations[call] = station
+
+    now = 0.0
+    while now <= 3.0:
+        for station in stations.values():
+            station.tick(now)
+        bus.pump()
+        now += 0.1
+
+    route = stations["S6"].discovery.routes.best(
+        "N2", now, approved_only=True
+    )
+    assert route is not None
+    assert (route.next_hop, route.hops) == ("N1", 2)
+    assert len(frames) < 30
+
+
+def test_lost_link_advert_is_recovered_on_next_bounded_interval() -> None:
+    dropped = {"done": False}
+
+    def drop(sender, receiver, frame):
+        if (
+            not dropped["done"]
+            and sender == "N1"
+            and receiver == "S6"
+            and frame.type is FrameType.LINK_ADVERT
+            and frame.next_hop
+        ):
+            dropped["done"] = True
+            return True
+        return False
+
+    bus = GraphRadioBus({("S6", "N1")}, drop=drop)
+    stations = {
+        call: Orchestrator(
+            call,
+            bus.endpoint(call),
+            discovery_mode=DISCOVERY_ASSISTED,
+            discovery_auto_use=True,
+            link_advert_enabled=True,
+            link_advert_interval=60,
+        )
+        for call in ("S6", "N1")
+    }
+    for now in (0.0, 0.1, 0.2):
+        for station in stations.values():
+            station.tick(now)
+        bus.pump()
+    assert stations["S6"].discovery.routes.best("N1", 0.2) is None
+
+    for now in (60.1, 60.2, 60.3):
+        for station in stations.values():
+            station.tick(now)
+        bus.pump()
+    assert dropped["done"] is True
+    assert stations["S6"].discovery.routes.best(
+        "N1", 60.3, approved_only=True
+    ) is not None
+
+
+def test_legacy_node_creates_safe_finite_gap_in_link_advert_topology() -> None:
+    frames = []
+    bus = GraphRadioBus(
+        {("S6", "N1"), ("N1", "OLD"), ("OLD", "N2")},
+        monitor=lambda sender, frame: frames.append((sender, frame)),
+    )
+    bus.endpoint("OLD")  # pre-0.6.58 node: receives but has no type-16 handler
+    stations = {}
+    for call in ("S6", "N1", "N2"):
+        station = Orchestrator(
+            call,
+            bus.endpoint(call),
+            relay=call == "N1",
+            discovery_mode=DISCOVERY_ASSISTED,
+            discovery_forward=call == "N1",
+            discovery_auto_use=True,
+            link_advert_enabled=True,
+        )
+        station.discovery.jitter_min = 0
+        station.discovery.jitter_max = 0
+        stations[call] = station
+    for now in (0.0, 0.1, 0.2, 0.3, 1.0):
+        for station in stations.values():
+            station.tick(now)
+        bus.pump()
+
+    assert stations["S6"].discovery.routes.best("N2", 1.0) is None
+    assert all(frame.type is FrameType.LINK_ADVERT for _sender, frame in frames)
+    assert len(frames) < 15
+
+
+def test_disabling_link_advert_removes_only_its_volatile_state() -> None:
+    engine = DiscoveryEngine(
+        "S6",
+        lambda _frame: None,
+        mode=DISCOVERY_ASSISTED,
+        link_advert_enabled=True,
+        auto_use=True,
+    )
+    engine.tick(1)
+    engine.advertise_neighbors([("N1", 10.0)], force=True)
+    engine.receive(
+        ControlFrame(
+            FrameType.LINK_ADVERT,
+            source="N1",
+            destination="N1",
+            next_hop="S6",
+            message_id=441,
+            ttl=2,
+        )
+    )
+    rreq = engine.routes.learn("S2", "N2", 2, 0, 442, 1)
+    assert engine.routes.best("N1", 1) is not None
+
+    engine.configure(link_advert_enabled=False)
+    assert engine.live_topology.links(1) == []
+    assert engine.routes.best("N1", 1) is None
+    assert engine.routes.best("S2", 1) is rreq
+
+
+def test_one_way_link_advert_is_visible_but_never_routable() -> None:
+    engine = DiscoveryEngine(
+        "S6",
+        lambda _frame: None,
+        mode=DISCOVERY_ASSISTED,
+        link_advert_enabled=True,
+    )
+    engine.tick(1)
+    engine.receive(
+        ControlFrame(
+            FrameType.LINK_ADVERT,
+            source="N1",
+            destination="N1",
+            next_hop="S6",
+            message_id=45,
+            ttl=2,
+        )
+    )
+    links = engine.live_topology.links(1)
+    assert [(link.owner, link.neighbor) for link in links] == [("N1", "S6")]
+    assert engine.live_topology.reciprocal(links[0], 1) is False
+    assert engine.routes.best("N1", 1) is None
+
+
+def test_link_adverts_regenerate_full_reciprocal_topology_with_bounded_flood() -> None:
+    frames = []
+    bus = _sample_bus(monitor=lambda sender, frame: frames.append((sender, frame)))
+    calls = ["S6", "N1", "N2", "N3", "S1", "S2", "S3", "S4", "S5"]
+    engines = _engines(
+        bus,
+        calls,
+        max_ttl=4,
+        frame_budget=120,
+        link_advert_enabled=True,
+        auto_use=False,
+    )
+    neighbours = {
+        "S6": ["N1"],
+        "S5": ["N1"],
+        "N1": ["S6", "S5", "N2"],
+        "N2": ["N1", "N3", "S3", "S4"],
+        "N3": ["N2", "S1", "S2"],
+        "S1": ["N3"],
+        "S2": ["N3"],
+        "S3": ["N2"],
+        "S4": ["N2"],
+    }
+    for engine in engines.values():
+        engine.tick(0)
+    for call, peers in neighbours.items():
+        engines[call].advertise_neighbors([(peer, 5.0) for peer in peers], force=True)
+
+    _run(bus, engines, until=10)
+
+    route = engines["S6"].routes.best("S1", 10)
+    assert route is not None
+    assert (route.next_hop, route.hops, route.source, route.approved) == (
+        "N1",
+        4,
+        "link-advert",
+        False,
+    )
+    assert engines["S6"].routes.best("S1", 10, approved_only=True) is None
+    assert all(frame.type is FrameType.LINK_ADVERT for _sender, frame in frames)
+    # Flooding is finite despite every physical link hearing each broadcast.
+    assert len(frames) < 250
+
+
+def test_link_advert_routes_auto_approve_only_when_auto_use_flag_is_on() -> None:
+    engine = DiscoveryEngine(
+        "S6",
+        lambda _frame: None,
+        mode=DISCOVERY_ASSISTED,
+        link_advert_enabled=True,
+        auto_use=True,
+    )
+    engine.tick(1)
+    engine.advertise_neighbors([("N1", 10.0)], force=True)
+    engine.receive(
+        ControlFrame(
+            FrameType.LINK_ADVERT,
+            source="N1",
+            destination="N1",
+            next_hop="S6",
+            message_id=46,
+            ttl=2,
+        )
+    )
+    route = engine.routes.best("N1", 1, approved_only=True)
+    assert route is not None
+    assert route.source == "link-advert"
+
+    engine.configure(auto_use=False)
+    assert engine.routes.best("N1", 1, approved_only=True) is None
+
+
+def test_disabling_auto_use_preserves_only_manual_approval() -> None:
+    routes = DynamicRouteStore(lifetime=30)
+    automatic = routes.learn("S1", "N1", 2, 0, 1, 0)
+    routes.approve("S1", 0, automatic=True)
+    manual = routes.learn("S2", "N2", 2, 0, 2, 0)
+    routes.approve("S2", 0)
+    engine = DiscoveryEngine("S6", lambda _frame: None, auto_use=False)
+    engine.routes = routes
+    engine.configure(auto_use=True)
+    engine.configure(auto_use=False)
+    assert automatic.approved is False
+    assert manual.approved is True
+
+
+def test_auto_use_never_activates_routes_in_monitor_mode() -> None:
+    engine = DiscoveryEngine(
+        "S6",
+        lambda _frame: None,
+        mode=DISCOVERY_MONITOR,
+        auto_use=True,
+    )
+    engine.tick(1)
+    route = engine.routes.learn("S1", "N1", 2, 0, 3, 1)
+    engine.configure(auto_use=True)
+    assert route.approved is False
+    engine.configure(mode=DISCOVERY_ASSISTED)
+    assert route.approved is True
+    engine.configure(mode=DISCOVERY_MONITOR)
+    assert route.approved is False
+
+
+def test_link_advert_evidence_and_derived_route_expire() -> None:
+    engine = DiscoveryEngine(
+        "S6",
+        lambda _frame: None,
+        mode=DISCOVERY_ASSISTED,
+        link_advert_enabled=True,
+        auto_use=True,
+        route_lifetime=10,
+    )
+    engine.tick(0)
+    engine.advertise_neighbors([("N1", 10.0)], force=True)
+    engine.receive(
+        ControlFrame(
+            FrameType.LINK_ADVERT,
+            source="N1",
+            destination="N1",
+            next_hop="S6",
+            message_id=47,
+            ttl=2,
+        )
+    )
+    assert engine.routes.best("N1", 1, approved_only=True) is not None
+    route = engine.routes.best("N1", 1, approved_only=True)
+    engine.routes.mark_success("N1", "N1", 5)
+    assert route.expires_at == 10
+    engine.tick(10.1)
+    assert engine.live_topology.links(10.1) == []
+    assert engine.routes.best("N1", 10.1, approved_only=True) is None

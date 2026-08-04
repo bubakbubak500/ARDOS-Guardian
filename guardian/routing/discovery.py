@@ -16,7 +16,7 @@ accumulated link-quality penalty.  TTL remains a real relay budget.
 
 from __future__ import annotations
 
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass
 import time
 import zlib
@@ -43,6 +43,9 @@ DEFAULT_SETTLE_TIME = 2.0
 DEFAULT_FRAME_BUDGET = 12
 DISCOVERY_MEMORY = 180.0
 RREP_REPEAT_GAP = 2.0
+DEFAULT_LINK_ADVERT_INTERVAL = 900.0
+MIN_LINK_ADVERT_INTERVAL = 60.0
+LINK_ADVERT_MEMORY = 3600.0
 
 
 def encode_discovery_metric(hops: int, penalty: int) -> Flags:
@@ -77,7 +80,9 @@ class DynamicRoute:
     learned_at: float
     expires_at: float
     query_id: int
+    source: str = "rreq"
     approved: bool = False
+    auto_approved: bool = False
     last_success: float | None = None
     failures: int = 0
 
@@ -94,7 +99,7 @@ class DynamicRouteStore:
 
     def __init__(self, lifetime: float = DEFAULT_ROUTE_LIFETIME) -> None:
         self.lifetime = max(1.0, float(lifetime))
-        self._routes: dict[tuple[str, str], DynamicRoute] = {}
+        self._routes: dict[tuple[str, str, str], DynamicRoute] = {}
 
     def learn(
         self,
@@ -104,6 +109,9 @@ class DynamicRouteStore:
         penalty: int,
         query_id: int,
         now: float,
+        *,
+        source: str = "rreq",
+        approved: bool = False,
     ) -> DynamicRoute:
         route = DynamicRoute(
             destination.strip().upper(),
@@ -113,15 +121,66 @@ class DynamicRouteStore:
             float(now),
             float(now) + self.lifetime,
             int(query_id) & 0xFFFFFFFF,
+            source.strip().lower() or "rreq",
+            bool(approved),
+            bool(approved),
         )
-        key = (route.destination, route.next_hop)
+        key = (route.source, route.destination, route.next_hop)
         old = self._routes.get(key)
         if old is not None and old.active(now):
             route.approved = old.approved
+            route.auto_approved = old.auto_approved
             route.last_success = old.last_success
             route.failures = old.failures
         self._routes[key] = route
         return route
+
+    def replace_source(
+        self,
+        source: str,
+        routes: list[tuple],
+        now: float,
+        *,
+        approved: bool = False,
+    ) -> None:
+        """Atomically replace one volatile route source, preserving approvals."""
+        route_source = source.strip().lower()
+        old = {
+            key: route
+            for key, route in self._routes.items()
+            if route.source == route_source
+        }
+        self._routes = {
+            key: route
+            for key, route in self._routes.items()
+            if route.source != route_source
+        }
+        for route_data in routes:
+            destination, next_hop, hops, penalty, query_id = route_data[:5]
+            evidence_expires = route_data[5] if len(route_data) > 5 else None
+            key = (route_source, destination.strip().upper(), next_hop.strip().upper())
+            previous = old.get(key)
+            preserve_approval = previous is not None and previous.active(now)
+            was_approved = previous.approved if preserve_approval else False
+            learned = self.learn(
+                destination,
+                next_hop,
+                hops,
+                penalty,
+                query_id,
+                now,
+                source=route_source,
+                approved=approved or was_approved,
+            )
+            if evidence_expires is not None:
+                learned.expires_at = min(learned.expires_at, float(evidence_expires))
+            current = self._routes.get(key)
+            if current is not None and preserve_approval:
+                if previous.approved and not previous.auto_approved:
+                    current.approved = True
+                    current.auto_approved = False
+                elif not approved:
+                    current.auto_approved = previous.auto_approved
 
     def routes(self, now: float, *, include_expired: bool = False) -> list[DynamicRoute]:
         values = list(self._routes.values())
@@ -144,14 +203,21 @@ class DynamicRouteStore:
             and route.active(now)
             and (route.approved or not approved_only)
         ]
-        return min(candidates, key=lambda route: (route.metric, -route.learned_at, route.next_hop), default=None)
+        return min(
+            candidates,
+            key=lambda route: (route.metric, -route.learned_at, route.next_hop),
+            default=None,
+        )
 
-    def approve(self, destination: str, now: float) -> DynamicRoute | None:
+    def approve(
+        self, destination: str, now: float, *, automatic: bool = False
+    ) -> DynamicRoute | None:
         route = self.best(destination, now)
         if route is not None:
             for candidate in self._routes.values():
                 if candidate.destination == route.destination:
                     candidate.approved = candidate is route
+                    candidate.auto_approved = candidate is route and automatic
         return route
 
     def clear(self) -> None:
@@ -168,17 +234,147 @@ class DynamicRouteStore:
         }
 
     def mark_success(self, destination: str, next_hop: str, now: float) -> None:
-        route = self._routes.get((destination.strip().upper(), next_hop.strip().upper()))
-        if route is not None:
+        destination = destination.strip().upper()
+        next_hop = next_hop.strip().upper()
+        for route in self._routes.values():
+            if route.destination != destination or route.next_hop != next_hop:
+                continue
             route.last_success = now
             route.failures = 0
-            route.expires_at = max(route.expires_at, now + self.lifetime)
+            if route.source != "link-advert":
+                route.expires_at = max(route.expires_at, now + self.lifetime)
 
     def mark_failure(self, destination: str, next_hop: str) -> None:
-        route = self._routes.get((destination.strip().upper(), next_hop.strip().upper()))
-        if route is not None:
+        destination = destination.strip().upper()
+        next_hop = next_hop.strip().upper()
+        for route in self._routes.values():
+            if route.destination != destination or route.next_hop != next_hop:
+                continue
             route.failures += 1
             route.approved = False
+            route.auto_approved = False
+
+
+@dataclass
+class ObservedLink:
+    """Directed evidence that ``owner`` recently heard ``neighbor``."""
+
+    owner: str
+    neighbor: str
+    learned_at: float
+    expires_at: float
+    penalty: int
+    advert_id: int
+    last_sender: str
+
+    def active(self, now: float) -> bool:
+        return now < self.expires_at
+
+
+class LiveTopologyStore:
+    """Runtime-only LINK_ADVERT evidence and reciprocal route derivation."""
+
+    def __init__(self, lifetime: float = DEFAULT_ROUTE_LIFETIME) -> None:
+        self.lifetime = max(1.0, float(lifetime))
+        self._links: dict[tuple[str, str], ObservedLink] = {}
+
+    def record(
+        self,
+        owner: str,
+        neighbor: str,
+        now: float,
+        *,
+        penalty: int,
+        advert_id: int,
+        last_sender: str,
+    ) -> ObservedLink | None:
+        owner = owner.strip().upper()
+        neighbor = neighbor.strip().upper()
+        if not owner or not neighbor or owner == neighbor:
+            return None
+        link = ObservedLink(
+            owner,
+            neighbor,
+            float(now),
+            float(now) + self.lifetime,
+            min(15, max(0, int(penalty))),
+            int(advert_id) & 0xFFFFFFFF,
+            last_sender.strip().upper(),
+        )
+        self._links[(owner, neighbor)] = link
+        return link
+
+    def links(self, now: float, *, include_expired: bool = False) -> list[ObservedLink]:
+        values = list(self._links.values())
+        if not include_expired:
+            values = [link for link in values if link.active(now)]
+        return sorted(values, key=lambda link: (link.owner, link.neighbor))
+
+    def reciprocal(self, link: ObservedLink, now: float) -> bool:
+        reverse = self._links.get((link.neighbor, link.owner))
+        return bool(link.active(now) and reverse is not None and reverse.active(now))
+
+    def derive_routes(
+        self, callsign: str, now: float
+    ) -> list[tuple[str, str, int, int, int, float]]:
+        """Dijkstra over links confirmed independently from both directions."""
+        origin = callsign.strip().upper()
+        graph: dict[str, list[tuple[str, int, int, float]]] = defaultdict(list)
+        for link in self.links(now):
+            reverse = self._links.get((link.neighbor, link.owner))
+            if reverse is None or not reverse.active(now):
+                continue
+            cost = 16 + max(link.penalty, reverse.penalty)
+            advert_id = max(link.advert_id, reverse.advert_id)
+            expires_at = min(link.expires_at, reverse.expires_at)
+            graph[link.owner].append(
+                (link.neighbor, cost, advert_id, expires_at)
+            )
+
+        # metric, hops, node, first hop, penalty, advert id, evidence expiry
+        queue: list[tuple[int, int, str, str, int, int, float]] = [
+            (0, 0, origin, "", 0, 0, float("inf"))
+        ]
+        best: dict[str, tuple[int, int, str, int, int, float]] = {}
+        while queue:
+            queue.sort(reverse=True)
+            metric, hops, node, first_hop, penalty, advert_id, expiry = queue.pop()
+            if node in best and best[node][0] <= metric:
+                continue
+            best[node] = (metric, hops, first_hop, penalty, advert_id, expiry)
+            for neighbor, edge_cost, edge_id, edge_expiry in graph.get(node, []):
+                if neighbor == origin:
+                    continue
+                next_hop = first_hop or neighbor
+                edge_penalty = max(0, edge_cost - 16)
+                queue.append(
+                    (
+                        metric + edge_cost,
+                        hops + 1,
+                        neighbor,
+                        next_hop,
+                        min(15, penalty + edge_penalty),
+                        max(advert_id, edge_id),
+                        min(expiry, edge_expiry),
+                    )
+                )
+        return [
+            (destination, data[2], data[1], data[3], data[4], data[5])
+            for destination, data in best.items()
+            if destination != origin and data[2]
+        ]
+
+    def clear(self) -> None:
+        self._links.clear()
+
+    def prune(self, now: float) -> bool:
+        before = len(self._links)
+        self._links = {
+            key: link
+            for key, link in self._links.items()
+            if now < link.expires_at + max(300.0, min(self.lifetime, 3600.0))
+        }
+        return len(self._links) != before
 
 
 @dataclass
@@ -247,6 +443,9 @@ class DiscoveryEngine:
         jitter_max: float = 1.4,
         allowlist: set[str] | None = None,
         denylist: set[str] | None = None,
+        auto_use: bool = False,
+        link_advert_enabled: bool = False,
+        link_advert_interval: float = DEFAULT_LINK_ADVERT_INTERVAL,
         on_event: Callable[[DiscoveryEvent], None] | None = None,
         on_result: Callable[[DynamicRoute, PendingQuery], None] | None = None,
         on_failure: Callable[[PendingQuery, str], None] | None = None,
@@ -264,10 +463,16 @@ class DiscoveryEngine:
         self.jitter_max = max(self.jitter_min, float(jitter_max))
         self.allowlist = {item.strip().upper() for item in (allowlist or set()) if item.strip()}
         self.denylist = {item.strip().upper() for item in (denylist or set()) if item.strip()}
+        self.auto_use = bool(auto_use)
+        self.link_advert_enabled = bool(link_advert_enabled)
+        self.link_advert_interval = max(
+            MIN_LINK_ADVERT_INTERVAL, float(link_advert_interval)
+        )
         self.on_event = on_event
         self.on_result = on_result
         self.on_failure = on_failure
         self.routes = DynamicRouteStore(route_lifetime)
+        self.live_topology = LiveTopologyStore(route_lifetime)
         self.pending: dict[int, PendingQuery] = {}
         self.breadcrumbs: dict[tuple[str, int, str], Breadcrumb] = {}
         self.events: deque[DiscoveryEvent] = deque(maxlen=200)
@@ -275,10 +480,17 @@ class DiscoveryEngine:
         self._sent: deque[float] = deque()
         self._counter = 0
         self._now = 0.0
+        self._advert_seen: dict[tuple[str, int, str], float] = {}
+        self._last_advert_at: float | None = None
+        self._last_advert_neighbors: frozenset[str] | None = None
 
     @property
     def can_transmit(self) -> bool:
         return self.mode == DISCOVERY_ASSISTED
+
+    @property
+    def automatic_use_active(self) -> bool:
+        return self.auto_use and self.can_transmit
 
     def configure(
         self,
@@ -292,6 +504,9 @@ class DiscoveryEngine:
         frame_budget: int | None = None,
         allowlist: set[str] | None = None,
         denylist: set[str] | None = None,
+        auto_use: bool | None = None,
+        link_advert_enabled: bool | None = None,
+        link_advert_interval: float | None = None,
     ) -> None:
         if callsign is not None:
             self.callsign = callsign.strip().upper()
@@ -323,12 +538,45 @@ class DiscoveryEngine:
             self.max_ttl = min(MAX_DISCOVERY_TTL, max(MIN_DISCOVERY_TTL, int(max_ttl)))
         if route_lifetime is not None:
             self.routes.lifetime = max(1.0, float(route_lifetime))
+            self.live_topology.lifetime = max(1.0, float(route_lifetime))
         if frame_budget is not None:
             self.frame_budget = max(1, int(frame_budget))
         if allowlist is not None:
             self.allowlist = {item.strip().upper() for item in allowlist if item.strip()}
         if denylist is not None:
             self.denylist = {item.strip().upper() for item in denylist if item.strip()}
+        if auto_use is not None:
+            self.auto_use = bool(auto_use)
+        if link_advert_enabled is not None:
+            previous_link_advert = self.link_advert_enabled
+            self.link_advert_enabled = bool(link_advert_enabled)
+            if not self.link_advert_enabled:
+                self._scheduled = [
+                    item for item in self._scheduled if item.kind != "LINK-ADVERT"
+                ]
+                if previous_link_advert:
+                    self.live_topology.clear()
+                    self.routes.replace_source("link-advert", [], self._now)
+                    self._advert_seen.clear()
+            elif not previous_link_advert:
+                self._last_advert_at = None
+                self._last_advert_neighbors = None
+        if link_advert_interval is not None:
+            self.link_advert_interval = max(
+                MIN_LINK_ADVERT_INTERVAL, float(link_advert_interval)
+            )
+        self._sync_auto_approvals()
+
+    def _sync_auto_approvals(self) -> None:
+        active = self.automatic_use_active
+        for route in self.routes.routes(self._now, include_expired=True):
+            if active and route.active(self._now) and not route.failures:
+                if not route.approved:
+                    route.approved = True
+                    route.auto_approved = True
+            elif route.auto_approved:
+                route.approved = False
+                route.auto_approved = False
 
     def start(
         self,
@@ -369,6 +617,90 @@ class DiscoveryEngine:
         self.routes.clear()
         self._event("cleared", self.callsign, "", "dynamic routes cleared")
 
+    def clear_live_topology(self) -> None:
+        self.live_topology.clear()
+        self.routes.replace_source("link-advert", [], self._now)
+        self._advert_seen.clear()
+        self._last_advert_at = None
+        self._last_advert_neighbors = None
+        self._event("links-cleared", self.callsign, "", "live topology cleared")
+
+    def advertise_neighbors(
+        self,
+        neighbors: list[tuple[str, float | None]],
+        *,
+        force: bool = False,
+    ) -> int:
+        """Advertise fresh direct observations; return transmitted frame count."""
+        if not (self.link_advert_enabled and self.can_transmit):
+            return 0
+        clean: dict[str, float | None] = {}
+        for callsign, snr in neighbors:
+            peer = callsign.strip().upper()
+            if peer and peer != self.callsign and self._peer_allowed(peer):
+                clean[peer] = snr
+        neighbor_set = frozenset(clean)
+        if (
+            not force
+            and self._last_advert_at is not None
+            and neighbor_set == self._last_advert_neighbors
+            and self._now - self._last_advert_at < self.link_advert_interval
+        ):
+            return 0
+        advert_id = self._next_id()
+        sent = 0
+        if not clean:
+            # A one-hop presence advert bootstraps an entirely quiet network.
+            # The orchestrator records its physical sender in HeardStations;
+            # an empty neighbour is never inserted into the live graph or
+            # flooded beyond the receiver.
+            presence = ControlFrame(
+                type=FrameType.LINK_ADVERT,
+                source=self.callsign,
+                destination=self.callsign,
+                message_id=advert_id,
+                ttl=1,
+            )
+            if self._transmit(presence, "LINK-PRESENCE"):
+                sent = 1
+            self._last_advert_at = self._now
+            self._last_advert_neighbors = neighbor_set
+            self._event("advertised-presence", self.callsign, "", "one hop")
+            return sent
+        for peer in sorted(clean):
+            penalty = snr_penalty(clean[peer])
+            self.live_topology.record(
+                self.callsign,
+                peer,
+                self._now,
+                penalty=penalty,
+                advert_id=advert_id,
+                last_sender=self.callsign,
+            )
+            key = (self.callsign, advert_id, peer)
+            self._advert_seen[key] = self._now
+            frame = ControlFrame(
+                type=FrameType.LINK_ADVERT,
+                source=self.callsign,
+                destination=self.callsign,
+                next_hop=peer,
+                message_id=advert_id,
+                ttl=self.max_ttl,
+                flags=encode_discovery_metric(0, penalty),
+            )
+            if self._transmit(frame, "LINK-ADVERT"):
+                sent += 1
+        self._last_advert_at = self._now
+        self._last_advert_neighbors = neighbor_set
+        self._rebuild_live_routes()
+        self._event(
+            "advertised-links",
+            self.callsign,
+            "",
+            f"{sent}/{len(clean)} neighbours",
+        )
+        return sent
+
     def receive(self, frame: ControlFrame, *, snr: float | None = None) -> bool:
         if frame.type is FrameType.MULTIHOP_RREQ:
             if self.mode == DISCOVERY_OFF:
@@ -379,6 +711,11 @@ class DiscoveryEngine:
             if self.mode == DISCOVERY_OFF:
                 return True
             self._receive_rrep(frame)
+            return True
+        if frame.type is FrameType.LINK_ADVERT:
+            if not self.link_advert_enabled or self.mode == DISCOVERY_OFF:
+                return True
+            self._receive_link_advert(frame)
             return True
         return False
 
@@ -394,6 +731,10 @@ class DiscoveryEngine:
             if pending.best_route is not None and pending.settle_at is not None:
                 if self._now >= pending.settle_at:
                     self.pending.pop(query_id, None)
+                    if self.automatic_use_active:
+                        self.routes.approve(
+                            pending.destination, self._now, automatic=True
+                        )
                     self._event(
                         "found",
                         pending.best_route.next_hop,
@@ -415,6 +756,60 @@ class DiscoveryEngine:
                 self._event("failed", self.callsign, pending.destination, "no RREP")
                 if self.on_failure is not None:
                     self.on_failure(pending, "no multi-hop route reply")
+
+    def _receive_link_advert(self, frame: ControlFrame) -> None:
+        owner = frame.destination.strip().upper()
+        neighbor = frame.next_hop.strip().upper()
+        sender = frame.source.strip().upper()
+        if not owner or not sender or owner == self.callsign or not self._peer_allowed(sender):
+            return
+        if not neighbor:
+            self._event("heard-presence", owner, "", f"from {sender}")
+            return
+        if owner == neighbor:
+            return
+        key = (owner, frame.message_id, neighbor)
+        if key in self._advert_seen:
+            return
+        self._advert_seen[key] = self._now
+        _hops, penalty = decode_discovery_metric(frame.flags)
+        self.live_topology.record(
+            owner,
+            neighbor,
+            self._now,
+            penalty=penalty,
+            advert_id=frame.message_id,
+            last_sender=sender,
+        )
+        self._rebuild_live_routes()
+        self._event("heard-link", owner, neighbor, f"via {sender}, TTL {frame.ttl}")
+        if not (
+            self.can_transmit
+            and self.forward
+            and self.relay_enabled
+            and frame.ttl > 1
+        ):
+            return
+        onward = ControlFrame(
+            type=FrameType.LINK_ADVERT,
+            source=self.callsign,
+            destination=owner,
+            next_hop=neighbor,
+            message_id=frame.message_id,
+            priority=frame.priority,
+            ttl=frame.ttl - 1,
+            flags=frame.flags,
+        )
+        self._schedule("LINK-ADVERT", key, onward)
+
+    def _rebuild_live_routes(self) -> None:
+        routes = self.live_topology.derive_routes(self.callsign, self._now)
+        self.routes.replace_source(
+            "link-advert",
+            routes,
+            self._now,
+            approved=self.automatic_use_active,
+        )
 
     def _send_query(self, pending: PendingQuery, priority: Priority) -> None:
         frame = ControlFrame(
@@ -631,6 +1026,14 @@ class DiscoveryEngine:
 
     def _prune(self) -> None:
         self.routes.prune(self._now)
+        links_changed = self.live_topology.prune(self._now)
+        self._advert_seen = {
+            key: seen
+            for key, seen in self._advert_seen.items()
+            if self._now - seen < LINK_ADVERT_MEMORY
+        }
+        if links_changed:
+            self._rebuild_live_routes()
         self.breadcrumbs = {
             key: value
             for key, value in self.breadcrumbs.items()

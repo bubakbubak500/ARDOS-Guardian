@@ -40,6 +40,24 @@ def test_invalid_config_falls_back_to_defaults(tmp_path: Path) -> None:
     assert loaded.separate_working_channels is False
 
 
+def test_experimental_network_flags_default_off_and_round_trip(tmp_path: Path) -> None:
+    defaults = StationConfig()
+    assert defaults.discovery_auto_use is False
+    assert defaults.link_advert_enabled is False
+
+    path = tmp_path / "config.json"
+    configured = StationConfig(
+        discovery_auto_use=True,
+        link_advert_enabled=True,
+        link_advert_interval=600.0,
+    )
+    configured.save(path)
+    loaded = StationConfig.load(path)
+    assert loaded.discovery_auto_use is True
+    assert loaded.link_advert_enabled is True
+    assert loaded.link_advert_interval == 600.0
+
+
 def test_radio_profiles_carry_the_radio_page_and_nothing_else(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     config = StationConfig(

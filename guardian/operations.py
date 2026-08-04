@@ -217,6 +217,10 @@ class Operations:
             discovery_frame_budget=self.config.discovery_frame_budget,
             discovery_allowlist=set(self.config.discovery_allowlist),
             discovery_denylist=set(self.config.discovery_denylist),
+            discovery_auto_use=self.config.discovery_auto_use,
+            link_advert_enabled=self.config.link_advert_enabled,
+            link_advert_interval=self.config.link_advert_interval,
+            discovery_channel_active=self.audio_transport is not None,
         )
         net.on_alert = self._on_alert
         net.on_discovery_event = self._on_discovery_event
@@ -264,6 +268,9 @@ class Operations:
             frame_budget=self.config.discovery_frame_budget,
             allowlist=set(self.config.discovery_allowlist),
             denylist=set(self.config.discovery_denylist),
+            auto_use=self.config.discovery_auto_use,
+            link_advert_enabled=self.config.link_advert_enabled,
+            link_advert_interval=self.config.link_advert_interval,
         )
         self.net.working_channel_offer = self._working_channel_offer
         self.net.working_channel_accept = self._working_channel_accept
@@ -301,6 +308,29 @@ class Operations:
 
     def clear_discovered_routes(self) -> None:
         self.net.discovery.clear_routes()
+
+    def advertise_live_links(self) -> int:
+        if self.audio_transport is None:
+            self._log(
+                dual(
+                    "Neighbour advertisement not sent: the control channel is off.",
+                    "Oznámení sousedů nebylo odesláno: řídicí kanál je vypnutý.",
+                ),
+                level=LogLevel.WARNING,
+                source="discovery",
+            )
+            return 0
+        now = getattr(self.net, "_now", time.monotonic())
+        return self.net.discovery.advertise_neighbors(
+            [
+                (station.callsign, station.last_snr)
+                for station in self.heard.active(now)
+            ],
+            force=True,
+        )
+
+    def clear_live_topology(self) -> None:
+        self.net.discovery.clear_live_topology()
 
     def beacon_position(self) -> str:
         """The locator our beacons carry, or "" to keep it off the air."""

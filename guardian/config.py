@@ -174,6 +174,11 @@ class StationConfig:
     discovery_frame_budget: int = 12
     discovery_allowlist: list[str] = field(default_factory=list)
     discovery_denylist: list[str] = field(default_factory=list)
+    # Experimental steps 9 and 10 are independent and default off so an
+    # operator can field-test automatic route use and live topology separately.
+    discovery_auto_use: bool = False
+    link_advert_enabled: bool = False
+    link_advert_interval: float = 900.0
     beacon_enabled: bool = False
     beacon_interval: float = 120.0   # seconds between presence beacons
     # This station's Maidenhead locator ("" = unknown). Set from the map or

@@ -1,9 +1,10 @@
 # Vícehopové route discovery
 
-Stav k verzi 0.6.57: **implementováno ve sledovacím a asistovaném režimu**.
-Automatické použití bez souhlasu operátora a celosíťové `LINK_ADVERT` jsou
-záměrně odložené následné kroky. Známá síť nadále používá společnou topologii
-a z ní odvozené lokální trasy; živé discovery je oddělená, expirovatelná vrstva.
+Stav k verzi 0.6.58: **implementovány kroky 9 a 10 za dvěma nezávislými
+experimentálními přepínači**. Automatické použití nalezených tras a celosíťové
+`LINK_ADVERT` jsou ve výchozím stavu vypnuté. Známá síť nadále používá společnou
+topologii a z ní odvozené lokální trasy; živé discovery je oddělená,
+nepersistovaná a expirovatelná vrstva.
 
 ## Implementovaný rozsah 0.6.57
 
@@ -25,6 +26,53 @@ Monitorovací režim nic nevysílá. Asistovaný režim dovolí dotaz, odpověď
 discovery rámců, ale zdroj nezačne přes nalezenou cestu posílat payload, dokud
 ji operátor neschválí. Mezilehlé uzly smějí nalezenou cestu použít pro relay jen
 tehdy, když mají povolené předávání zpráv i discovery.
+
+## Experimentální rozsah 0.6.58 — kroky 9 a 10
+
+V **Síť → Automatická síť** jsou tři vnořené podzáložky (Vyhledání trasy,
+Živá topologie, Nastavení a limity) a dva nezávislé feature flagy, oba výchozí
+`false`:
+
+| Automaticky použít trasu | LINK_ADVERT | Výsledek |
+|---|---|---|
+| vypnuto | vypnuto | stejné bezpečné chování jako 0.6.57 |
+| zapnuto | vypnuto | RREQ/RREP trasu lze v Asistovaném režimu použít bez potvrzení |
+| vypnuto | zapnuto | živý graf se regeneruje, odvozené trasy čekají na schválení |
+| zapnuto | zapnuto | živý graf i čerstvé nalezené trasy mohou směrovat automaticky |
+
+Automatické použití je účinné jen v Asistovaném režimu. Přepnutí do monitoru
+okamžitě odebere automatická schválení, ale zachová skutečně ručně schválené
+trasy. Selhání next hopu trasu degraduje, odebere její schválení a dovolí nejvýše
+jeden nový omezený RREQ pokus; payload se nikdy neposílá floodem ani slepě.
+
+### LINK_ADVERT a živá topologie
+
+`LINK_ADVERT=16` oznamuje jedno čerstvé přímé pozorování:
+
+- `source` je aktuální fyzický vysílač;
+- `destination` je vlastník pozorování;
+- `next_hop` je soused, kterého vlastník skutečně nedávno slyšel;
+- `message_id` identifikuje jednu sadu oznámení;
+- spodní půlbyte `flags` nese hrubou penalizaci kvality a horní zůstává nulový;
+- TTL je skutečný rozpočet floodu.
+
+Prázdný `next_hop` je pouze jednoskokový advert přítomnosti s TTL 1. Umožní
+dvěma dosud tichým stanicím, aby se navzájem zařadily mezi slyšené sousedy;
+nikdy se nevkládá do grafu a nepředává se dál. Změna množiny přímých sousedů se
+oznámí hned, jinak platí nastavitelný interval nejméně jedna minuta.
+
+Tvrzení „A slyší B“ samo dokládá jen jeden směr. Guardian vytvoří routovatelnou
+vazbu `A ↔ B` teprve tehdy, když zároveň existuje čerstvé nezávislé tvrzení
+„B slyší A“. Jednosměrné pozorování je viditelné v tabulce, ale Dijkstra je
+nepoužije. Trasa odvozená z potvrzeného živého grafu má zdroj `link-advert` a
+její expirace nepřekročí nejstarší důkaz na cestě.
+
+Adverty používají stejný operátorský TTL, deterministický jitter, deduplikaci,
+allowlist/denylist a společný limit rámců za minutu jako RREQ/RREP. Multihopové
+předávání navíc vyžaduje současně povolené discovery forwarding a message relay.
+Starší Guardian typ 16 zahodí a vytvoří bezpečnou mezeru v grafu. Vypnutí
+LINK_ADVERT smaže pouze jeho volatilní pozorování a odvozené trasy; sestavovač,
+CSV topologie, ruční trasy i RREQ/RREP cache zůstanou nedotčené.
 
 ## Proč současný `ROUTE_QUERY` nestačí
 
@@ -126,8 +174,9 @@ priority nesmějí automaticky snížit bezpečnostní limity airtime.
 ## Bezpečnost a důvěra
 
 Současný protokol neověřuje kryptograficky identitu uzlu. Cizí stanice může
-teoreticky nabídnout atraktivní falešnou trasu. Před zapnutím automatického
-vícehopového discovery je proto potřeba alespoň:
+teoreticky nabídnout atraktivní falešnou trasu nebo sousedské tvrzení. Proto je
+automatika označena jako experimentální, výchozí stav je vypnutý a před on-air
+zapnutím je potřeba využít alespoň:
 
 - allowlist/denylist relay stanic;
 - možnost zakázat dynamickou nabídku pro vybrané skupiny/cíle;
@@ -139,19 +188,26 @@ vícehopového discovery je proto potřeba alespoň:
 
 Automatické testy používají RF graf S6–N1–N2–N3–S1 s větvemi S2/S3/S4/S5,
 úmyslnou smyčku, ztracený první RREQ i RREP, duplikáty, stejné ID od dvou zdrojů,
-starší nepodporující uzel, allow/deny pravidla a rozpočet vysílání. Samostatný
-end-to-end test po schválení provede existující store-and-forward payload cestu
-a vrátí finální `DELIVERED` až k S6.
+starší nepodporující uzel, allow/deny pravidla a rozpočet vysílání. Samostatné
+end-to-end testy provedou existující store-and-forward payload cestu jak po
+ručním schválení, tak se zapnutým automatickým použitím a vrátí finální
+`DELIVERED` až k S6.
+
+LINK_ADVERT testy pokrývají vypnutý feature flag, jednosměrné pozorování,
+bootstrap úplně tiché sítě, automatickou regeneraci vícehopové cesty, větve a
+smyčky, ztracený první advert, mezeru tvořenou starší verzí, konečný počet
+rámců, nezávislé kombinace obou přepínačů, expiraci i odstranění pouze živé
+vrstvy po vypnutí.
 
 Časové okno v živé aplikaci se škáluje z airtime aktivního AFSK/MFSK modemu a
-počtu hopů. Před případným automatickým režimem stále zbývá skutečný on-air test
-nejprve v monitorovacím a potom asistovaném režimu.
+počtu hopů. Před běžným používáním automatických přepínačů stále zbývá skutečný
+on-air test nejprve v monitorovacím, potom asistovaném a nakonec experimentálním
+režimu.
 
 ## Co zůstává odložené
 
-0.6.57 nemá režim „automaticky použít každou objevenou trasu“. Tato možnost je
-bod 9 a vznikne až po provozním ověření. RREQ/RREP také hledá cestu jen ke
-známému cíli; samo neobjeví stanici, na kterou se nikdo nezeptá. Bod 10 proto
-počítá s omezeným `LINK_ADVERT` nebo obdobnou výměnou potvrzených sousedů pro
-skutečnou regeneraci celé topologie. Ani budoucí živá vrstva nesmí bez výslovné
-akce přepsat ruční či importovanou topologii.
+- kryptografické ověření identity a sousedských tvrzení;
+- per-cíl trust pravidla nad rámec společného allowlistu/denylistu;
+- trvalé ukládání živého grafu (záměrně se po restartu znovu ověřuje);
+- sloučení živého grafu do sestavovače nebo importované topologie;
+- produkční zapnutí obou experimentů ve výchozím stavu před on-air měřením.

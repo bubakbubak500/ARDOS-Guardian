@@ -29,10 +29,12 @@ volbu další práce je rozhodující tento backlog.
 2. **Ověřit workflow z v0.6.46 v terénu.** Zaznamenat operátorský test mapových
    vazeb a bezpečného ručního No-CAT QSY na skutečném rádiu; automatické a
    softwarové testy jsou hotové.
-3. **Ověřit 0.6.57 discovery na rádiu.** Začít v režimu Pouze sledovat, potom
+3. **Ověřit 0.6.58 discovery na rádiu.** Začít v režimu Pouze sledovat, potom
    na řetězci alespoň tří RF segmentů zkusit asistovaný RREQ/RREP, ruční
-   schválení, předání payloadu a návrat `DELIVERED`. Změřit skutečný airtime a
-   případně upravit TTL, jitter a rozpočet před automatizací.
+   schválení, předání payloadu a návrat `DELIVERED`. Následně odděleně zapnout
+   automatické použití a LINK_ADVERT, ověřit bootstrap tiché sítě, obousměrné
+   potvrzení, expiraci a zotavení po výpadku. Změřit skutečný airtime a případně
+   upravit TTL, interval, jitter a rozpočet před produkčním zapnutím.
 
 ## Vydáno v 0.6.53 — určení vlastního lokátoru
 
@@ -117,14 +119,22 @@ modelu terénu — vyžaduje stovky MB dat SRTM nebo síť.
 - RF graf testuje přesnou síť S6–N1–N2–N3–S1, větve, smyčku, ztráty, duplikáty,
   souběh a mezeru tvořenou starší verzí.
 
-### Navazující síťové kroky — záměrně mimo 0.6.57
+## Vydáno v 0.6.58 — experimentální kroky 9 a 10
 
-1. **Krok 9 — automatické použití discovery trasy.** Zapnout až po on-air
-   ověření asistovaného režimu; zachovat možnost monitor-only a nikdy
-   nepřepisovat ruční override.
-2. **Krok 10 — `LINK_ADVERT` / regenerace celé topologie.** RREQ umí najít
-   cestu jen ke známému cíli. Pro stanice, na které se nikdo nezeptal, navrhnout
-   verzovanou a airtime-omezenou výměnu skutečně potvrzených sousedů.
+- **Krok 9 — automatické použití discovery trasy:** samostatný výchozí vypnutý
+  přepínač dovolí v Asistovaném režimu použít čerstvou RREQ/RREP trasu bez
+  potvrzení. V monitoru se automatická schválení odeberou, ruční zůstanou a
+  ruční/topologický override se nikdy nepřepíše.
+- **Krok 10 — `LINK_ADVERT`:** nový typ 16 vyměňuje přímá pozorování s TTL,
+  deduplikací, jitterem a společným airtime rozpočtem. Jednoskoková přítomnost
+  probudí tichou síť; routovatelná je až oboustranně potvrzená vazba. Celý graf i
+  odvozené trasy jsou volatilní, expirují a zůstávají oddělené od sestavovače.
+- **UI:** Automatická síť má podzáložky Vyhledání trasy, Živá topologie a
+  Nastavení a limity, nezávislé experimentální přepínače, interval, stav
+  pozorování a ruční akce.
+- **Ověření:** RF testy pokrývají samodetekci tiché sítě, S6–N1–N2–N3–S1,
+  jednostranné vazby, smyčky, konečný flood, expiraci, přepínání feature flagů
+  a automatický end-to-end `DELIVERED`.
 
 ## P3 — release hardening a sledovaná rizika
 

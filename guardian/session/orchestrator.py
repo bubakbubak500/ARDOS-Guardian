@@ -297,6 +297,10 @@ class Orchestrator:
         discovery_frame_budget: int = 12,
         discovery_allowlist: set[str] | None = None,
         discovery_denylist: set[str] | None = None,
+        discovery_auto_use: bool = False,
+        link_advert_enabled: bool = False,
+        link_advert_interval: float = 900.0,
+        discovery_channel_active: bool = True,
     ):
         self.callsign = callsign.strip().upper()
         self.transport = transport
@@ -314,6 +318,7 @@ class Orchestrator:
         self.ack_timeout = ACK_TIMEOUT
         self.start_timeout = START_TIMEOUT
         self.relay = relay
+        self.discovery_channel_active = bool(discovery_channel_active)
         self._clock = clock
         self.learned_paths: dict[str, str] = {}   # final_dest -> next_hop that worked
         self.busy = False
@@ -360,6 +365,9 @@ class Orchestrator:
             frame_budget=discovery_frame_budget,
             allowlist=discovery_allowlist,
             denylist=discovery_denylist,
+            auto_use=discovery_auto_use,
+            link_advert_enabled=link_advert_enabled,
+            link_advert_interval=link_advert_interval,
             on_event=self._on_discovery_event,
             on_result=self._on_discovery_result,
             on_failure=self._on_discovery_failure,
@@ -502,11 +510,21 @@ class Orchestrator:
         msg = self.sessions.get(query.query_id)
         if msg is None or msg.state is not SessionState.MULTIHOP_DISCOVERY:
             return
-        self._enter(msg, SessionState.WAITING_ROUTE_APPROVAL)
-        self._emit(
-            msg,
-            f"route found via {route.next_hop} ({route.hops} hops); awaiting operator approval",
-        )
+        if self.discovery.automatic_use_active:
+            msg.next_hop = route.next_hop
+            self._begin_announce(msg)
+            self._emit(
+                msg,
+                f"automatically using discovered route via {route.next_hop} "
+                f"({route.hops} hops)",
+            )
+        else:
+            self._enter(msg, SessionState.WAITING_ROUTE_APPROVAL)
+            self._emit(
+                msg,
+                f"route found via {route.next_hop} ({route.hops} hops); "
+                "awaiting operator approval",
+            )
 
     def _on_discovery_failure(self, query: PendingQuery, reason: str) -> None:
         msg = self.sessions.get(query.query_id)
@@ -668,6 +686,13 @@ class Orchestrator:
         """Drive timeouts/retransmits. Call periodically."""
         self._now = now
         self.discovery.tick(now)
+        if self.discovery_channel_active:
+            self.discovery.advertise_neighbors(
+                [
+                    (station.callsign, station.last_snr)
+                    for station in self.heard.active(now)
+                ]
+            )
         self._tick_alerts(now)
         if self._seen_delivery_receipts:
             self._seen_delivery_receipts = {
