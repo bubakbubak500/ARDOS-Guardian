@@ -37,7 +37,10 @@ manifest, and asks again before launching it.
   `MULTIHOP_RREQ`, `MULTIHOP_RREP`, `START_VARA`,
   `WORKING_OFFER`, `WORKING_ACK`, `RECEIVED`, `DELIVERED`, `CANCEL`), priorities and flags. Message composer
   builds and self-tests real bursts.
-- **Configurable route table** (destination/group → preferred + backup hop)
+- **Configurable route table** (destination/group → preferred + backup hop), with
+  live evidence shown read-only beside it — heard, discovered and link-advert
+  routes carry a source and an expiry, and reach the stored file only through an
+  explicit *Save as manual route*
 - **Shared network topology builder**: import one link CSV for the whole net or
   add directed/costed links in a three-step wizard. Each PC derives its own
   next-hop table from its configured callsign; manual routes remain overrides.

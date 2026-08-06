@@ -310,6 +310,15 @@ def help_topics() -> list[HelpTopic]:
             optional backup, control/direct-QSY frequency and mode. Add or replace saves
             the normalized uppercase route. Remove selected deletes only that
             destination entry.</p>
+            <p>The Routes table also lists what the station currently observes —
+            heard stations, discovered RREQ routes and live topology — each with
+            its source and an <b>Expires in</b> value. Those rows are read-only,
+            expire on their own and are never written to the route file; a
+            planned route hides the duplicate observation for its destination.
+            <b>Save as manual route</b> copies the selected live or generated row
+            in as a permanent manual route, carrying the frequency a station was
+            actually heard on, and is also how you create a manual override for a
+            generated Topology row.</p>
             <p>When automatic route discovery is enabled and no manual or
             learned route exists, ARDOS broadcasts ROUTE_QUERY and evaluates
             ROUTE_OFFER responses. A direct destination wins; relay candidates
@@ -390,6 +399,15 @@ def help_topics() -> list[HelpTopic]:
             volitelnou zálohu, řídicí frekvenci či frekvenci přímého QSY a režim. Přidání nebo nahrazení
             uloží trasu normalizovanou na velká písmena. Odstranění smaže jen
             záznam vybraného cíle.</p>
+            <p>Tabulka Trasy zobrazuje i to, co stanice právě pozoruje — slyšené
+            stanice, nalezené trasy RREQ a živou topologii — vždy se zdrojem a
+            hodnotou <b>Expiruje za</b>. Tyto řádky jsou jen ke čtení, expirují
+            samy a do souboru tras se nikdy nezapisují; plánovaná trasa skryje
+            duplicitní pozorování téhož cíle. <b>Uložit jako ruční trasu</b>
+            zkopíruje vybraný živý nebo odvozený řádek dovnitř jako trvalou ruční
+            trasu i s kmitočtem, na kterém byla stanice skutečně slyšena, a je to
+            zároveň způsob, jak vytvořit ruční override odvozeného řádku
+            Topologie.</p>
             <p>Je-li zapnuto automatické hledání a neexistuje ruční ani naučená
             trasa, ARDOS vyšle ROUTE_QUERY a vyhodnotí odpovědi ROUTE_OFFER.
             Přímý cíl má přednost; relay kandidáti s měřením se řadí podle S/N,

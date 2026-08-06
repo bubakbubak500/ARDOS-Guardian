@@ -529,6 +529,144 @@ def test_discovery_tab_displays_and_approves_a_volatile_route() -> None:
         runtime.close()
 
 
+def test_routes_table_shows_live_evidence_without_persisting_it() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.routes = RouteTable([Route("OK1ABC", "OK2IPW", source="manual")])
+    workspace = NetworkWorkspace(runtime)
+    try:
+        now = time.monotonic()
+        runtime.operations.net.tick(now)
+        runtime.heard.record("OK2IPW", now, freq_hz=145_500_000, frame="BEACON")
+        runtime.operations.net.discovery.routes.learn("OK5XYZ", "OK2IPW", 2, 0, 7, now)
+        workspace.refresh()
+
+        rows = {
+            workspace.routes_table.item(r, 0).text(): (
+                workspace.routes_table.item(r, 7).text(),
+                workspace.routes_table.item(r, 8).text(),
+            )
+            for r in range(workspace.routes_table.rowCount())
+        }
+        # The planned row keeps its place and carries no expiry.
+        assert rows["OK1ABC"] == (tr("network.source_manual"), "—")
+        assert rows["OK2IPW"][0] == tr("network.source_heard")
+        assert rows["OK2IPW"][1].endswith("min")
+        # An unapproved discovered route is shown, and says it cannot be used.
+        assert tr("network.source_rreq") in rows["OK5XYZ"][0]
+        assert tr("network.route_unapproved") in rows["OK5XYZ"][0]
+
+        # Nothing observed reached the stored table.
+        assert [route.destination for route in runtime.routes.routes] == ["OK1ABC"]
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_a_planned_route_hides_the_duplicate_live_row() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.routes = RouteTable([Route("OK2IPW", "OK9REL", source="manual")])
+    workspace = NetworkWorkspace(runtime)
+    try:
+        runtime.heard.record("OK2IPW", time.monotonic(), frame="BEACON")
+        workspace.refresh()
+
+        # One row for OK2IPW, and it is the operator's, not the observation.
+        assert workspace.routes_table.rowCount() == 1
+        assert workspace.routes_table.item(0, 1).text() == "OK9REL"
+        assert workspace.routes_table.item(0, 7).text() == tr("network.source_manual")
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_promoting_a_heard_row_stores_a_direct_manual_route_with_its_frequency(
+    monkeypatch,
+) -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.routes = RouteTable()
+    monkeypatch.setattr(runtime.routes, "save", lambda *a, **k: None)
+    workspace = NetworkWorkspace(runtime)
+    try:
+        runtime.heard.record(
+            "OK2IPW", time.monotonic(), freq_hz=145_500_000, frame="BEACON"
+        )
+        workspace.refresh()
+        workspace.routes_table.selectRow(0)
+        workspace._promote_selected_route()
+
+        stored = runtime.routes.lookup("OK2IPW")
+        assert stored is not None
+        assert stored.source == "manual"
+        # Heard directly means "call it directly": no preferred hop.
+        assert stored.preferred == ""
+        # The frequency it was actually heard on is a measurement worth keeping.
+        assert stored.freq_hz == 145_500_000
+        assert stored.mode == "FM"
+
+        # A second promotion is refused rather than silently overwriting.
+        shown = []
+        monkeypatch.setattr(
+            QMessageBox, "information", lambda *a, **k: shown.append(a[2])
+        )
+        workspace.refresh()
+        workspace.routes_table.selectRow(0)
+        workspace._promote_selected_route()
+        assert shown and "OK2IPW" in shown[0]
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_a_live_row_cannot_be_removed_as_if_it_were_stored(monkeypatch) -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.routes = RouteTable()
+    workspace = NetworkWorkspace(runtime)
+    try:
+        runtime.heard.record("OK2IPW", time.monotonic(), frame="BEACON")
+        workspace.refresh()
+        shown = []
+        monkeypatch.setattr(
+            QMessageBox, "information", lambda *a, **k: shown.append(a[2])
+        )
+        workspace.routes_table.selectRow(0)
+        workspace._remove_route()
+
+        assert shown == [tr("network.route_live_remove_hint")]
+        # Still visible: refusing to remove it must not delete the observation.
+        workspace.refresh()
+        assert workspace.routes_table.rowCount() == 1
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_promoting_a_generated_topology_row_creates_a_manual_override(
+    monkeypatch,
+) -> None:
+    # network.topology_remove_hint has always told operators to do this; until
+    # now there was no button for it.
+    _application()
+    runtime = ShellRuntime()
+    runtime.routes = RouteTable([Route("OK1ABC", "OK2IPW", source="topology")])
+    monkeypatch.setattr(runtime.routes, "save", lambda *a, **k: None)
+    workspace = NetworkWorkspace(runtime)
+    try:
+        workspace.refresh()
+        workspace.routes_table.selectRow(0)
+        workspace._promote_selected_route()
+
+        stored = runtime.routes.lookup("OK1ABC")
+        assert stored is not None
+        assert (stored.source, stored.preferred) == ("manual", "OK2IPW")
+    finally:
+        workspace.close()
+        runtime.close()
+
+
 def test_working_channel_route_ui_is_hidden_until_network_opt_in() -> None:
     _application()
     runtime = ShellRuntime()

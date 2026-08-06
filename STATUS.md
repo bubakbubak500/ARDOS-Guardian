@@ -1001,6 +1001,25 @@ Two defects, both in what 0.6.49 added.
   shipped defaults, the configuration migration, the flat page structure, the
   disabled-action reasons and the heard-derived one-hop row.
 
+## One merged routing view with per-row source (0.6.60)
+
+- **Network → Routes** lists all five sources in the order `_resolve_next_hop`
+  consults them: Manual, Topology, Heard directly, Discovered (RREQ), Live
+  topology. A new **Expires in** column marks live rows (`—` = stored), an
+  unapproved discovered route says so, and a planned row hides the duplicate
+  observation for its destination.
+- Live rows are read-only: they expire, vanish on restart and never reach
+  `routes.json`. Removing one explains that it is an observation.
+- **Save as manual route** copies the selected live or generated row into the
+  table as a permanent manual route. A heard station becomes a direct route with
+  no preferred hop and carries the frequency it was heard on; an existing manual
+  route is refused rather than overwritten. It also produces the manual override
+  for a Topology row that `network.topology_remove_hint` always described.
+- The source is deliberately *not* persisted as-is. `Route.normalised()`
+  collapses every source to `manual`/`topology`, so a stored discovery row would
+  be relabelled Manual — the highest precedence there is — and would outlive the
+  expiry that made it trustworthy.
+
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,
   reported from the air 2026-07-30, HF and FM; the alert itself arrived and

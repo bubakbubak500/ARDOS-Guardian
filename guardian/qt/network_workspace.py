@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from dataclasses import dataclass
+
 from ..i18n import dual, tr
 from ..routing import (
     DISCOVERY_ASSISTED,
@@ -35,6 +37,25 @@ from ..routing import (
 from .inputs import FrequencySpinBox, RowTable, UppercaseLineEdit
 from .runtime import ShellRuntime
 from .topology_wizard import TOPOLOGY_FILTER, TopologyWizard, topology_warning_text
+
+
+@dataclass
+class _RouteRow:
+    """One line of the Routes table, planned or observed.
+
+    Only ``planned`` rows exist in the persisted route table. Observed rows are
+    a read-only view of volatile evidence -- they expire, they vanish on a
+    restart, and they reach `routes.json` only when the operator presses
+    "Save as manual route".
+    """
+
+    destination: str
+    preferred: str          # "" means "call the destination directly"
+    freq_hz: int
+    mode: str
+    source_label: str
+    expires: str
+    planned: bool
 
 
 class NetworkWorkspace(QWidget):
@@ -66,7 +87,7 @@ class NetworkWorkspace(QWidget):
     def _routes_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        self.routes_table = RowTable(0, 8)
+        self.routes_table = RowTable(0, 9)
         self.routes_table.setHorizontalHeaderLabels(
             [
                 tr("network.destination"),
@@ -77,15 +98,23 @@ class NetworkWorkspace(QWidget):
                 tr("network.working_frequency"),
                 tr("network.working_mode"),
                 tr("network.route_source"),
+                tr("network.route_expires"),
             ]
         )
         self.routes_table.itemSelectionChanged.connect(self._load_selected_route)
         header = self.routes_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in (2, 3, 4, 5, 6, 7):
+        for column in (2, 3, 4, 5, 6, 7, 8):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.routes_table, 1)
+        # The precedence rule is short enough to state, and without it a
+        # topology row for a station that is also heard looks like a
+        # contradiction rather than a hop that simply is not needed.
+        self.routes_precedence = QLabel(tr("network.route_precedence"))
+        self.routes_precedence.setWordWrap(True)
+        self.routes_precedence.setObjectName("Metadata")
+        layout.addWidget(self.routes_precedence)
 
         form = QFormLayout()
         self.destination = UppercaseLineEdit()
@@ -113,9 +142,13 @@ class NetworkWorkspace(QWidget):
         add = QPushButton(tr("network.add"))
         add.setObjectName("primaryAction")
         add.clicked.connect(self._save_route)
+        self.promote_route = QPushButton(tr("network.route_promote"))
+        self.promote_route.setToolTip(tr("network.route_promote_hint"))
+        self.promote_route.clicked.connect(self._promote_selected_route)
         remove = QPushButton(tr("network.remove"))
         remove.clicked.connect(self._remove_route)
         actions.addWidget(add)
+        actions.addWidget(self.promote_route)
         actions.addStretch()
         actions.addWidget(remove)
         layout.addLayout(actions)
@@ -541,7 +574,17 @@ class NetworkWorkspace(QWidget):
         item = self.routes_table.item(row, 0) if row >= 0 else None
         return self.runtime.routes.lookup(item.text()) if item is not None else None
 
+    def _selected_route_row(self) -> _RouteRow | None:
+        row = self.routes_table.currentRow()
+        rows = getattr(self, "_route_rows", [])
+        return rows[row] if 0 <= row < len(rows) else None
+
     def _load_selected_route(self) -> None:
+        # Only a planned row belongs in the editor. An observed row has no
+        # backup or working channel to edit and is not ours to rewrite.
+        entry = self._selected_route_row()
+        if entry is None or not entry.planned:
+            return
         route = self._selected_route()
         if route is None:
             return
@@ -599,7 +642,57 @@ class NetworkWorkspace(QWidget):
         )
         self.refresh()
 
+    def _promote_selected_route(self) -> None:
+        """Copy an observed or generated row into the persisted table as manual.
+
+        The evidence itself stays volatile. This writes a new operator decision
+        that happens to have been informed by it -- which is why the stored row
+        is honestly labelled manual rather than keeping the source it came from.
+        """
+        entry = self._selected_route_row()
+        if entry is None:
+            return
+        existing = self.runtime.routes.lookup(entry.destination)
+        if existing is not None and existing.source == "manual":
+            QMessageBox.information(
+                self,
+                tr("network.routes"),
+                tr("network.route_already_manual", destination=entry.destination),
+            )
+            return
+        self.runtime.routes.add(
+            Route(
+                entry.destination,
+                entry.preferred,
+                "",
+                entry.freq_hz,
+                entry.mode,
+                0,
+                "",
+                "manual",
+            )
+        )
+        self.runtime.routes.save()
+        self.runtime.events.publish(
+            tr(
+                "network.route_promoted",
+                destination=entry.destination,
+                source=entry.source_label,
+            ),
+            source="network",
+        )
+        self.runtime.refresh()
+        self.refresh()
+
     def _remove_route(self) -> None:
+        entry = self._selected_route_row()
+        if entry is not None and not entry.planned:
+            QMessageBox.information(
+                self,
+                tr("network.routes"),
+                tr("network.route_live_remove_hint"),
+            )
+            return
         route = self._selected_route()
         if route is None:
             return
@@ -623,30 +716,106 @@ class NetworkWorkspace(QWidget):
         )
         self.refresh()
 
-    def refresh(self) -> None:
-        self._sync_working_channel_visibility()
-        routes = self.runtime.routes.routes
-        self.routes_table.setRowCount(len(routes))
-        for row, route in enumerate(routes):
+    def _default_channel_mode(self) -> str:
+        """The mode a promoted route should carry for this control modem."""
+        return "USB" if self.runtime.config.active_modem() == "mfsk16" else "FM"
+
+    @staticmethod
+    def _minutes(seconds: float) -> str:
+        return f"{max(0.0, seconds) / 60:.0f} min"
+
+    def _build_route_rows(self, now: float, heard: list, discovery) -> list[_RouteRow]:
+        """Planned routes first, then observed evidence for anything they miss.
+
+        Planned rows keep stable indices so the live rows appearing and expiring
+        underneath them cannot shift the row the operator is editing.
+        """
+        rows = [
+            _RouteRow(
+                destination=route.destination,
+                preferred=route.preferred,
+                freq_hz=route.freq_hz,
+                mode=route.mode,
+                source_label=tr(f"network.source_{route.source}"),
+                expires="—",
+                planned=True,
+            )
+            for route in self.runtime.routes.routes
+        ]
+        seen = {row.destination for row in rows}
+        # Same order _resolve_next_hop consults them in: heard beats discovered.
+        for station in heard:
+            if station.callsign in seen:
+                continue
+            seen.add(station.callsign)
+            frequency = int(station.last_freq_hz or 0)
+            rows.append(
+                _RouteRow(
+                    destination=station.callsign,
+                    preferred="",
+                    freq_hz=frequency,
+                    mode=self._default_channel_mode() if frequency else "",
+                    source_label=tr("network.source_heard"),
+                    expires=self._minutes(self.runtime.heard.max_age - station.age(now)),
+                    planned=False,
+                )
+            )
+        for route in discovery.routes.routes(now):
+            if route.destination in seen:
+                continue
+            seen.add(route.destination)
+            label = tr(f"network.source_{route.source.replace('-', '_')}")
+            if not route.approved:
+                label = f"{label} · {tr('network.route_unapproved')}"
+            rows.append(
+                _RouteRow(
+                    destination=route.destination,
+                    preferred=(
+                        "" if route.next_hop == route.destination else route.next_hop
+                    ),
+                    freq_hz=0,
+                    mode="",
+                    source_label=label,
+                    expires=self._minutes(route.expires_at - now),
+                    planned=False,
+                )
+            )
+        return rows
+
+    def _fill_routes_table(self) -> None:
+        self.routes_table.setRowCount(len(self._route_rows))
+        for row, entry in enumerate(self._route_rows):
+            planned = (
+                self.runtime.routes.lookup(entry.destination)
+                if entry.planned
+                else None
+            )
             values = (
-                route.destination,
-                route.preferred,
-                route.backup,
-                self.frequency.textFromValue(route.freq_hz) if route.freq_hz else "",
-                route.mode,
+                entry.destination,
+                entry.preferred,
+                planned.backup if planned else "",
+                self.frequency.textFromValue(entry.freq_hz) if entry.freq_hz else "",
+                entry.mode,
                 (
-                    self.working_frequency.textFromValue(route.working_freq_hz)
-                    if route.working_freq_hz
+                    self.working_frequency.textFromValue(planned.working_freq_hz)
+                    if planned and planned.working_freq_hz
                     else ""
                 ),
-                route.working_mode,
-                tr(f"network.source_{route.source}"),
+                planned.working_mode if planned else "",
+                entry.source_label,
+                entry.expires,
             )
             for column, value in enumerate(values):
                 self.routes_table.setItem(row, column, QTableWidgetItem(value))
 
+    def refresh(self) -> None:
+        self._sync_working_channel_visibility()
         now = time.monotonic()
         heard = self.runtime.heard.active(now)
+        discovery = self.runtime.operations.net.discovery
+        self._route_rows = self._build_route_rows(now, heard, discovery)
+        self._fill_routes_table()
+
         own_grid = (self.runtime.config.station_grid or "").upper()
         self.heard_table.setRowCount(len(heard))
         for row, station in enumerate(heard):
@@ -706,7 +875,6 @@ class NetworkWorkspace(QWidget):
             else tr("network.topology_no_warnings")
         )
 
-        discovery = self.runtime.operations.net.discovery
         routes = discovery.routes.routes(now, include_expired=True)
         # A directly heard station already resolves as a one-hop next hop, so
         # show it beside the learned routes instead of leaving the operator to

@@ -583,6 +583,44 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.source_manual": ("Manual", "Ruční"),
     "network.source_topology": ("Topology", "Topologie"),
     "network.source_heard": ("Heard directly", "Přímo slyšena"),
+    "network.source_rreq": ("Discovered (RREQ)", "Nalezená (RREQ)"),
+    "network.source_link_advert": ("Live topology", "Živá topologie"),
+    "network.route_expires": ("Expires in", "Expiruje za"),
+    "network.route_unapproved": ("not approved", "neschválená"),
+    "network.route_precedence": (
+        "Manual routes win, then a directly heard station, then an approved "
+        "discovered route, then topology. Rows with an expiry are live "
+        "observations: they are read-only, vanish on restart, and are never "
+        "written to the route file.",
+        "Přednost mají ruční trasy, pak přímo slyšená stanice, pak schválená "
+        "nalezená trasa a nakonec topologie. Řádky s expirací jsou živá "
+        "pozorování: jsou jen ke čtení, po restartu zmizí a do souboru tras se "
+        "nikdy nezapisují.",
+    ),
+    "network.route_promote": (
+        "Save as manual route",
+        "Uložit jako ruční trasu",
+    ),
+    "network.route_promote_hint": (
+        "Copy the selected live or generated row into the route table as a "
+        "permanent manual route.",
+        "Zkopíruje vybraný živý nebo odvozený řádek do tabulky tras jako trvalou "
+        "ruční trasu.",
+    ),
+    "network.route_promoted": (
+        "Route to {destination} saved as a manual route (from {source}).",
+        "Trasa k {destination} byla uložena jako ruční (z: {source}).",
+    ),
+    "network.route_already_manual": (
+        "{destination} already has a manual route. Edit it in the form below.",
+        "{destination} už ruční trasu má. Upravte ji ve formuláři níže.",
+    ),
+    "network.route_live_remove_hint": (
+        "This row is a live observation, not a stored route. It expires on its "
+        "own; use Save as manual route to keep it.",
+        "Tento řádek je živé pozorování, nikoli uložená trasa. Expiruje sám; "
+        "chcete-li si ho nechat, použijte Uložit jako ruční trasu.",
+    ),
     "network.station_a": ("Station A", "Stanice A"),
     "network.station_b": ("Station B", "Stanice B"),
     "network.direction": ("Direction", "Směr"),
