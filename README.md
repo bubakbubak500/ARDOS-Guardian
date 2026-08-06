@@ -42,8 +42,9 @@ manifest, and asks again before launching it.
   add directed/costed links in a three-step wizard. Each PC derives its own
   next-hop table from its configured callsign; manual routes remain overrides.
 - **Assisted multi-hop discovery**: bounded RREQ/RREP flooding, directed reverse
-  replies, expiring live routes, trust lists and airtime limits. Monitor mode
-  is receive-only and assisted routes require operator approval before payload.
+  replies, expiring live routes, trust lists and airtime limits. Two positions
+  only — off, or assisted with operator approval before a learned route carries
+  payload.
 - **Radio drivers**: Hamlib/rigctld TCP backend (freq/mode/PTT/S-meter) and a
   generic serial VOX PTT backend
 - **VARA client**: TCP command/data connection with async notification reader
@@ -123,10 +124,12 @@ S/N, freshness and a deterministic callsign tie-break. The Network workspace
 now uses the former scanner page for a shared **network builder**: one topology
 derives a different local route table at every station. The scanner engine
 remains compatible with generated route channels but is no longer a primary
-operator workflow. Guardian 0.6.57 adds bounded multi-hop RREQ/RREP in
-**monitor-only and assisted modes**. Guardian 0.6.58 adds two independent,
-default-off experiments: automatic use of fresh discovery routes and reciprocal
-`LINK_ADVERT` regeneration of a volatile live topology. Dynamic evidence
+operator workflow. Guardian 0.6.57 adds bounded multi-hop RREQ/RREP and 0.6.58
+`LINK_ADVERT` live-topology regeneration. Guardian 0.6.59 reduces discovery to
+**off or assisted**, retiring the receive-only monitor position that could
+neither answer a query nor produce a usable route, flattens the Network
+workspace into five pages, and states on the page why an action cannot run.
+`LINK_ADVERT` remains the one experiment, on the last page. Dynamic evidence
 expires and always stays separate from the planned topology; see
 [the multi-hop discovery design](docs/MULTIHOP_DISCOVERY.md).
 

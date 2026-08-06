@@ -326,28 +326,35 @@ def help_topics() -> list[HelpTopic]:
             positive cost and calling/working channels. Generated routes are
             labelled Topology; saving the same destination manually creates an
             override.</p>
-            <p><b>Automatic network</b> is a separate live discovery layer with
-            Route discovery, Live topology, and Settings and limits sub-tabs.
-            Off ignores multi-hop
-            frames; Monitor only records compatible frames and never transmits;
-            Assisted may run bounded discovery but normally pauses an originating
-            message until the operator approves the selected route. Learned
-            routes expire and never overwrite manual or Topology rows.</p>
+            <p><b>Route discovery</b> is its own page with two positions. Off
+            ignores every multi-hop frame. Assisted answers a query about this
+            station, may look for a route you ask for, and normally pauses an
+            originating message until you approve the route it found. Learned
+            routes expire and never overwrite manual or Topology rows. The
+            receive-only Monitor position of earlier releases is gone: it could
+            neither answer a query nor produce a usable route, so a profile
+            holding it is read as Assisted after an upgrade.</p>
             <p>Find route uses expanding TTL rings and displays the query and
-            returned path. Forward discovery requests works only together with
-            Relay messages for other stations, so a node never advertises a
-            payload path it refuses to serve. TTL is capped at 8; the frame
-            budget and allow/deny lists bound airtime and participating peers.
-            Clearing dynamic routes does not touch the route table or builder.</p>
-            <p>The experimental automatic-use switch lets a fresh RREQ/RREP
-            route carry a message without approval, but only in Assisted mode.
-            The separate LINK_ADVERT switch periodically exchanges direct
-            observations and regenerates a volatile graph. An empty one-hop
-            presence advert bootstraps quiet neighbours; only observations
-            confirmed independently from both sides become routable. Advert
-            flooding uses the same TTL, relay permission, trust lists and
-            frame budget. Disabling either experiment removes its automatic
-            effect immediately.</p>
+            returned path. It is disabled, with the reason on the page, unless
+            the control channel is running and the mode is Assisted. A station
+            heard directly is listed as a one-hop route so the operator can see
+            at a glance what is reachable now. Clearing dynamic routes does not
+            touch the route table or builder.</p>
+            <p>The bounds live in Settings → Network behavior: forwarding for
+            other stations, maximum TTL (capped at 8), route lifetime, the
+            frames-per-minute airtime budget and the allow/deny lists.
+            Forwarding works only together with Relay messages for other
+            stations, so a node never advertises a payload path it refuses to
+            serve.</p>
+            <p>Automatic use lets a fresh RREQ/RREP route carry a message
+            without approval; it does nothing while discovery is off. The last
+            page holds the one remaining experiment: LINK_ADVERT periodically
+            exchanges direct observations and regenerates a volatile graph. An
+            empty one-hop presence advert bootstraps quiet neighbours; only
+            observations confirmed independently from both sides become
+            routable. Advert flooding uses the same TTL, relay permission, trust
+            lists and frame budget. Turning it off removes its effect
+            immediately.</p>
             <p>A relay's RECEIVED means <b>Forwarded</b>, not final delivery.
             The final station sends a directed DELIVERED receipt back over the
             reverse hops. Transit mail keeps its resolved next hop across
@@ -396,28 +403,33 @@ def help_topics() -> list[HelpTopic]:
             trasy podle nastavené značky. Linka může být jednosměrná, zakázaná,
             mít kladnou cenu a volací/pracovní kanál. Odvozené trasy jsou
             označené Topologie; ruční uložení stejného cíle vytvoří override.</p>
-            <p><b>Automatická síť</b> je oddělená živá discovery vrstva s
-            podzáložkami Vyhledání trasy, Živá topologie a Nastavení a limity.
-            Režim Vypnuto
-            vícehopové rámce ignoruje; Pouze sledovat kompatibilní rámce jen
-            zaznamenává a nikdy nevysílá; Asistovaný smí omezeně hledat, ale
-            běžně odchozí zpráva počká na schválení nalezené trasy operátorem.
-            Naučené trasy expirují a nepřepisují ruční ani topologické řádky.</p>
+            <p><b>Hledání trasy</b> je samostatná stránka se dvěma polohami.
+            Vypnuto ignoruje všechny vícehopové rámce. Asistovaný odpovídá na
+            dotaz po této stanici, smí hledat trasu, o kterou požádáte, a
+            odchozí zprávu běžně pozdrží, dokud nalezenou trasu neschválíte.
+            Naučené trasy expirují a nepřepisují ruční ani topologické řádky.
+            Poloha Pouze sledovat z dřívějších verzí je zrušená: neumožňovala
+            odpovědět na dotaz ani získat použitelnou trasu, takže se profil,
+            který ji má uložený, po aktualizaci čte jako Asistovaný.</p>
             <p>Najít trasu používá rozšiřované kruhy TTL a zobrazuje dotaz i
-            vrácenou cestu. Předávání discovery dotazů funguje jen současně s
-            povoleným předáváním zpráv, takže uzel nenabízí payloadovou cestu,
-            kterou odmítá obsloužit. TTL má strop 8; vysílací rozpočet a seznamy
-            povolených/zakázaných stanic omezují airtime i účastníky. Vymazání
-            dynamických tras nemění tabulku tras ani sestavovač.</p>
-            <p>Experimentální přepínač automatického použití dovolí čerstvé
-            trase RREQ/RREP přenést zprávu bez schválení, avšak jen v
-            Asistovaném režimu. Samostatný přepínač LINK_ADVERT pravidelně
-            vyměňuje přímá pozorování a regeneruje volatilní graf. Prázdný
-            jednoskokový advert přítomnosti probudí i dosud tiché sousedy;
-            routovatelná jsou pouze pozorování nezávisle potvrzená z obou stran.
-            Flood advertů používá stejné TTL, povolení relaye, trust seznamy a
-            rozpočet rámců. Vypnutí kteréhokoli experimentu okamžitě odstraní
-            jeho automatický účinek.</p>
+            vrácenou cestu. Dokud neběží řídicí kanál a není zvolen Asistovaný
+            režim, je tlačítko nedostupné a důvod je vypsaný na stránce. Přímo
+            slyšená stanice je uvedená jako jednoskoková trasa, takže je hned
+            vidět, co je právě dosažitelné. Vymazání dynamických tras nemění
+            tabulku tras ani sestavovač.</p>
+            <p>Limity jsou v Nastavení → Chování sítě: předávání za jiné
+            stanice, maximální TTL (strop 8), životnost trasy, vysílací rozpočet
+            v rámcích za minutu a seznamy povolených a zakázaných stanic.
+            Předávání funguje jen současně s povoleným předáváním zpráv, takže
+            uzel nenabízí payloadovou cestu, kterou odmítá obsloužit.</p>
+            <p>Automatické použití dovolí čerstvé trase RREQ/RREP přenést zprávu
+            bez schválení; při vypnutém hledání nedělá nic. Poslední stránka
+            drží jediný zbývající experiment: LINK_ADVERT pravidelně vyměňuje
+            přímá pozorování a regeneruje volatilní graf. Prázdný jednoskokový
+            advert přítomnosti probudí i dosud tiché sousedy; routovatelná jsou
+            pouze pozorování nezávisle potvrzená z obou stran. Flood advertů
+            používá stejné TTL, povolení relaye, trust seznamy a rozpočet rámců.
+            Vypnutí okamžitě odstraní jeho účinek.</p>
             <p>RECEIVED od relaye znamená <b>Předáno</b>, nikoli koncové
             doručení. Cílová stanice pošle směrované DELIVERED zpět po reverzních
             hopech. Transit zpráva zachová vypočtený next hop i po selhání nebo
@@ -446,7 +458,8 @@ def help_topics() -> list[HelpTopic]:
             místní trasy poskytují plán kanálů pro routing a případný budoucí
             automatický poslech.</p>
             """,
-            "route heard sessions ttl relay qsy discovery rreq rrep trasa slyšené relace automatická síť",
+            "route heard sessions ttl relay qsy discovery rreq rrep link advert "
+            "trasa slyšené relace hledání trasy živá topologie",
         ),
         _topic(
             "8. Station map and own position",

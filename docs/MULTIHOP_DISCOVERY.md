@@ -1,10 +1,29 @@
 # Vícehopové route discovery
 
-Stav k verzi 0.6.58: **implementovány kroky 9 a 10 za dvěma nezávislými
-experimentálními přepínači**. Automatické použití nalezených tras a celosíťové
-`LINK_ADVERT` jsou ve výchozím stavu vypnuté. Známá síť nadále používá společnou
-topologii a z ní odvozené lokální trasy; živé discovery je oddělená,
-nepersistovaná a expirovatelná vrstva.
+Stav k verzi 0.6.59: discovery má **dvě polohy — vypnuto, nebo asistovaně**.
+Známá síť nadále používá společnou topologii a z ní odvozené lokální trasy; živé
+discovery je oddělená, nepersistovaná a expirovatelná vrstva.
+
+## Proč zmizel monitorovací režim (0.6.59)
+
+Původní třetí poloha „pouze sledovat“ jen zaznamenávala breadcrumby, na které
+nikdy nesměla odpovědět RREP, vlastnímu operátorovi nevrátila použitelnou trasu
+a ostatním stanicím se neohlásila. Byla přitom výchozí, takže typická instalace
+koukala na prázdné tabulky bez jediného vysvětlení. Mezi „neúčastnit se“ a
+„účastnit se“ není užitečná třetí možnost, a proto:
+
+- `discovery_mode` je `off` nebo `assisted`, výchozí je `assisted`;
+- uložená hodnota `monitor` se čte jako `assisted`
+  (`routing.discovery.normalize_discovery_mode`);
+- neznámá hodnota nikdy nezvolí vysílající režim, spadne na `off`.
+
+Uspořádání **Sítě** je pět rovnocenných stránek: Trasy, Slyšené stanice,
+Sestavovač sítě, Hledání trasy a Živá topologie (experimentální) jako poslední.
+Limity discovery (předávání, TTL, životnost, rozpočet, seznamy důvěry) patří do
+Nastavení → Chování sítě. Každá akce, která nemůže nic udělat, je nedostupná a
+na stránce je napsané proč — vypnutý řídicí kanál, vypnuté discovery, nebo
+neuložená změna. Přímo slyšená stanice se v Hledání trasy zobrazuje jako
+jednoskoková trasa, protože přesně tak s ní `_resolve_next_hop` už zachází.
 
 ## Implementovaný rozsah 0.6.57
 
@@ -18,29 +37,27 @@ nepersistovaná a expirovatelná vrstva.
 - metrika `počet hopů + kumulovaná hrubá penalizace S/N`;
 - volatilní dynamické trasy s expirací, stavem selhání a výslovným schválením;
 - allowlist/denylist bez tvrzení o kryptografickém ověření identity;
-- podzáložka **Síť → Automatická síť** se stavem dotazů, trasami a provozními
-  limity;
+- stránka **Síť → Hledání trasy** se stavem dotazů, trasami a provozním stavem;
 - realistický RF graf, na kterém každý uzel slyší jen své sousedy.
 
-Monitorovací režim nic nevysílá. Asistovaný režim dovolí dotaz, odpověď a relay
-discovery rámců, ale zdroj nezačne přes nalezenou cestu posílat payload, dokud
-ji operátor neschválí. Mezilehlé uzly smějí nalezenou cestu použít pro relay jen
-tehdy, když mají povolené předávání zpráv i discovery.
+Vypnuté discovery všechny vícehopové rámce ignoruje. Asistovaný režim dovolí
+dotaz, odpověď a relay discovery rámců, ale zdroj nezačne přes nalezenou cestu
+posílat payload, dokud ji operátor neschválí. Mezilehlé uzly smějí nalezenou
+cestu použít pro relay jen tehdy, když mají povolené předávání zpráv i discovery.
 
-## Experimentální rozsah 0.6.58 — kroky 9 a 10
+## Automatické použití trasy a LINK_ADVERT
 
-V **Síť → Automatická síť** jsou tři vnořené podzáložky (Vyhledání trasy,
-Živá topologie, Nastavení a limity) a dva nezávislé feature flagy, oba výchozí
-`false`:
+Automatické použití nalezené trasy je běžná volba na stránce Hledání trasy;
+`LINK_ADVERT` zůstává jediný experiment a je ve výchozím stavu vypnutý:
 
 | Automaticky použít trasu | LINK_ADVERT | Výsledek |
 |---|---|---|
-| vypnuto | vypnuto | stejné bezpečné chování jako 0.6.57 |
+| vypnuto | vypnuto | výchozí stav: nalezená trasa čeká na schválení operátorem |
 | zapnuto | vypnuto | RREQ/RREP trasu lze v Asistovaném režimu použít bez potvrzení |
 | vypnuto | zapnuto | živý graf se regeneruje, odvozené trasy čekají na schválení |
 | zapnuto | zapnuto | živý graf i čerstvé nalezené trasy mohou směrovat automaticky |
 
-Automatické použití je účinné jen v Asistovaném režimu. Přepnutí do monitoru
+Automatické použití je účinné jen v Asistovaném režimu. Vypnutí discovery
 okamžitě odebere automatická schválení, ale zachová skutečně ručně schválené
 trasy. Selhání next hopu trasu degraduje, odebere její schválení a dovolí nejvýše
 jeden nový omezený RREQ pokus; payload se nikdy neposílá floodem ani slepě.
@@ -199,10 +216,15 @@ smyčky, ztracený první advert, mezeru tvořenou starší verzí, konečný po
 rámců, nezávislé kombinace obou přepínačů, expiraci i odstranění pouze živé
 vrstvy po vypnutí.
 
+Samostatný test 0.6.59 postaví dvě stanice **výhradně z výchozího profilu** a
+projde celou cestou: dotaz odejde, protistanice odpoví, trasa se objeví v
+tabulce, operátor ji schválí a zpráva dojde. Ověřuje se přesně to, co uvidí
+operátor po instalaci — ne dílčí schopnost zapnutá jen v testu.
+
 Časové okno v živé aplikaci se škáluje z airtime aktivního AFSK/MFSK modemu a
-počtu hopů. Před běžným používáním automatických přepínačů stále zbývá skutečný
-on-air test nejprve v monitorovacím, potom asistovaném a nakonec experimentálním
-režimu.
+počtu hopů. Před běžným používáním automatického schvalování a `LINK_ADVERT`
+stále zbývá skutečný on-air test: nejprve asistovaně s ručním schvalováním,
+potom s automatickým použitím a nakonec s `LINK_ADVERT`.
 
 ## Co zůstává odložené
 
@@ -210,4 +232,4 @@ režimu.
 - per-cíl trust pravidla nad rámec společného allowlistu/denylistu;
 - trvalé ukládání živého grafu (záměrně se po restartu znovu ověřuje);
 - sloučení živého grafu do sestavovače nebo importované topologie;
-- produkční zapnutí obou experimentů ve výchozím stavu před on-air měřením.
+- zapnutí `LINK_ADVERT` ve výchozím stavu před on-air měřením airtime.

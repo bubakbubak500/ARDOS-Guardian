@@ -136,6 +136,30 @@ modelu terénu — vyžaduje stovky MB dat SRTM nebo síť.
   jednostranné vazby, smyčky, konečný flood, expiraci, přepínání feature flagů
   a automatický end-to-end `DELIVERED`.
 
+## Vydáno v 0.6.59 — discovery vypnuto/asistovaně a plochá Síť
+
+- **Zrušen monitorovací režim.** Zaznamenával breadcrumby, na které nesměl
+  odpovědět, operátorovi nevrátil trasu a nikomu se neohlásil — a byl výchozí,
+  takže běžná instalace mlčela a nevysvětlila proč. `discovery_mode` je `off`
+  nebo `assisted`, uložený `monitor` se čte jako `assisted`, neznámá hodnota
+  jako `off`. Výchozí je `assisted`.
+- **Síť je pět rovnocenných stránek** (Trasy, Slyšené stanice, Sestavovač sítě,
+  Hledání trasy, Živá topologie (experimentální)) bez vnořených podzáložek.
+  `LINK_ADVERT` je jediný zbývající experiment a je poslední.
+- **Limity discovery** (předávání, TTL, životnost, rozpočet, seznamy důvěry) jsou
+  v Nastavení → Chování sítě vedle relaye a TTL. Provozní stránka tak má místo
+  na tabulky.
+- **Žádná tichá chyba.** Najít trasu i Oznámit sousedy jsou nedostupné s
+  vypsaným důvodem (vypnutý řídicí kanál, vypnuté discovery, vypnutý
+  `LINK_ADVERT`) čteným z běžící stanice, ne z widgetů. Slyšené stanice rozlišují
+  vypnutý kanál od tichého kanálu a neuložené změny se hlásí. Nedostupné primární
+  tlačítko už není zbarvené jako akce.
+- **Přímo slyšená stanice** se v Hledání trasy zobrazuje jako jednoskoková trasa,
+  protože tak s ní směrování už zachází; do plánované tabulky tras nevstupuje.
+- **Ověření:** nový end-to-end test postaví dvě stanice jen z výchozího profilu a
+  projde dotaz, odpověď, schválení i doručení; k tomu migrace konfigurace,
+  struktura stránek, dvoupoložkový přepínač a důvody nedostupnosti.
+
 ## P3 — release hardening a sledovaná rizika
 
 1. **Authenticode podpis instalátoru.** Vývojové releasy jsou záměrně nepodepsané

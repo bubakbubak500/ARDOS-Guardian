@@ -14,7 +14,6 @@ from .heard import HeardStation, HeardStations
 from .discovery import (
     DISCOVERY_ASSISTED,
     DISCOVERY_MODES,
-    DISCOVERY_MONITOR,
     DISCOVERY_OFF,
     DynamicRoute,
     DynamicRouteStore,
@@ -25,6 +24,7 @@ from .discovery import (
     PendingQuery,
     decode_discovery_metric,
     encode_discovery_metric,
+    normalize_discovery_mode,
 )
 from .route_table import Route, RouteTable
 from .topology import DIRECTIONS, Link, Topology
@@ -43,8 +43,8 @@ __all__ = [
     "HeardStations",
     "DISCOVERY_ASSISTED",
     "DISCOVERY_MODES",
-    "DISCOVERY_MONITOR",
     "DISCOVERY_OFF",
+    "normalize_discovery_mode",
     "DynamicRoute",
     "DynamicRouteStore",
     "LiveTopologyStore",

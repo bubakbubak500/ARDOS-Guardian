@@ -430,24 +430,27 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Tato trasa je odvozená. Upravte odpovídající linku v Sestavovači sítě "
         "nebo řádek uložte jako ruční override.",
     ),
-    "network.discovery": ("Automatic network", "Automatická síť"),
+    "network.discovery": ("Route discovery", "Hledání trasy"),
     "network.discovery_hint": (
-        "Monitor or explicitly run bounded multi-hop RREQ/RREP discovery. "
-        "Learned routes expire and never overwrite manual or imported topology. "
-        "Assisted routes normally require operator approval unless the separate "
-        "experimental automatic-use switch is enabled.",
-        "Sledujte nebo výslovně spusťte omezené vícehopové hledání RREQ/RREP. "
-        "Naučené trasy expirují a nikdy nepřepisují ruční ani importovanou "
-        "topologii. Asistovaná trasa běžně čeká na schválení operátorem, pokud "
-        "není zapnutý samostatný experimentální přepínač automatického použití.",
+        "Bounded multi-hop RREQ/RREP discovery over the control channel. Off "
+        "ignores every discovery frame; Assisted answers a query about this "
+        "station and looks for a route when you ask for one. Learned routes "
+        "expire and never overwrite a manual route or the imported topology. "
+        "TTL, lifetime, airtime budget and trust lists are in Station settings "
+        "→ Network behavior.",
+        "Omezené vícehopové hledání RREQ/RREP na řídicím kanálu. Vypnuto "
+        "ignoruje všechny discovery rámce; Asistovaný odpovídá na dotaz po této "
+        "stanici a hledá trasu, když o ni požádáte. Naučené trasy expirují a "
+        "nikdy nepřepíšou ruční trasu ani importovanou topologii. TTL, "
+        "životnost, vysílací rozpočet a seznamy důvěry jsou v Nastavení stanice "
+        "→ Chování sítě.",
     ),
     "network.discovery_mode": ("Operating mode", "Provozní režim"),
     "network.discovery_mode_off": ("Off", "Vypnuto"),
-    "network.discovery_mode_monitor": ("Monitor only", "Pouze sledovat"),
     "network.discovery_mode_assisted": ("Assisted", "Asistovaný"),
     "network.discovery_forward": (
-        "Forward bounded discovery requests",
-        "Předávat omezené discovery dotazy",
+        "Forward bounded discovery requests for other stations",
+        "Předávat omezené discovery dotazy jiných stanic",
     ),
     "network.discovery_ttl": ("Maximum discovery TTL", "Maximální discovery TTL"),
     "network.discovery_lifetime": ("Route lifetime", "Životnost trasy"),
@@ -467,7 +470,7 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Relay denylist",
         "Zakázané relay stanice",
     ),
-    "network.discovery_save": ("Save discovery settings", "Uložit discovery nastavení"),
+    "network.discovery_save": ("Save network settings", "Uložit nastavení sítě"),
     "network.discovery_saved": (
         "Multi-hop discovery settings saved.",
         "Nastavení vícehopového discovery bylo uloženo.",
@@ -489,6 +492,7 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.discovery_state_expired": ("Expired", "Expirovaná"),
     "network.discovery_state_querying": ("Querying", "Hledá se"),
     "network.discovery_state_settling": ("Collecting replies", "Sbírá odpovědi"),
+    "network.discovery_state_direct": ("Direct neighbour", "Přímý soused"),
     "network.discovery_approve": ("Approve selected route", "Schválit vybranou trasu"),
     "network.discovery_clear": ("Clear dynamic routes", "Vymazat dynamické trasy"),
     "network.discovery_query_id": ("Query ID", "ID dotazu"),
@@ -505,39 +509,57 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Mode: {mode} · live routes: {routes} · active queries: {pending}",
         "Režim: {mode} · živé trasy: {routes} · aktivní dotazy: {pending}",
     ),
+    "network.discovery_off_notice": (
+        "Route discovery is off: this station neither looks for a route nor "
+        "answers a query about itself. Select Assisted and save.",
+        "Hledání trasy je vypnuté: stanice trasu nehledá ani neodpovídá na dotaz "
+        "po sobě samé. Zvolte Asistovaný a uložte.",
+    ),
+    "network.link_advert_disabled_notice": (
+        "Enable the experimental LINK_ADVERT switch and save the settings.",
+        "Zapněte experimentální přepínač LINK_ADVERT a uložte nastavení.",
+    ),
+    "network.discovery_unsaved": (
+        "Unsaved changes — press “{action}” to put them on the air.",
+        "Neuložené změny – tlačítkem „{action}“ je uvedete do provozu.",
+    ),
+    "network.control_off_notice": (
+        "The control channel is off, so nothing can be heard or transmitted. "
+        "Start it with “{action}” on the Dashboard.",
+        "Řídicí kanál je vypnutý, takže nelze nic slyšet ani vysílat. Spusťte jej "
+        "tlačítkem „{action}“ na Přehledu.",
+    ),
     "network.discovery_route_approved": (
         "Route to {destination} via {next_hop} approved for assisted use.",
         "Trasa k {destination} přes {next_hop} byla schválena pro asistované použití.",
     ),
-    "network.discovery_routes_tab": ("Route discovery", "Vyhledání trasy"),
-    "network.discovery_live_tab": ("Live topology", "Živá topologie"),
-    "network.discovery_settings_tab": (
-        "Settings and limits",
-        "Nastavení a limity",
+    "network.live_topology": (
+        "Live topology (experimental)",
+        "Živá topologie (experimentální)",
     ),
     "network.discovery_auto_use": (
-        "Experimental: automatically use fresh discovered routes",
-        "Experimentální: automaticky použít čerstvé nalezené trasy",
+        "Use a discovered route immediately, without waiting for approval",
+        "Použít nalezenou trasu hned, bez čekání na schválení",
     ),
     "network.discovery_auto_inactive": (
-        "Automatic use is inactive until Assisted mode is selected.",
-        "Automatické použití je neaktivní, dokud není zvolen Asistovaný režim.",
+        "Automatic use does nothing while route discovery is off.",
+        "Automatické použití nic nedělá, dokud je hledání trasy vypnuté.",
     ),
     "network.link_advert_hint": (
-        "LINK_ADVERT exchanges recent direct observations. Only links independently "
-        "confirmed from both sides may create routes; all evidence expires and stays "
-        "separate from Network builder.",
-        "LINK_ADVERT vyměňuje čerstvá přímá pozorování. Trasu mohou vytvořit jen "
-        "vazby nezávisle potvrzené z obou stran; všechna zjištění expirují a "
-        "zůstávají oddělená od Sestavovače sítě.",
+        "Experimental and independent of route discovery above. LINK_ADVERT "
+        "periodically exchanges recent direct observations so a quiet network "
+        "draws its own map. Only links independently confirmed from both sides "
+        "may create routes; all evidence expires and stays separate from "
+        "Network builder.",
+        "Experimentální a nezávislé na hledání trasy výše. LINK_ADVERT "
+        "pravidelně vyměňuje čerstvá přímá pozorování, takže si tichá síť "
+        "nakreslí vlastní mapu. Trasu mohou vytvořit jen vazby nezávisle "
+        "potvrzené z obou stran; všechna zjištění expirují a zůstávají oddělená "
+        "od Sestavovače sítě.",
     ),
     "network.link_advert_enabled": (
         "Experimental: exchange LINK_ADVERT live topology",
         "Experimentální: vyměňovat živou topologii LINK_ADVERT",
-    ),
-    "network.link_advert_monitor_warning": (
-        "Live observations are monitor-only until Assisted mode is selected.",
-        "Živá pozorování se jen sledují, dokud není zvolen Asistovaný režim.",
     ),
     "network.link_advert_interval": ("Advertisement interval", "Interval oznámení"),
     "network.link_owner": ("Station", "Stanice"),
@@ -560,6 +582,7 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.route_source": ("Source", "Zdroj"),
     "network.source_manual": ("Manual", "Ruční"),
     "network.source_topology": ("Topology", "Topologie"),
+    "network.source_heard": ("Heard directly", "Přímo slyšena"),
     "network.station_a": ("Station A", "Stanice A"),
     "network.station_b": ("Station B", "Stanice B"),
     "network.direction": ("Direction", "Směr"),
@@ -583,8 +606,24 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "network.add": ("Add or replace route", "Přidat nebo nahradit trasu"),
     "network.remove": ("Remove selected", "Odstranit vybranou"),
     "network.heard_hint": (
-        "Stations appear here only after a real control frame is received.",
-        "Stanice se zde objeví až po přijetí skutečného řídicího rámce.",
+        "Stations appear here only after a real control frame is received. A "
+        "station heard directly is immediately usable as a one-hop route.",
+        "Stanice se zde objeví až po přijetí skutečného řídicího rámce. Přímo "
+        "slyšenou stanici lze okamžitě použít jako jednoskokovou trasu.",
+    ),
+    "network.heard_state_listening": (
+        "Listening · {count} station(s) heard · newest frame {age} s ago.",
+        "Poslouchám · slyšených stanic: {count} · poslední rámec před {age} s.",
+    ),
+    "network.heard_state_quiet": (
+        "Listening, but no control frame has arrived yet.",
+        "Poslouchám, ale zatím nepřišel žádný řídicí rámec.",
+    ),
+    "network.heard_beacon_hint": (
+        "Enable the presence beacon in Station settings so other stations hear "
+        "this one too.",
+        "Zapněte maják přítomnosti v Nastavení stanice, aby ostatní stanice "
+        "slyšely i tuto.",
     ),
     "network.callsign": ("Callsign", "Volací značka"),
     "network.age": ("Age", "Stáří"),

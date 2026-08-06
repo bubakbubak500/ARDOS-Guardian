@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from PySide6.QtGui import QValidator
 from PySide6.QtWidgets import (
     QLineEdit,
@@ -11,6 +13,15 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
     QTableWidget,
 )
+
+
+def callsign_list(text: str) -> list[str]:
+    """Read one typed field as normalised callsigns, however it is separated."""
+    return [
+        item.strip().upper()
+        for item in re.split(r"[,;\s]+", text or "")
+        if item.strip()
+    ]
 
 
 class UppercaseLineEdit(QLineEdit):

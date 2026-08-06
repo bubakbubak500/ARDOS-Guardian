@@ -67,6 +67,33 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         dialog.close()
 
 
+def test_network_behaviour_page_owns_the_discovery_limits_and_trust_lists() -> None:
+    # The limits are station configuration, so they live beside relay and TTL
+    # instead of stealing table space on the operational discovery page.
+    _application()
+    config = StationConfig(callsign="OK7PS")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        dialog.discovery_forward.setChecked(True)
+        dialog.discovery_ttl.setValue(6)
+        dialog.discovery_lifetime.setValue(45)
+        dialog.discovery_budget.setValue(9)
+        dialog.discovery_allowlist.setText("n1, n2")
+        dialog.discovery_denylist.setText("bad")
+        assert dialog.apply()
+
+        assert config.discovery_forward is True
+        assert config.discovery_ttl == 6
+        assert config.discovery_route_lifetime == 2700
+        assert config.discovery_frame_budget == 9
+        assert config.discovery_allowlist == ["N1", "N2"]
+        assert config.discovery_denylist == ["BAD"]
+        # The mode itself stays on the Network page the operator works from.
+        assert config.discovery_mode == "assisted"
+    finally:
+        dialog.close()
+
+
 def test_radio_profile_is_saved_from_the_page_and_restored_by_the_picker(
     monkeypatch,
 ) -> None:

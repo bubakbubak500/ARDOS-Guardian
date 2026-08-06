@@ -60,6 +60,12 @@ def main() -> int:
     window._show_workspace("network")
     _save(window, args.output / "dark-network-cs.png", application)
 
+    heard_window = GuardianMainWindow(runtime, settings)
+    heard_window.resize(1366, 768)
+    heard_window._show_workspace("network")
+    heard_window.workspace_names["network"].tabs.setCurrentIndex(1)
+    _save(heard_window, args.output / "dark-network-heard-cs.png", application)
+
     runtime.config.discovery_mode = "assisted"
     runtime.config.discovery_auto_use = True
     runtime.config.link_advert_enabled = True
@@ -67,9 +73,7 @@ def main() -> int:
     discovery_window = GuardianMainWindow(runtime, settings)
     discovery_window.resize(1366, 768)
     discovery_window._show_workspace("network")
-    discovery_workspace = discovery_window.workspace_names["network"]
-    discovery_workspace.tabs.setCurrentIndex(3)
-    discovery_workspace.discovery_sections.setCurrentIndex(0)
+    discovery_window.workspace_names["network"].tabs.setCurrentIndex(3)
     _save(
         discovery_window,
         args.output / "dark-network-discovery-cs.png",
@@ -79,24 +83,10 @@ def main() -> int:
     live_window = GuardianMainWindow(runtime, settings)
     live_window.resize(1366, 768)
     live_window._show_workspace("network")
-    live_workspace = live_window.workspace_names["network"]
-    live_workspace.tabs.setCurrentIndex(3)
-    live_workspace.discovery_sections.setCurrentIndex(1)
+    live_window.workspace_names["network"].tabs.setCurrentIndex(4)
     _save(
         live_window,
         args.output / "dark-network-live-topology-cs.png",
-        application,
-    )
-
-    settings_window = GuardianMainWindow(runtime, settings)
-    settings_window.resize(1366, 768)
-    settings_window._show_workspace("network")
-    settings_workspace = settings_window.workspace_names["network"]
-    settings_workspace.tabs.setCurrentIndex(3)
-    settings_workspace.discovery_sections.setCurrentIndex(2)
-    _save(
-        settings_window,
-        args.output / "dark-network-discovery-settings-cs.png",
         application,
     )
 

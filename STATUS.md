@@ -1,6 +1,6 @@
 # Guardian (ARDOS) — Project Status & Plan
 
-_Last updated: 2026-08-04_
+_Last updated: 2026-08-06_
 
 A resumable snapshot: what Guardian is, what's built, what's verified, the key
 decisions and why, and what comes next. Read this first when picking the project
@@ -41,11 +41,14 @@ topology builder: one imported/built set of links derives a different local
 route table for every callsign while manual rows remain overrides. The tested
 scanner engine remains in the backend but is no longer the primary Network UI.
 Guardian 0.6.57 additionally implements bounded multi-hop RREQ/RREP over a
-neighbour-only RF graph. Its new Automatic network tab is monitor-only by
-default; assisted routes expire and require explicit operator approval.
-Guardian 0.6.58 completes steps 9 and 10 as two default-off experiments:
-automatic use of fresh discovery routes and reciprocal `LINK_ADVERT`
-regeneration of a separate volatile live topology.
+neighbour-only RF graph, and 0.6.58 added reciprocal `LINK_ADVERT` regeneration
+of a separate volatile live topology. Guardian 0.6.59 makes that plane testable:
+discovery is off or assisted (the receive-only monitor position is retired and
+migrated to assisted), the Network workspace is five flat pages with
+`LINK_ADVERT` last as the only experiment, every action that cannot run says why
+on the page, and a directly heard station is listed as the one-hop route it
+already is. Assisted routes still expire and still require explicit operator
+approval unless automatic use is enabled.
 
 **Phase 3 done.** Built + tested: AFSK 1200 modem, MFSK-16 HF modem
 (decodes to ~0 dB SNR in loopback), rate-1/2 K=7 convolutional FEC + Viterbi,
@@ -925,9 +928,10 @@ Two defects, both in what 0.6.49 added.
 - The compact discovery-only metric records hop count and accumulated coarse
   S/N penalty. Dynamic routes are runtime-only, expire, retain short tombstones
   for diagnosis and never overwrite manual or topology rows.
-- Network → Automatic network provides Off, Monitor only and Assisted modes,
+- Network → Automatic network provided Off, Monitor only and Assisted modes,
   TTL/lifetime/budget/trust settings, manual Find route, active-query and live
-  route tables, explicit approval and clearing. Monitor mode never transmits.
+  route tables, explicit approval and clearing. (0.6.59 retired Monitor and
+  reorganised these pages; see below.)
 - Assisted message delivery pauses after route discovery until the source
   operator approves the route. Participating relay nodes may use the returned
   breadcrumb only when both message relay and discovery forwarding are enabled.
@@ -959,8 +963,7 @@ Two defects, both in what 0.6.49 added.
 - Adverts share the RREQ/RREP TTL, deterministic jitter, deduplication, trust
   lists and frames-per-minute budget. Multihop forwarding additionally requires
   both discovery forwarding and message relay.
-- Automatic network now contains Route discovery, Live topology and Settings
-  and limits sub-tabs, including independent switches, interval,
+- The live-topology page carries its own switch, the interval,
   reciprocal/age/expiry diagnostics, advertise-now and clear-live-state actions.
 - Disabling LINK_ADVERT removes only its volatile graph and `link-advert` routes.
   Manual routes, imported Network builder topology and RREQ/RREP state are not
@@ -968,6 +971,35 @@ Two defects, both in what 0.6.49 added.
 - Verification covers automatic end-to-end delivery, a quiet network detecting
   itself, the S6–N1–N2–N3–S1 graph with branches/loops, one-way evidence,
   bounded flooding, expiry, mode/flag transitions and selective state removal.
+
+## Discovery reduced to off/assisted and a flat Network workspace (0.6.59)
+
+- The receive-only **Monitor** position is retired. It recorded breadcrumbs it
+  could never answer with an RREP, produced no route for its own operator and
+  advertised nothing, so a station left in it — the default until 0.6.58 — saw
+  empty tables with nothing explaining why. `discovery_mode` is now `off` or
+  `assisted`, a stored `monitor` is read as `assisted`, and an unrecognised
+  value never selects a transmitting mode.
+- The default is `assisted`, so a fresh install answers a query about itself and
+  can look for a route. Approval before payload is unchanged.
+- **Network** is five flat pages — Routes, Heard stations, Network builder, Route
+  discovery, Live topology (experimental) — instead of three sub-tabs nested
+  inside a fourth tab. `LINK_ADVERT` is the only remaining experiment and is
+  last.
+- Discovery bounds (forwarding, TTL, lifetime, airtime budget, allow/deny lists)
+  moved to Settings → Network behavior, where relay and TTL already live. The
+  Route discovery page keeps only what an operator touches while working.
+- Every action states why it cannot run: Find route and Advertise neighbours are
+  disabled with the reason on the page and in the tooltip, Heard stations
+  distinguishes "control channel off" from "listening, nothing heard yet", and
+  unsaved settings are called out. A disabled primary button no longer renders
+  as the accented action.
+- A directly heard station is listed on Route discovery as the one-hop route
+  `_resolve_next_hop` already treats it as, marked `Heard directly` and kept out
+  of the planned route table.
+- Verification adds a two-station end-to-end delivery driven entirely by the
+  shipped defaults, the configuration migration, the flat page structure, the
+  disabled-action reasons and the heard-derived one-hop row.
 
 ## 8. Known issues / watch-list
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,

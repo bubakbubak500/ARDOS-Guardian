@@ -45,8 +45,7 @@ from ..protocol import (
     encode_ptt_delay,
 )
 from ..routing import (
-    DISCOVERY_ASSISTED,
-    DISCOVERY_MONITOR,
+    DISCOVERY_OFF,
     MAX_LOCATOR_CHARS,
     DiscoveryEngine,
     DiscoveryEvent,
@@ -290,7 +289,10 @@ class Orchestrator:
         auto_route: bool = True,
         relay: bool = False,
         clock: Callable[[], float] | None = None,
-        discovery_mode: str = DISCOVERY_MONITOR,
+        # The discovery plane takes part only when the owner says so. Operations
+        # always passes the operator's setting; a bench or test station that
+        # says nothing keeps the transmitter out of it.
+        discovery_mode: str = DISCOVERY_OFF,
         discovery_forward: bool = False,
         discovery_ttl: int = 4,
         discovery_route_lifetime: float = 1800.0,

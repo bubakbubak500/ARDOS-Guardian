@@ -1,7 +1,8 @@
+from guardian.config import StationConfig
 from guardian.protocol import ControlFrame, FrameType
 from guardian.routing import (
     DISCOVERY_ASSISTED,
-    DISCOVERY_MONITOR,
+    DISCOVERY_MODES,
     DISCOVERY_OFF,
     DiscoveryEngine,
     DynamicRouteStore,
@@ -9,6 +10,7 @@ from guardian.routing import (
     RouteTable,
     decode_discovery_metric,
     encode_discovery_metric,
+    normalize_discovery_mode,
 )
 from guardian.session import GraphRadioBus, Orchestrator, SessionState
 
@@ -211,9 +213,30 @@ def test_legacy_gap_does_not_turn_into_an_unbounded_or_blind_flood() -> None:
     assert all(frame.type is FrameType.MULTIHOP_RREQ for _sender, frame in frames)
 
 
-def test_monitor_mode_records_but_never_relays_or_replies() -> None:
+def test_only_off_and_assisted_remain_and_a_monitor_profile_becomes_assisted() -> None:
+    assert DISCOVERY_MODES == (DISCOVERY_OFF, DISCOVERY_ASSISTED)
+    # The retired receive-only position could neither answer a query nor hand a
+    # route to its own operator, so an upgraded station takes part instead.
+    assert normalize_discovery_mode("monitor") == DISCOVERY_ASSISTED
+    assert normalize_discovery_mode("ASSISTED ") == DISCOVERY_ASSISTED
+    # A typo must never be the reason a station starts transmitting.
+    for value in ("", None, "assisted-ish", "monitor only"):
+        assert normalize_discovery_mode(value) == DISCOVERY_OFF
+    assert DiscoveryEngine("N1", lambda _frame: None).mode == DISCOVERY_OFF
+    engine = DiscoveryEngine("N1", lambda _frame: None, mode="monitor")
+    assert engine.mode == DISCOVERY_ASSISTED
+    assert engine.can_transmit is True
+
+
+def test_assisted_station_answers_a_query_addressed_to_itself() -> None:
     sent = []
-    engine = DiscoveryEngine("N1", sent.append, mode=DISCOVERY_MONITOR)
+    engine = DiscoveryEngine(
+        "N1",
+        sent.append,
+        mode=DISCOVERY_ASSISTED,
+        jitter_min=0,
+        jitter_max=0,
+    )
     engine.tick(1)
     handled = engine.receive(
         ControlFrame(
@@ -227,8 +250,12 @@ def test_monitor_mode_records_but_never_relays_or_replies() -> None:
     )
     engine.tick(10)
     assert handled is True
-    assert sent == []
-    assert engine.events[0].kind == "heard-rreq"
+    assert engine.events[-1].kind == "heard-rreq"
+    assert [frame.type for frame in sent] == [
+        FrameType.MULTIHOP_RREP,
+        FrameType.MULTIHOP_RREP,   # one bounded duplicate against a lost reply
+    ]
+    assert sent[0].destination == "S6"
 
 
 def test_off_mode_consumes_new_frames_without_recording_or_transmitting() -> None:
@@ -249,7 +276,7 @@ def test_off_mode_consumes_new_frames_without_recording_or_transmitting() -> Non
     assert list(engine.events) == []
 
 
-def test_switching_to_monitor_cancels_pending_and_scheduled_transmit() -> None:
+def test_switching_off_cancels_pending_and_scheduled_transmit() -> None:
     sent = []
     failed = []
     engine = DiscoveryEngine(
@@ -277,7 +304,7 @@ def test_switching_to_monitor_cancels_pending_and_scheduled_transmit() -> None:
     assert sent and sent[0].type is FrameType.MULTIHOP_RREQ
     sent.clear()
 
-    engine.configure(mode=DISCOVERY_MONITOR)
+    engine.configure(mode=DISCOVERY_OFF)
     engine.tick(10)
     assert sent == []
     assert failed == [("S2", "multi-hop discovery disabled")]
@@ -751,11 +778,11 @@ def test_disabling_auto_use_preserves_only_manual_approval() -> None:
     assert manual.approved is True
 
 
-def test_auto_use_never_activates_routes_in_monitor_mode() -> None:
+def test_auto_use_never_activates_routes_while_discovery_is_off() -> None:
     engine = DiscoveryEngine(
         "S6",
         lambda _frame: None,
-        mode=DISCOVERY_MONITOR,
+        mode=DISCOVERY_OFF,
         auto_use=True,
     )
     engine.tick(1)
@@ -764,8 +791,62 @@ def test_auto_use_never_activates_routes_in_monitor_mode() -> None:
     assert route.approved is False
     engine.configure(mode=DISCOVERY_ASSISTED)
     assert route.approved is True
-    engine.configure(mode=DISCOVERY_MONITOR)
+    engine.configure(mode=DISCOVERY_OFF)
     assert route.approved is False
+
+
+def test_two_stations_on_default_settings_find_each_other_and_await_approval() -> None:
+    """The shipped profile has to produce something an operator can verify.
+
+    Everything here comes from StationConfig defaults: no experiment enabled,
+    no relay, no automatic use. What the operator should see is a query going
+    out, an answer coming back, and a route sitting in the table waiting for
+    them -- not two silent stations and empty tables.
+    """
+    config = StationConfig()
+    bus = GraphRadioBus({("S6", "N1")})
+    stations = {
+        call: Orchestrator(
+            call,
+            bus.endpoint(call),
+            auto_route=config.auto_route,
+            auto_complete=True,
+            relay=config.auto_relay,
+            discovery_mode=config.discovery_mode,
+            discovery_forward=config.discovery_forward,
+            discovery_ttl=config.discovery_ttl,
+            discovery_frame_budget=config.discovery_frame_budget,
+            discovery_auto_use=config.discovery_auto_use,
+            link_advert_enabled=config.link_advert_enabled,
+        )
+        for call in ("S6", "N1")
+    }
+    for station in stations.values():
+        station.discovery.jitter_min = 0
+        station.discovery.jitter_max = 0
+
+    message = stations["S6"].send_message("N1", "hello", msg_id=7100, ttl=5)
+    assert message.state is SessionState.MULTIHOP_DISCOVERY
+
+    now = 0.0
+    approved = False
+    while now <= 40 and message.state is not SessionState.DELIVERED:
+        for station in stations.values():
+            station.tick(now)
+        bus.pump()
+        if message.state is SessionState.WAITING_ROUTE_APPROVAL and not approved:
+            route = stations["S6"].approve_discovered_route("N1")
+            assert route is not None
+            assert (route.next_hop, route.hops) == ("N1", 1)
+            approved = True
+        now += 0.25
+
+    assert approved is True
+    assert message.state is SessionState.DELIVERED
+    # N1 answered a query about itself, which the retired monitor position
+    # could not do -- and it heard S6 while doing so.
+    assert any(event.kind == "heard-rreq" for event in stations["N1"].discovery.events)
+    assert stations["N1"].heard.is_heard("S6", now)
 
 
 def test_link_advert_evidence_and_derived_route_expire() -> None:

@@ -58,6 +58,25 @@ def test_experimental_network_flags_default_off_and_round_trip(tmp_path: Path) -
     assert loaded.link_advert_interval == 600.0
 
 
+def test_discovery_has_two_modes_and_a_monitor_profile_is_migrated(
+    tmp_path: Path,
+) -> None:
+    # A station takes part by default: the receive-only position it may have
+    # been left in could neither answer a query nor produce a usable route.
+    assert StationConfig().discovery_mode == "assisted"
+
+    path = tmp_path / "config.json"
+    path.write_text('{"discovery_mode": "monitor"}', encoding="utf-8")
+    assert StationConfig.load(path).discovery_mode == "assisted"
+
+    for stored, expected in (("off", "off"), ("assisted", "assisted")):
+        path.write_text(f'{{"discovery_mode": "{stored}"}}', encoding="utf-8")
+        assert StationConfig.load(path).discovery_mode == expected
+
+    path.write_text('{"discovery_mode": "sometimes"}', encoding="utf-8")
+    assert StationConfig.load(path).discovery_mode == "assisted"
+
+
 def test_radio_profiles_carry_the_radio_page_and_nothing_else(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     config = StationConfig(

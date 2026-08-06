@@ -224,6 +224,13 @@ QPushButton#primaryAction {{
 }}
 QPushButton#primaryAction:hover {{ background: {tokens.accent_hover}; }}
 QPushButton#primaryAction:pressed {{ background: {tokens.accent_pressed}; }}
+/* An id selector outranks the plain :disabled rule above, so without this a
+   primary action that cannot run still looks like the thing to press. */
+QPushButton#primaryAction:disabled {{
+    color: {tokens.disabled};
+    background: {tokens.surface_1};
+    border-color: {tokens.panel_border};
+}}
 QPlainTextEdit {{
     background: {tokens.surface_1};
     border: 1px solid {tokens.panel_border};

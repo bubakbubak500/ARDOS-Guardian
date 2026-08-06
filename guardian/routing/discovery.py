@@ -31,9 +31,27 @@ from ..protocol import (
 )
 
 DISCOVERY_OFF = "off"
-DISCOVERY_MONITOR = "monitor"
 DISCOVERY_ASSISTED = "assisted"
-DISCOVERY_MODES = (DISCOVERY_OFF, DISCOVERY_MONITOR, DISCOVERY_ASSISTED)
+DISCOVERY_MODES = (DISCOVERY_OFF, DISCOVERY_ASSISTED)
+
+# 0.6.58 and earlier also offered a receive-only "monitor" mode. A station in it
+# recorded breadcrumbs it could never answer with an RREP, never returned a
+# route to its own operator and never appeared to anybody else, so the operator
+# was left looking at empty tables with nothing explaining why. There is no
+# useful third position between "do not take part" and "take part": a profile
+# that still selects it is read as assisted.
+_RETIRED_MODES = {"monitor": DISCOVERY_ASSISTED}
+
+
+def normalize_discovery_mode(mode: str | None) -> str:
+    """Read any stored or supplied value as one of the two supported modes.
+
+    Anything unrecognised becomes ``off``: a typo must never be the reason a
+    station starts keying the transmitter.
+    """
+    value = str(mode or "").strip().lower()
+    value = _RETIRED_MODES.get(value, value)
+    return value if value in DISCOVERY_MODES else DISCOVERY_OFF
 
 MIN_DISCOVERY_TTL = 2
 MAX_DISCOVERY_TTL = 8
@@ -431,7 +449,7 @@ class DiscoveryEngine:
         callsign: str,
         send: Callable[[ControlFrame], None],
         *,
-        mode: str = DISCOVERY_MONITOR,
+        mode: str = DISCOVERY_OFF,
         forward: bool = False,
         relay_enabled: bool = False,
         max_ttl: int = 4,
@@ -452,7 +470,7 @@ class DiscoveryEngine:
     ) -> None:
         self.callsign = callsign.strip().upper()
         self.send = send
-        self.mode = mode if mode in DISCOVERY_MODES else DISCOVERY_MONITOR
+        self.mode = normalize_discovery_mode(mode)
         self.forward = bool(forward)
         self.relay_enabled = bool(relay_enabled)
         self.max_ttl = min(MAX_DISCOVERY_TTL, max(MIN_DISCOVERY_TTL, int(max_ttl)))
@@ -512,7 +530,7 @@ class DiscoveryEngine:
             self.callsign = callsign.strip().upper()
         if mode is not None:
             previous_mode = self.mode
-            self.mode = mode if mode in DISCOVERY_MODES else DISCOVERY_MONITOR
+            self.mode = normalize_discovery_mode(mode)
             if previous_mode == DISCOVERY_ASSISTED and not self.can_transmit:
                 cancelled = list(self.pending.values())
                 self.pending.clear()
@@ -832,7 +850,7 @@ class DiscoveryEngine:
         if not origin or not target or not previous or origin == self.callsign:
             return
         self._event("heard-rreq", previous, target, f"origin {origin}, TTL {frame.ttl}")
-        if self.mode == DISCOVERY_OFF or not self._peer_allowed(previous):
+        if not self._peer_allowed(previous):
             return
         hops, penalty = decode_discovery_metric(frame.flags)
         candidate = Breadcrumb(

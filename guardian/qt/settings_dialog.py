@@ -33,7 +33,7 @@ from ..protocol import MAX_PTT_DELAY_MS, PTT_DELAY_STEP_MS
 from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.usb_serial import list_serial_ports, port_device
 from .theme import ThemePreference
-from .inputs import UppercaseLineEdit
+from .inputs import UppercaseLineEdit, callsign_list
 
 _CALLSIGN = re.compile(r"^[A-Z0-9/]{3,16}$")
 
@@ -946,6 +946,24 @@ class SettingsDialog(QDialog):
         self.beacon_enabled.setChecked(self.config.beacon_enabled)
         self.beacon_interval = _spin(15, 86_400, int(self.config.beacon_interval))
         self.scan_dwell = _spin(1, 300, int(self.config.scan_dwell))
+        # Bounds for the multi-hop discovery plane. They are set once for the
+        # station and belong with the rest of its network behaviour; Network →
+        # Route discovery keeps only what an operator touches while working.
+        self.discovery_forward = QCheckBox(tr("network.discovery_forward"))
+        self.discovery_forward.setChecked(self.config.discovery_forward)
+        self.discovery_ttl = _spin(2, 8, self.config.discovery_ttl)
+        self.discovery_lifetime = _spin(
+            1, 1440, max(1, int(self.config.discovery_route_lifetime / 60))
+        )
+        self.discovery_lifetime.setSuffix(dual(" min", " min"))
+        self.discovery_budget = _spin(1, 120, self.config.discovery_frame_budget)
+        self.discovery_budget.setSuffix(tr("network.discovery_frames_minute_suffix"))
+        self.discovery_allowlist = UppercaseLineEdit(
+            ", ".join(self.config.discovery_allowlist)
+        )
+        self.discovery_denylist = UppercaseLineEdit(
+            ", ".join(self.config.discovery_denylist)
+        )
         form.addRow(dual("Default hop limit (TTL)", "Výchozí limit skoků (TTL)"), self.default_ttl)
         form.addRow(self.auto_route)
         form.addRow(self.auto_relay)
@@ -955,6 +973,12 @@ class SettingsDialog(QDialog):
         form.addRow(self.beacon_enabled)
         form.addRow(dual("Beacon interval (seconds)", "Interval majáku (sekundy)"), self.beacon_interval)
         form.addRow(dual("Channel scan dwell (seconds)", "Doba poslechu kanálu (sekundy)"), self.scan_dwell)
+        form.addRow(self.discovery_forward)
+        form.addRow(tr("network.discovery_ttl"), self.discovery_ttl)
+        form.addRow(tr("network.discovery_lifetime"), self.discovery_lifetime)
+        form.addRow(tr("network.discovery_budget"), self.discovery_budget)
+        form.addRow(tr("network.discovery_allowlist"), self.discovery_allowlist)
+        form.addRow(tr("network.discovery_denylist"), self.discovery_denylist)
 
     def _build_appearance(self, theme: ThemePreference) -> None:
         form = self._page(
@@ -1060,6 +1084,12 @@ class SettingsDialog(QDialog):
         cfg.beacon_enabled = self.beacon_enabled.isChecked()
         cfg.beacon_interval = float(self.beacon_interval.value())
         cfg.scan_dwell = float(self.scan_dwell.value())
+        cfg.discovery_forward = self.discovery_forward.isChecked()
+        cfg.discovery_ttl = self.discovery_ttl.value()
+        cfg.discovery_route_lifetime = float(self.discovery_lifetime.value() * 60)
+        cfg.discovery_frame_budget = self.discovery_budget.value()
+        cfg.discovery_allowlist = callsign_list(self.discovery_allowlist.text())
+        cfg.discovery_denylist = callsign_list(self.discovery_denylist.text())
         cfg.appearance = self.selected_theme.value.title()
         cfg.save()
         selected_language = self.selected_language

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
-import re
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
@@ -24,7 +24,14 @@ from PySide6.QtWidgets import (
 )
 
 from ..i18n import dual, tr
-from ..routing import Route, Topology, locator_distance_bearing, write_topology_csv
+from ..routing import (
+    DISCOVERY_ASSISTED,
+    DISCOVERY_MODES,
+    Route,
+    Topology,
+    locator_distance_bearing,
+    write_topology_csv,
+)
 from .inputs import FrequencySpinBox, RowTable, UppercaseLineEdit
 from .runtime import ShellRuntime
 from .topology_wizard import TOPOLOGY_FILTER, TopologyWizard, topology_warning_text
@@ -40,10 +47,19 @@ class NetworkWorkspace(QWidget):
         title.setObjectName("PanelHeader")
         outer.addWidget(title)
         self.tabs = QTabWidget()
+        # Five pages of Czech labels can outgrow a narrow window. Eliding keeps
+        # every page one click away; scroll buttons would hide the last one,
+        # which is exactly the page an operator is least likely to go looking
+        # for.
+        self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self.tabs.tabBar().setUsesScrollButtons(False)
+        # Planned network first, then what is actually on the air, then the one
+        # experiment. Nothing here nests a second row of tabs inside a tab.
         self.tabs.addTab(self._routes_page(), tr("network.routes"))
         self.tabs.addTab(self._heard_page(), tr("network.heard"))
         self.tabs.addTab(self._topology_page(), tr("network.topology"))
         self.tabs.addTab(self._discovery_page(), tr("network.discovery"))
+        self.tabs.addTab(self._live_topology_page(), tr("network.live_topology"))
         outer.addWidget(self.tabs, 1)
         self.refresh()
 
@@ -137,10 +153,21 @@ class NetworkWorkspace(QWidget):
                 tr("network.last_frame"),
             ]
         )
-        self.heard_table.horizontalHeader().setSectionResizeMode(
-            7, QHeaderView.ResizeMode.Stretch
-        )
+        heard_header = self.heard_table.horizontalHeader()
+        # "Poslední S/N (odhad)" is wider than the default column, and a clipped
+        # header is a column the operator has to guess at.
+        for column in range(7):
+            heard_header.setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents
+            )
+        heard_header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.heard_table, 1)
+        # An empty table is the normal state of a quiet channel and the normal
+        # state of a channel that was never started. Saying which one it is here
+        # is the difference between waiting and troubleshooting.
+        self.heard_status = QLabel()
+        self.heard_status.setWordWrap(True)
+        layout.addWidget(self.heard_status)
         return page
 
     def _topology_page(self) -> QWidget:
@@ -198,71 +225,35 @@ class NetworkWorkspace(QWidget):
         hint.setObjectName("Metadata")
         layout.addWidget(hint)
 
-        self.discovery_sections = QTabWidget()
-        settings_page = QWidget()
-        settings_layout = QVBoxLayout(settings_page)
-        form = QFormLayout()
+        mode_row = QHBoxLayout()
         self.discovery_mode = QComboBox()
-        for mode in ("off", "monitor", "assisted"):
+        for mode in DISCOVERY_MODES:
             self.discovery_mode.addItem(tr(f"network.discovery_mode_{mode}"), mode)
         index = self.discovery_mode.findData(self.runtime.config.discovery_mode)
         self.discovery_mode.setCurrentIndex(max(0, index))
-        self.discovery_forward = QCheckBox(tr("network.discovery_forward"))
-        self.discovery_forward.setChecked(self.runtime.config.discovery_forward)
-        self.discovery_ttl = QSpinBox()
-        self.discovery_ttl.setRange(2, 8)
-        self.discovery_ttl.setValue(self.runtime.config.discovery_ttl)
-        self.discovery_lifetime = QSpinBox()
-        self.discovery_lifetime.setRange(1, 1440)
-        self.discovery_lifetime.setSuffix(" min")
-        self.discovery_lifetime.setValue(
-            max(1, int(self.runtime.config.discovery_route_lifetime / 60))
-        )
-        self.discovery_budget = QSpinBox()
-        self.discovery_budget.setRange(1, 120)
-        self.discovery_budget.setSuffix(tr("network.discovery_frames_minute_suffix"))
-        self.discovery_budget.setValue(self.runtime.config.discovery_frame_budget)
-        self.discovery_allowlist = UppercaseLineEdit(
-            ", ".join(self.runtime.config.discovery_allowlist)
-        )
-        self.discovery_denylist = UppercaseLineEdit(
-            ", ".join(self.runtime.config.discovery_denylist)
-        )
-        form.addRow(tr("network.discovery_mode"), self.discovery_mode)
-        form.addRow(self.discovery_forward)
-        form.addRow(tr("network.discovery_ttl"), self.discovery_ttl)
-        form.addRow(tr("network.discovery_lifetime"), self.discovery_lifetime)
-        form.addRow(tr("network.discovery_budget"), self.discovery_budget)
-        form.addRow(tr("network.discovery_allowlist"), self.discovery_allowlist)
-        form.addRow(tr("network.discovery_denylist"), self.discovery_denylist)
-        settings_layout.addLayout(form)
-
-        settings_row = QHBoxLayout()
-        save = QPushButton(tr("network.discovery_save"))
-        save.clicked.connect(self._save_discovery_settings)
-        self.discovery_status = QLabel()
-        self.discovery_status.setWordWrap(True)
-        self.discovery_status.setObjectName("Metadata")
-        settings_row.addWidget(save)
-        settings_row.addWidget(self.discovery_status, 1)
-        settings_layout.addStretch()
-
-        route_page = QWidget()
-        route_layout = QVBoxLayout(route_page)
         self.discovery_auto_use = QCheckBox(tr("network.discovery_auto_use"))
         self.discovery_auto_use.setChecked(self.runtime.config.discovery_auto_use)
-        route_layout.addWidget(self.discovery_auto_use)
+        mode_row.addWidget(QLabel(tr("network.discovery_mode")))
+        mode_row.addWidget(self.discovery_mode)
+        mode_row.addSpacing(16)
+        mode_row.addWidget(self.discovery_auto_use)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
 
         query_row = QHBoxLayout()
         self.discovery_destination = UppercaseLineEdit()
         self.discovery_destination.setPlaceholderText("S1 / OK1AAA")
-        query = QPushButton(tr("network.discovery_start"))
-        query.setObjectName("primaryAction")
-        query.clicked.connect(self._start_discovery)
+        self.discovery_query = QPushButton(tr("network.discovery_start"))
+        self.discovery_query.setObjectName("primaryAction")
+        self.discovery_query.clicked.connect(self._start_discovery)
         query_row.addWidget(QLabel(tr("network.destination")))
         query_row.addWidget(self.discovery_destination, 1)
-        query_row.addWidget(query)
-        route_layout.addLayout(query_row)
+        query_row.addWidget(self.discovery_query)
+        layout.addLayout(query_row)
+
+        self.discovery_status = QLabel()
+        self.discovery_status.setWordWrap(True)
+        layout.addWidget(self.discovery_status)
 
         self.discovery_routes = RowTable(0, 9)
         self.discovery_routes.setHorizontalHeaderLabels(
@@ -285,7 +276,7 @@ class NetworkWorkspace(QWidget):
             discovery_header.setSectionResizeMode(
                 column, QHeaderView.ResizeMode.ResizeToContents
             )
-        route_layout.addWidget(self.discovery_routes, 1)
+        layout.addWidget(self.discovery_routes, 1)
 
         route_actions = QHBoxLayout()
         approve = QPushButton(tr("network.discovery_approve"))
@@ -295,10 +286,10 @@ class NetworkWorkspace(QWidget):
         route_actions.addWidget(approve)
         route_actions.addStretch()
         route_actions.addWidget(clear)
-        route_layout.addLayout(route_actions)
+        layout.addLayout(route_actions)
 
         self.discovery_pending = RowTable(0, 5)
-        self.discovery_pending.setMaximumHeight(130)
+        self.discovery_pending.setMaximumHeight(110)
         self.discovery_pending.setHorizontalHeaderLabels(
             [
                 tr("network.discovery_query_id"),
@@ -311,15 +302,24 @@ class NetworkWorkspace(QWidget):
         self.discovery_pending.horizontalHeader().setSectionResizeMode(
             4, QHeaderView.ResizeMode.Stretch
         )
-        route_layout.addWidget(self.discovery_pending)
+        layout.addWidget(self.discovery_pending)
         self.discovery_recent = QLabel()
         self.discovery_recent.setWordWrap(True)
         self.discovery_recent.setObjectName("Metadata")
-        route_layout.addWidget(self.discovery_recent)
-        self.discovery_sections.addTab(
-            route_page, tr("network.discovery_routes_tab")
-        )
+        layout.addWidget(self.discovery_recent)
+        layout.addLayout(self._save_row())
+        return page
 
+    def _save_row(self) -> QHBoxLayout:
+        """One save action per page, writing every discovery setting."""
+        row = QHBoxLayout()
+        save = QPushButton(tr("network.discovery_save"))
+        save.clicked.connect(self._save_discovery_settings)
+        row.addStretch()
+        row.addWidget(save)
+        return row
+
+    def _live_topology_page(self) -> QWidget:
         live_page = QWidget()
         live_layout = QVBoxLayout(live_page)
         live_hint = QLabel(tr("network.link_advert_hint"))
@@ -364,49 +364,68 @@ class NetworkWorkspace(QWidget):
         live_layout.addWidget(self.live_links, 1)
         self.live_status = QLabel()
         self.live_status.setWordWrap(True)
-        self.live_status.setObjectName("Metadata")
         live_layout.addWidget(self.live_status)
         live_actions = QHBoxLayout()
-        advertise = QPushButton(tr("network.link_advert_now"))
-        advertise.setObjectName("primaryAction")
-        advertise.clicked.connect(self._advertise_live_links)
+        self.link_advert_now = QPushButton(tr("network.link_advert_now"))
+        self.link_advert_now.setObjectName("primaryAction")
+        self.link_advert_now.clicked.connect(self._advertise_live_links)
         clear_live = QPushButton(tr("network.link_advert_clear"))
         clear_live.clicked.connect(self._clear_live_topology)
-        live_actions.addWidget(advertise)
+        live_actions.addWidget(self.link_advert_now)
         live_actions.addStretch()
         live_actions.addWidget(clear_live)
         live_layout.addLayout(live_actions)
-        self.discovery_sections.addTab(
-            live_page, tr("network.discovery_live_tab")
-        )
-        self.discovery_sections.addTab(
-            settings_page, tr("network.discovery_settings_tab")
-        )
-        layout.addWidget(self.discovery_sections, 1)
-        layout.addLayout(settings_row)
-        return page
+        live_layout.addLayout(self._save_row())
+        return live_page
 
-    @staticmethod
-    def _callsign_list(text: str) -> list[str]:
-        return [
-            item.strip().upper()
-            for item in re.split(r"[,;\s]+", text or "")
-            if item.strip()
-        ]
+    @property
+    def _control_active(self) -> bool:
+        """Whether control audio is actually running, not what was configured."""
+        return self.runtime.operations.audio_transport is not None
+
+    def _discovery_blockers(self) -> list[str]:
+        """Why the discovery plane cannot act, in the order worth fixing.
+
+        Read from the running engine rather than from the widgets: a setting
+        that has not been saved yet has no effect on the air, and a button that
+        pretends otherwise is how an operator ends up believing the radio is
+        broken.
+        """
+        reasons = []
+        if not self._control_active:
+            reasons.append(
+                tr("network.control_off_notice", action=tr("shell.start_control"))
+            )
+        if self.runtime.operations.net.discovery.mode != DISCOVERY_ASSISTED:
+            reasons.append(tr("network.discovery_off_notice"))
+        return reasons
+
+    def _sync_discovery_controls(self) -> None:
+        """Let every action say up front whether it can do anything."""
+        blockers = self._discovery_blockers()
+        self.discovery_query.setEnabled(not blockers)
+        self.discovery_query.setToolTip(" ".join(blockers))
+        advert_blockers = list(blockers)
+        if not self.runtime.operations.net.discovery.link_advert_enabled:
+            advert_blockers.append(tr("network.link_advert_disabled_notice"))
+        self.link_advert_now.setEnabled(not advert_blockers)
+        self.link_advert_now.setToolTip(" ".join(advert_blockers))
+
+    def _unsaved_discovery_changes(self) -> bool:
+        """Whether the pages hold a setting the station has not adopted yet."""
+        config = self.runtime.config
+        return (
+            self.discovery_mode.currentData() != config.discovery_mode
+            or self.discovery_auto_use.isChecked() != config.discovery_auto_use
+            or self.link_advert_enabled.isChecked() != config.link_advert_enabled
+            or self.link_advert_interval.value() * 60
+            != int(config.link_advert_interval)
+        )
 
     def _save_discovery_settings(self) -> None:
+        """Adopt both discovery pages at once; limits live in Station settings."""
         config = self.runtime.config
         config.discovery_mode = self.discovery_mode.currentData()
-        config.discovery_forward = self.discovery_forward.isChecked()
-        config.discovery_ttl = self.discovery_ttl.value()
-        config.discovery_route_lifetime = float(self.discovery_lifetime.value() * 60)
-        config.discovery_frame_budget = self.discovery_budget.value()
-        config.discovery_allowlist = self._callsign_list(
-            self.discovery_allowlist.text()
-        )
-        config.discovery_denylist = self._callsign_list(
-            self.discovery_denylist.text()
-        )
         config.discovery_auto_use = self.discovery_auto_use.isChecked()
         config.link_advert_enabled = self.link_advert_enabled.isChecked()
         config.link_advert_interval = float(self.link_advert_interval.value() * 60)
@@ -648,6 +667,7 @@ class NetworkWorkspace(QWidget):
             )
             for column, value in enumerate(values):
                 self.heard_table.setItem(row, column, QTableWidgetItem(value))
+        self.heard_status.setText(self._heard_state_text(heard, now))
 
         topology = self.runtime.topology
         derived = topology.derive_routes(self.runtime.config.callsign)
@@ -688,7 +708,15 @@ class NetworkWorkspace(QWidget):
 
         discovery = self.runtime.operations.net.discovery
         routes = discovery.routes.routes(now, include_expired=True)
-        self.discovery_routes.setRowCount(len(routes))
+        # A directly heard station already resolves as a one-hop next hop, so
+        # show it beside the learned routes instead of leaving the operator to
+        # infer it from two separate tables.
+        direct = [
+            station
+            for station in heard
+            if not any(route.destination == station.callsign for route in routes)
+        ]
+        self.discovery_routes.setRowCount(len(routes) + len(direct))
         for row, route in enumerate(routes):
             remaining = max(0.0, route.expires_at - now)
             state = (
@@ -712,6 +740,23 @@ class NetworkWorkspace(QWidget):
             for column, value in enumerate(values):
                 self.discovery_routes.setItem(
                     row, column, QTableWidgetItem(value)
+                )
+        for offset, station in enumerate(direct):
+            age = station.age(now)
+            values = (
+                station.callsign,
+                station.callsign,
+                "1",
+                "-",
+                f"{age:.0f} s",
+                f"{max(0.0, self.runtime.heard.max_age - age) / 60:.0f} min",
+                tr("common.yes"),
+                tr("network.discovery_state_direct"),
+                tr("network.source_heard"),
+            )
+            for column, value in enumerate(values):
+                self.discovery_routes.setItem(
+                    len(routes) + offset, column, QTableWidgetItem(value)
                 )
 
         pending = list(discovery.pending.values())
@@ -743,28 +788,35 @@ class NetworkWorkspace(QWidget):
             if recent
             else tr("network.discovery_no_activity")
         )
-        warnings = []
+        notices = self._discovery_blockers()
         if self.runtime.config.discovery_forward and not self.runtime.config.auto_relay:
-            warnings.append(tr("network.discovery_relay_warning"))
+            notices.append(tr("network.discovery_relay_warning"))
         if (
             self.runtime.config.discovery_auto_use
-            and discovery.mode != "assisted"
+            and discovery.mode != DISCOVERY_ASSISTED
         ):
-            warnings.append(tr("network.discovery_auto_inactive"))
-        if (
-            self.runtime.config.link_advert_enabled
-            and discovery.mode != "assisted"
-        ):
-            warnings.append(tr("network.link_advert_monitor_warning"))
-        self.discovery_status.setText(
-            tr(
-                "network.discovery_status",
-                mode=tr(f"network.discovery_mode_{discovery.mode}"),
-                routes=len([route for route in routes if route.active(now)]),
-                pending=len(pending),
+            notices.append(tr("network.discovery_auto_inactive"))
+        if self._unsaved_discovery_changes():
+            notices.append(
+                tr("network.discovery_unsaved", action=tr("network.discovery_save"))
             )
-            + (f"  {' '.join(warnings)}" if warnings else "")
+        self.discovery_status.setText(
+            "\n".join(
+                [
+                    tr(
+                        "network.discovery_status",
+                        mode=tr(f"network.discovery_mode_{discovery.mode}"),
+                        routes=len(
+                            [route for route in routes if route.active(now)]
+                        )
+                        + len(direct),
+                        pending=len(pending),
+                    ),
+                    *notices,
+                ]
+            )
         )
+        self._sync_discovery_controls()
 
         links = discovery.live_topology.links(now, include_expired=True)
         self.live_links.setRowCount(len(links))
@@ -789,11 +841,38 @@ class NetworkWorkspace(QWidget):
             for route in routes
             if route.source == "link-advert" and route.active(now)
         ]
+        # _discovery_blockers already says when the mode is the problem; the only
+        # extra thing this page can be missing is its own switch.
+        live_notices = list(self._discovery_blockers())
+        if not discovery.link_advert_enabled:
+            live_notices.append(tr("network.link_advert_disabled_notice"))
         self.live_status.setText(
-            tr(
-                "network.link_advert_status",
-                observations=len([link for link in links if link.active(now)]),
-                reciprocal=reciprocal_count // 2,
-                routes=len(live_routes),
+            "\n".join(
+                [
+                    tr(
+                        "network.link_advert_status",
+                        observations=len(
+                            [link for link in links if link.active(now)]
+                        ),
+                        reciprocal=reciprocal_count // 2,
+                        routes=len(live_routes),
+                    ),
+                    *live_notices,
+                ]
             )
+        )
+
+    def _heard_state_text(self, heard: list, now: float) -> str:
+        """Say whether silence means a quiet channel or no channel at all."""
+        if not self._control_active:
+            return tr("network.control_off_notice", action=tr("shell.start_control"))
+        if not heard:
+            lines = [tr("network.heard_state_quiet")]
+            if not self.runtime.config.beacon_enabled:
+                lines.append(tr("network.heard_beacon_hint"))
+            return "\n".join(lines)
+        return tr(
+            "network.heard_state_listening",
+            count=len(heard),
+            age=f"{heard[0].age(now):.0f}",
         )

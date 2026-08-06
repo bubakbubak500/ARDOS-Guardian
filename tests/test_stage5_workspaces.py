@@ -11,8 +11,10 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
+    QTabWidget,
 )
 
+from guardian.config import StationConfig
 from guardian.i18n import tr
 from guardian.message import (
     Attachment,
@@ -346,15 +348,24 @@ def test_network_tables_are_read_only_row_selectors() -> None:
         runtime.close()
 
 
-def test_network_workspace_has_automatic_network_tab_in_monitor_mode() -> None:
+def test_network_pages_are_flat_with_the_experiment_last() -> None:
     _application()
     runtime = ShellRuntime()
-    runtime.config.discovery_mode = "monitor"
     workspace = NetworkWorkspace(runtime)
     try:
-        labels = [workspace.tabs.tabText(index) for index in range(workspace.tabs.count())]
-        assert labels[-1] == tr("network.discovery")
-        assert workspace.discovery_mode.currentData() == "monitor"
+        labels = [
+            workspace.tabs.tabText(index)
+            for index in range(workspace.tabs.count())
+        ]
+        assert labels == [
+            tr("network.routes"),
+            tr("network.heard"),
+            tr("network.topology"),
+            tr("network.discovery"),
+            tr("network.live_topology"),
+        ]
+        # No page hides a second row of tabs inside itself.
+        assert workspace.findChildren(QTabWidget) == [workspace.tabs]
         assert workspace.discovery_routes.rowCount() == 0
         assert "0" in workspace.discovery_status.text()
     finally:
@@ -362,7 +373,75 @@ def test_network_workspace_has_automatic_network_tab_in_monitor_mode() -> None:
         runtime.close()
 
 
-def test_discovery_tab_saves_assisted_limits_without_enabling_automatic_use(
+def test_only_off_and_assisted_are_offered_and_a_monitor_profile_is_migrated(
+    tmp_path,
+) -> None:
+    _application()
+    (tmp_path / "config.json").write_text(
+        '{"callsign": "OK7PS", "discovery_mode": "monitor"}', encoding="utf-8"
+    )
+    assert (
+        StationConfig.load(tmp_path / "config.json").discovery_mode == "assisted"
+    )
+    runtime = ShellRuntime()
+    workspace = NetworkWorkspace(runtime)
+    try:
+        assert [
+            workspace.discovery_mode.itemData(index)
+            for index in range(workspace.discovery_mode.count())
+        ] == ["off", "assisted"]
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_discovery_actions_are_disabled_and_explained_without_a_control_channel() -> None:
+    _application()
+    runtime = ShellRuntime()
+    runtime.config.discovery_mode = "assisted"
+    runtime.operations.apply_network_settings()
+    workspace = NetworkWorkspace(runtime)
+    try:
+        # Operations owns a NullTransport until the operator starts control
+        # audio, so nothing can be heard or transmitted yet.
+        assert runtime.operations.audio_transport is None
+        assert workspace.discovery_query.isEnabled() is False
+        assert tr("shell.start_control") in workspace.discovery_query.toolTip()
+        assert tr("shell.start_control") in workspace.heard_status.text()
+        assert workspace.link_advert_now.isEnabled() is False
+        assert (
+            tr("network.link_advert_disabled_notice")
+            in workspace.link_advert_now.toolTip()
+        )
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_a_directly_heard_station_shows_as_a_usable_one_hop_route() -> None:
+    _application()
+    runtime = ShellRuntime()
+    workspace = NetworkWorkspace(runtime)
+    try:
+        runtime.heard.record("OK2IPW", time.monotonic(), frame="BEACON")
+        workspace.refresh()
+
+        assert workspace.heard_table.rowCount() == 1
+        assert workspace.discovery_routes.rowCount() == 1
+        assert workspace.discovery_routes.item(0, 0).text() == "OK2IPW"
+        assert workspace.discovery_routes.item(0, 1).text() == "OK2IPW"
+        assert workspace.discovery_routes.item(0, 2).text() == "1"
+        assert workspace.discovery_routes.item(0, 8).text() == tr(
+            "network.source_heard"
+        )
+        # It is an observation, not a planned route, and stays out of the table.
+        assert runtime.routes.lookup("OK2IPW") is None
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+def test_discovery_page_saves_the_mode_without_enabling_automatic_use(
     monkeypatch,
 ) -> None:
     _application()
@@ -373,26 +452,13 @@ def test_discovery_tab_saves_assisted_limits_without_enabling_automatic_use(
         workspace.discovery_mode.setCurrentIndex(
             workspace.discovery_mode.findData("assisted")
         )
-        workspace.discovery_forward.setChecked(True)
-        workspace.discovery_ttl.setValue(6)
-        workspace.discovery_lifetime.setValue(45)
-        workspace.discovery_budget.setValue(9)
-        workspace.discovery_allowlist.setText("n1, n2")
-        workspace.discovery_denylist.setText("bad")
         workspace._save_discovery_settings()
 
         assert runtime.config.discovery_mode == "assisted"
-        assert runtime.config.discovery_forward is True
-        assert runtime.config.discovery_ttl == 6
-        assert runtime.config.discovery_route_lifetime == 2700
-        assert runtime.config.discovery_frame_budget == 9
-        assert runtime.config.discovery_allowlist == ["N1", "N2"]
-        assert runtime.config.discovery_denylist == ["BAD"]
         assert runtime.config.discovery_auto_use is False
         assert runtime.config.link_advert_enabled is False
         assert runtime.operations.net.discovery.mode == "assisted"
-        assert runtime.operations.net.discovery.max_ttl == 6
-        # This release has no automatic mode: a learned path still needs approval.
+        # Assisted on its own never hands a fresh route to a message: it waits.
         learned = runtime.operations.net.discovery.routes.learn(
             "S1", "N1", 4, 1, 99, time.monotonic()
         )
@@ -403,24 +469,12 @@ def test_discovery_tab_saves_assisted_limits_without_enabling_automatic_use(
         runtime.close()
 
 
-def test_automatic_network_subtabs_save_independent_experimental_flags(
-    monkeypatch,
-) -> None:
+def test_one_save_action_applies_both_network_pages(monkeypatch) -> None:
     _application()
     runtime = ShellRuntime()
     monkeypatch.setattr(runtime.config, "save", lambda *args, **kwargs: None)
     workspace = NetworkWorkspace(runtime)
     try:
-        assert workspace.discovery_sections.count() == 3
-        assert workspace.discovery_sections.tabText(0) == tr(
-            "network.discovery_routes_tab"
-        )
-        assert workspace.discovery_sections.tabText(1) == tr(
-            "network.discovery_live_tab"
-        )
-        assert workspace.discovery_sections.tabText(2) == tr(
-            "network.discovery_settings_tab"
-        )
         workspace.discovery_auto_use.setChecked(True)
         workspace.link_advert_enabled.setChecked(False)
         workspace.link_advert_interval.setValue(12)

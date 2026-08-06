@@ -162,20 +162,22 @@ class StationConfig:
     auto_route: bool = True    # discover a next hop (ROUTE_QUERY) when none known
     auto_relay: bool = False   # forward received messages toward their final dest
     auto_deliver: bool = True  # send waiting Outbox/Transit mail when the hop is heard
-    # Bounded multi-hop discovery is a separate, explicitly opt-in plane.
-    # "monitor" records compatible RREQ/RREP without transmitting; "assisted"
-    # may discover, but an originating station still needs operator approval
-    # before a learned route carries payload. Automatic mode is deliberately
-    # reserved for a later field-tested release.
-    discovery_mode: str = "monitor"  # "off" | "monitor" | "assisted"
+    # Bounded multi-hop discovery. Two positions only: "off" ignores every
+    # discovery frame, "assisted" takes part -- it answers a query about this
+    # station, may look for a route the operator asks for, and pauses an
+    # originating message until that route is approved (or until
+    # `discovery_auto_use` is set). The receive-only "monitor" position that
+    # 0.6.58 and earlier had could do none of that and is migrated to
+    # "assisted" on load; see routing.discovery.normalize_discovery_mode.
+    discovery_mode: str = "assisted"  # "off" | "assisted"
     discovery_forward: bool = False
     discovery_ttl: int = 4
     discovery_route_lifetime: float = 1800.0
     discovery_frame_budget: int = 12
     discovery_allowlist: list[str] = field(default_factory=list)
     discovery_denylist: list[str] = field(default_factory=list)
-    # Experimental steps 9 and 10 are independent and default off so an
-    # operator can field-test automatic route use and live topology separately.
+    # Use a fresh discovered route without waiting for approval. Off by
+    # default: the operator sees what was found before it carries traffic.
     discovery_auto_use: bool = False
     link_advert_enabled: bool = False
     link_advert_interval: float = 900.0
@@ -256,8 +258,15 @@ class StationConfig:
             }
         else:
             clean.pop("radio_profiles", None)
-        if clean.get("discovery_mode") not in {"off", "monitor", "assisted"}:
-            clean["discovery_mode"] = "monitor"
+        # Kept as literals so configuration stays importable from anywhere;
+        # routing.discovery.normalize_discovery_mode is the same migration.
+        mode = str(clean.get("discovery_mode", "")).strip().lower()
+        if mode == "monitor":
+            mode = "assisted"
+        if mode in {"off", "assisted"}:
+            clean["discovery_mode"] = mode
+        else:
+            clean.pop("discovery_mode", None)
         for name in ("discovery_allowlist", "discovery_denylist"):
             values = clean.get(name)
             if isinstance(values, list):
