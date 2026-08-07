@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
 
 from ..config import StationConfig, radio_profile_name
 from ..i18n import Language, dual, language, set_language, tr
+from ..install.dependencies import find_vara_fm, find_vara_hf
+from ..install.hamlib_installer import existing_rigctld
 from ..modem.audio import match_device_name, scan_audio_devices
 from ..protocol import MAX_PTT_DELAY_MS, PTT_DELAY_STEP_MS
 from ..radio.presets import CURATED, load_hamlib_models
@@ -46,13 +48,46 @@ def _spin(minimum: int, maximum: int, value: int) -> QSpinBox:
 
 
 class PathField(QWidget):
-    def __init__(self, value: str = "", executable: str = "*.exe"):
+    """A path with a Browse button, and what detection found when it is empty.
+
+    An empty field means "follow detection", not "nothing is installed" -- but
+    it looked identical to a station whose VARA was genuinely missing. Showing
+    the detected path keeps the field honest without pinning it: the value only
+    becomes an override once the operator types or browses to one.
+    """
+
+    def __init__(
+        self,
+        value: str = "",
+        executable: str = "*.exe",
+        detected: str | None = None,
+    ):
         super().__init__()
         self.executable = executable
+        self.detected = detected
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         self.edit = QLineEdit(value)
+        if detected:
+            self.edit.setPlaceholderText(
+                dual(
+                    f"Detected automatically: {detected}",
+                    f"Nalezeno automaticky: {detected}",
+                )
+            )
+            self.edit.setToolTip(
+                dual(
+                    "Leave empty to keep following the detected installation. "
+                    f"Guardian is using {detected}.",
+                    "Ponechte prázdné, aby Guardian dál používal nalezenou "
+                    f"instalaci. Nyní používá {detected}.",
+                )
+            )
+        else:
+            self.edit.setPlaceholderText(
+                dual("Not detected", "Nenalezeno")
+            )
         browse = QPushButton(dual("Browse…", "Procházet…"))
         browse.clicked.connect(self._browse)
         layout.addWidget(self.edit, 1)
@@ -287,7 +322,11 @@ class SettingsDialog(QDialog):
         self.cat_baud = _spin(0, 1_000_000, self.config.cat_baud)
         self.rigctld_host = QLineEdit(self.config.rigctld_host)
         self.rigctld_port = _spin(1, 65_535, self.config.rigctld_port)
-        self.rigctld_path = PathField(self.config.rigctld_path, "rigctld.exe")
+        self.rigctld_path = PathField(
+            self.config.rigctld_path,
+            "rigctld.exe",
+            detected=existing_rigctld(),
+        )
         self.ptt_line = QComboBox()
         self.ptt_line.addItems(["RTS", "DTR"])
         self.ptt_line.setCurrentText(self.config.ptt_line)
@@ -803,10 +842,11 @@ class SettingsDialog(QDialog):
         form = self._page(
             tr("settings.vara"),
             dual(
-                "Select the active VARA flavor and whether Guardian transfers "
-                "the payload directly or coordinates a manual Winlink hand-off.",
-                "Zvolte variantu VARA a zda Guardian přenese obsah přímo, nebo "
-                "bude koordinovat ruční předání přes Winlink.",
+                "Select the active VARA flavor and its ports. An empty "
+                "executable field follows detection; the grey text is the path "
+                "Guardian uses.",
+                "Zvolte variantu VARA a její porty. Prázdné pole s programem "
+                "se řídí detekcí; šedý text je cesta, kterou Guardian používá.",
             ),
         )
         self.vara_mode = QComboBox()
@@ -823,8 +863,16 @@ class SettingsDialog(QDialog):
         self.vara_fm_data = _spin(1, 65_535, self.config.vara_fm_data_port)
         self.vara_hf_cmd = _spin(1, 65_535, self.config.vara_hf_cmd_port)
         self.vara_hf_data = _spin(1, 65_535, self.config.vara_hf_data_port)
-        self.vara_fm_path = PathField(self.config.vara_fm_path, "VARAFM.exe")
-        self.vara_hf_path = PathField(self.config.vara_hf_path, "VARA.exe")
+        self.vara_fm_path = PathField(
+            self.config.vara_fm_path,
+            "VARAFM.exe",
+            detected=find_vara_fm(),
+        )
+        self.vara_hf_path = PathField(
+            self.config.vara_hf_path,
+            "VARA.exe",
+            detected=find_vara_hf(),
+        )
         self.control_modem = QComboBox()
         self.control_modem.addItem(
             dual("Automatic for FM/HF", "Automaticky podle FM/HF"), "auto"

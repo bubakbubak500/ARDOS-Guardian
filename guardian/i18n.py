@@ -92,6 +92,11 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Provozní plocha Guardianu je připravena",
     ),
     "shell.station_context": ("STATION CONTEXT", "KONTEXT STANICE"),
+    "transfer.title": ("VARA TRANSMISSION", "PŘENOS VARA"),
+    "transfer.detail": (
+        "{sent} of {total} B on the air · {percent} %",
+        "{sent} z {total} B odvysíláno · {percent} %",
+    ),
     "shell.operation": ("OPERATION", "PROVOZ"),
     "shell.station_idle": ("Station idle", "Stanice je neaktivní"),
     "shell.operation_detail": (
@@ -431,19 +436,13 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "nebo řádek uložte jako ruční override.",
     ),
     "network.discovery": ("Route discovery", "Hledání trasy"),
+    # One line each: the page says what it is, Guardian help says how it works.
+    # A five-line paragraph above a table is a paragraph nobody reads twice.
     "network.discovery_hint": (
-        "Bounded multi-hop RREQ/RREP discovery over the control channel. Off "
-        "ignores every discovery frame; Assisted answers a query about this "
-        "station and looks for a route when you ask for one. Learned routes "
-        "expire and never overwrite a manual route or the imported topology. "
-        "TTL, lifetime, airtime budget and trust lists are in Station settings "
-        "→ Network behavior.",
-        "Omezené vícehopové hledání RREQ/RREP na řídicím kanálu. Vypnuto "
-        "ignoruje všechny discovery rámce; Asistovaný odpovídá na dotaz po této "
-        "stanici a hledá trasu, když o ni požádáte. Naučené trasy expirují a "
-        "nikdy nepřepíšou ruční trasu ani importovanou topologii. TTL, "
-        "životnost, vysílací rozpočet a seznamy důvěry jsou v Nastavení stanice "
-        "→ Chování sítě.",
+        "Bounded multi-hop RREQ/RREP route discovery on the control channel. "
+        "Details and limits are in Guardian help.",
+        "Omezené vícehopové hledání trasy RREQ/RREP na řídicím kanálu. "
+        "Podrobnosti a limity jsou v nápovědě Guardianu.",
     ),
     "network.discovery_mode": ("Operating mode", "Provozní režim"),
     "network.discovery_mode_off": ("Off", "Vypnuto"),
@@ -546,16 +545,10 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Automatické použití nic nedělá, dokud je hledání trasy vypnuté.",
     ),
     "network.link_advert_hint": (
-        "Experimental and independent of route discovery above. LINK_ADVERT "
-        "periodically exchanges recent direct observations so a quiet network "
-        "draws its own map. Only links independently confirmed from both sides "
-        "may create routes; all evidence expires and stays separate from "
-        "Network builder.",
-        "Experimentální a nezávislé na hledání trasy výše. LINK_ADVERT "
-        "pravidelně vyměňuje čerstvá přímá pozorování, takže si tichá síť "
-        "nakreslí vlastní mapu. Trasu mohou vytvořit jen vazby nezávisle "
-        "potvrzené z obou stran; všechna zjištění expirují a zůstávají oddělená "
-        "od Sestavovače sítě.",
+        "Experimental LINK_ADVERT: neighbours exchange direct observations and "
+        "the network draws its own map. Details are in Guardian help.",
+        "Experimentální LINK_ADVERT: sousedé si vyměňují přímá pozorování a síť "
+        "si kreslí vlastní mapu. Podrobnosti jsou v nápovědě Guardianu.",
     ),
     "network.link_advert_enabled": (
         "Experimental: exchange LINK_ADVERT live topology",
@@ -1107,9 +1100,9 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "help.search": ("Filter topics", "Filtrovat témata"),
     "about.title": ("About Guardian", "O aplikaci Guardian"),
     "about.body": (
-        "<b>{app} {version}</b><br>ARDOS control and routing layer.<br><br>"
-        "The interface follows the shared Modeling Anten design language.",
-        "<b>{app} {version}</b><br>Řídicí a směrovací vrstva ARDOS.<br><br>"
-        "Rozhraní používá společný vizuální jazyk Modeling Anten.",
+        "<b>{app} {version}</b><br>Emergency communication system for HF/VHF"
+        "<br>OK7PS / OK2IPW / OK6LZ",
+        "<b>{app} {version}</b><br>Systém pro nouzovou komunikaci na HF/VHF"
+        "<br>OK7PS / OK2IPW / OK6LZ",
     ),
 }

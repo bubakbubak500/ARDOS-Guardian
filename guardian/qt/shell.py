@@ -47,6 +47,7 @@ from .settings_dialog import SettingsDialog
 from .map_window import MapWindow
 from .spectrum_window import SpectrumWindow
 from .theme import ThemeController, ThemePreference
+from .transfer_progress import TransferPanel, transfer_state
 from .update_dialog import UpdateDialog
 
 
@@ -313,6 +314,14 @@ class GuardianMainWindow(QMainWindow):
         context_layout.addWidget(self.context_activity)
         context_layout.addStretch()
         layout.addWidget(context, 1)
+
+        # The header's dead middle: while VARA is moving a payload this is the
+        # only place in the shell that says how far along it is.
+        self.transfer_panel = TransferPanel(self.theme_controller.tokens)
+        self.theme_controller.theme_changed.connect(
+            self.transfer_panel.set_tokens
+        )
+        layout.addWidget(self.transfer_panel, 2)
 
         operation = QWidget()
         operation.setMinimumWidth(285)
@@ -622,6 +631,9 @@ class GuardianMainWindow(QMainWindow):
             context_items.append(tr("context.vara_connecting"))
         self.context_activity.setText("  ·  ".join(context_items))
         self.context_activity.setVisible(bool(context_items))
+        self.transfer_panel.apply(
+            transfer_state(snapshot, self.runtime.operations.payload_active())
+        )
 
         values = {
             "inbox": mailbox.inbox,

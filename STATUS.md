@@ -1,6 +1,6 @@
 # Guardian (ARDOS) — Project Status & Plan
 
-_Last updated: 2026-08-06_
+_Last updated: 2026-08-07_
 
 A resumable snapshot: what Guardian is, what's built, what's verified, the key
 decisions and why, and what comes next. Read this first when picking the project
@@ -1020,7 +1020,40 @@ Two defects, both in what 0.6.49 added.
   be relabelled Manual — the highest precedence there is — and would outlive the
   expiry that made it trustworthy.
 
+## 1.0.0 — the interface catches up with the radio
+
+No new subsystem, no protocol change: 1.0.0 and 0.6.60 stations interoperate.
+This release is the UI review that turns the proven 0.6 series into something
+that reads as finished.
+
+- **Segmented VARA transmission meter** in the operational header, from
+  `data_bytes_written` minus `tx_buffer_bytes` — both already in the snapshot,
+  so no new plumbing. Segmented rather than smooth on purpose: at 566 bps a
+  smooth bar reads as stuck. Hidden whenever no payload is in flight.
+- **Checkbox indicators are drawn by Guardian**, not by the Windows 11 style,
+  which paints them near-black regardless of the palette. New `control_border`
+  token; the tick is a Pillow-generated glyph cached in the config dir, since
+  claiming `::indicator` in a stylesheet stops the widget style drawing one.
+  Glyph writing is fail-soft — a missing image leaves an accent-filled box.
+- **Detected tool paths are shown** as placeholder text in Station settings for
+  VARA FM, VARA HF and rigctld. Empty still means "follow detection"; the field
+  no longer looks identical to a missing installation.
+- **Map window is maximisable** and its tools are one block; background and
+  centre moved in, attribution shares the button row. Three lines returned to
+  the canvas.
+- **Route discovery and Live topology hints cut to one line each**, with the
+  detail moved into Guardian help. Save sits on the live-topology action row.
+  Station readiness no longer spreads three rows down a half-empty dialog.
+- **Guardian help: 10 topics → 15** (~19k → ~31k characters). New: the
+  end-to-end path of a message, net alerts and notifications, the spectrum
+  window, and a glossary. Stale manual-Winlink references (dropped in 0.6.26)
+  removed from both the help and the VARA settings page.
+
 ## 8. Known issues / watch-list
+- **`.venv` and `.venv-build` have lost PySide6** (both Python 3.12); only
+  `.python311` is a complete environment. `run.ps1` and `build.ps1` default to
+  `.venv`, so run them with `GUARDIAN_BUILD_PYTHON` pointed at
+  `.python311\python.exe`, or re-run `setup.ps1`.
 - **`RX bad frame: bad magic` seen occasionally next to an alert** (0.6.34,
   reported from the air 2026-07-30, HF and FM; the alert itself arrived and
   displayed correctly every time). Since 0.6.47 rejected candidates are kept

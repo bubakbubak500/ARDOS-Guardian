@@ -35,9 +35,10 @@ class ReadinessDialog(QDialog):
         self.runtime = runtime
         self.settings = settings
         self.setWindowTitle(tr("readiness.title"))
-        self.setMinimumSize(780, 450)
+        self.setMinimumSize(780, 360)
 
         outer = QVBoxLayout(self)
+        outer.setSpacing(6)
         heading = QLabel(dual("Prepare this station", "Připravte tuto stanici"))
         heading.setObjectName("PanelHeader")
         description = QLabel(
@@ -53,12 +54,15 @@ class ReadinessDialog(QDialog):
         outer.addWidget(heading)
         outer.addWidget(description)
 
+        # Three components are a short list. Given stretch, the grid spread its
+        # rows down the whole dialog and left the header floating alone at the
+        # top; the rows stay together and the slack goes below them instead.
         self.grid_host = QWidget()
         self.grid = QGridLayout(self.grid_host)
-        self.grid.setContentsMargins(0, 8, 0, 8)
+        self.grid.setContentsMargins(0, 6, 0, 6)
         self.grid.setHorizontalSpacing(12)
-        self.grid.setVerticalSpacing(10)
-        outer.addWidget(self.grid_host, 1)
+        self.grid.setVerticalSpacing(6)
+        outer.addWidget(self.grid_host)
 
         self.summary = QLabel()
         self.summary.setWordWrap(True)
@@ -69,6 +73,7 @@ class ReadinessDialog(QDialog):
         actions.addWidget(self.rescan)
         actions.addStretch()
         outer.addLayout(actions)
+        outer.addStretch(1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText(

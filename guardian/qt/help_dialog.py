@@ -97,6 +97,15 @@ def help_topics() -> list[HelpTopic]:
             rigctld was found. Gray means inactive, amber means attention is
             required, and green means ready/connected; every state is also
             written as text.</p>
+            <p>While VARA is moving a payload, a <b>VARA transmission</b> meter
+            appears in the middle of the header. Its segments are filled from
+            the two numbers VARA itself reports: how many bytes were handed to
+            the modem for this envelope, and how many are still queued for RF.
+            The difference is what has genuinely left the station, so the meter
+            can sit at zero for a few seconds after the hand-off — that is
+            VARA acquiring the link, not a stall. On an unregistered FM link
+            (566 bps) a short message legitimately takes tens of seconds. The
+            meter disappears when the codec returns to the control channel.</p>
             <p>The Activity panel is a bounded operational event history.
             Hardware polling and downloads run outside the UI thread so typing
             and navigation remain responsive.</p>
@@ -112,15 +121,102 @@ def help_topics() -> list[HelpTopic]:
             zvukový přenos AFSK/MFSK. <b>Hamlib</b> oznamuje nalezení rigctld.
             Šedá znamená neaktivní stav, žlutá vyžaduje pozornost a zelená
             připraveno/připojeno; stav je vždy uveden i textem.</p>
+            <p>Když VARA přenáší obsah, objeví se uprostřed záhlaví ukazatel
+            <b>Přenos VARA</b>. Jeho segmenty se plní podle dvou údajů, které
+            hlásí sama VARA: kolik bajtů této obálky převzal modem a kolik jich
+            ještě čeká ve vysílací frontě. Rozdíl je to, co stanici skutečně
+            opustilo, takže ukazatel může několik sekund po předání stát na nule
+            — to VARA navazuje spojení, nikoli zádrhel. Na neregistrovaném FM
+            spojení (566 bps) trvá krátká zpráva oprávněně desítky sekund. Po
+            vrácení zvukové karty řídicímu kanálu ukazatel zmizí.</p>
             <p>Panel Aktivita obsahuje omezenou historii provozních událostí.
             Dotazy na hardware i stahování běží mimo UI vlákno, takže psaní a
             navigace zůstávají plynulé.</p>
             """,
-            "home status counters activity domů stav počítadla aktivita",
+            "home status counters activity progress transfer domů stav "
+            "počítadla aktivita přenos ukazatel",
         ),
         _topic(
-            "3. Station settings",
-            "3. Nastavení stanice",
+            "3. From composing to delivery",
+            "3. Cesta zprávy od napsání k doručení",
+            """
+            <h2>What happens between Send and Delivered</h2>
+            <p>Guardian never transmits as a side effect. Every step below is
+            either an operator action or a consequence of one, and the whole
+            chain is visible in Activity while it runs.</p>
+            <ol>
+              <li><b>Compose</b> writes a local bundle into Outbox. Nothing is
+              on the air yet, and the message survives a restart.</li>
+              <li><b>Send</b> resolves the next hop: a manual route first, then
+              a station heard directly, then an approved discovered route, then
+              the imported topology. With no route and nothing heard, the
+              message simply stays queued — that is a normal state, not a
+              failure.</li>
+              <li>Guardian offers the message on the control channel with
+              <code>HAVE_MSG</code> and waits for <code>ACK_HAVE</code> from
+              that hop. This is a short AFSK or MFSK burst, a second or two of
+              airtime.</li>
+              <li>Both stations agree to switch with <code>START_VARA</code>.
+              The control channel releases the sound card, and — only if
+              separate working channels are enabled — both radios retune.</li>
+              <li>VARA opens the link and Guardian writes one framed envelope
+              into it. The header meter tracks the RF queue draining. Guardian
+              disconnects gracefully so VARA flushes what it still holds.</li>
+              <li>The sound card returns to the control channel and the
+              receiving station confirms. <code>RECEIVED</code> from a relay
+              means <b>forwarded</b>; the final station sends a separate
+              <code>DELIVERED</code> receipt back along the reverse hops.</li>
+            </ol>
+            <p>A failed message stays in Outbox and is counted separately from
+            what is still queued, so the Outbox figure never hides a problem.
+            Transit mail keeps its resolved next hop across a failure or a
+            restart and retries no more often than every five minutes.</p>
+            <p>Because the codec is shared, nothing else transmits during the
+            VARA phase: beacons, automatic delivery and the scanner all stand
+            down until the payload finishes.</p>
+            """,
+            """
+            <h2>Co se děje mezi Odeslat a Doručeno</h2>
+            <p>Guardian nikdy nevysílá mimochodem. Každý krok níže je buď akce
+            operátora, nebo její důsledek, a celý řetězec je během běhu vidět
+            v panelu Aktivita.</p>
+            <ol>
+              <li><b>Nová zpráva</b> uloží místní balíček do složky K odeslání.
+              Zatím není nic ve vzduchu a zpráva přežije restart.</li>
+              <li><b>Odeslat</b> určí další bod: nejprve ruční trasa, pak přímo
+              slyšená stanice, pak schválená nalezená trasa a nakonec
+              importovaná topologie. Bez trasy a bez slyšené stanice zpráva
+              prostě zůstane ve frontě — to je normální stav, nikoli chyba.</li>
+              <li>Guardian nabídne zprávu na řídicím kanálu rámcem
+              <code>HAVE_MSG</code> a čeká na <code>ACK_HAVE</code> od
+              protistanice. Jde o krátký AFSK nebo MFSK rámec, tedy sekundu až
+              dvě vysílání.</li>
+              <li>Obě stanice se rámcem <code>START_VARA</code> dohodnou na
+              přepnutí. Řídicí kanál uvolní zvukovou kartu a — jen při zapnutých
+              samostatných pracovních kanálech — obě rádia přeladí.</li>
+              <li>VARA naváže spojení a Guardian do něj zapíše jednu rámcovanou
+              obálku. Ukazatel v záhlaví sleduje, jak se vysílací fronta
+              vyprazdňuje. Guardian se odpojí korektně, aby VARA odvysílala i
+              to, co ještě drží.</li>
+              <li>Zvuková karta se vrátí řídicímu kanálu a přijímající stanice
+              potvrdí. <code>RECEIVED</code> od relaye znamená <b>předáno</b>;
+              cílová stanice pošle samostatné potvrzení <code>DELIVERED</code>
+              zpět po reverzních hopech.</li>
+            </ol>
+            <p>Neúspěšná zpráva zůstane ve složce K odeslání a počítá se zvlášť
+            od těch, které stále čekají, takže číslo u fronty nikdy neskryje
+            problém. Předávaná zpráva si zachová vypočtený next hop i po selhání
+            nebo restartu a neopakuje pokus častěji než po pěti minutách.</p>
+            <p>Protože je zvuková karta sdílená, během fáze VARA nevysílá nic
+            jiného: majáky, automatické doručování i scanner počkají, dokud
+            přenos neskončí.</p>
+            """,
+            "send flow have_msg ack start_vara delivered received outbox "
+            "odeslání průběh doručení fronta",
+        ),
+        _topic(
+            "4. Station settings",
+            "4. Nastavení stanice",
             """
             <h2>Station settings</h2>
             <p><b>Station</b> contains the callsign and operator name. The
@@ -144,9 +240,14 @@ def help_topics() -> list[HelpTopic]:
             cable is one pick away from either. Nothing reaches the radio until
             Save or Apply, and no callsign, audio device or VARA port travels
             with a profile. Saving under an existing name replaces it.</p>
-            <p><b>VARA & payload</b> stores separate FM and HF command/data
-            ports and executable paths. VARA P2P lets Guardian transfer the
-            bundle. Manual Winlink hand-off pauses at an operator confirmation.</p>
+            <p><b>VARA &amp; transfer</b> stores separate FM and HF
+            command/data ports and executable paths, and the control-burst
+            modem. An empty executable field is not a missing installation: it
+            means "follow detection", and the greyed text in the field is the
+            path Guardian is actually using. Browse to a file only to override
+            it — for a second VARA installation, or a portable copy. Guardian
+            VARA P2P is the transfer method; the picker exists so the next
+            transport can be added without rebuilding the page.</p>
             <p><b>Network behavior</b> controls TTL, route discovery, relay,
             queued delivery, automatic QSY and beacons. Enable relay or beacons
             only when you understand their on-air effect.</p>
@@ -177,9 +278,14 @@ def help_topics() -> list[HelpTopic]:
             se nic nedostane, dokud nedáte Uložit nebo Použít, a s profilem
             nikdy neputuje volací značka, zvukové zařízení ani port VARA.
             Uložení pod existujícím názvem jej nahradí.</p>
-            <p><b>VARA a přenos</b> uchovává oddělené příkazové/datové porty a
-            cesty k programům pro FM a HF. VARA P2P přenáší balíček přímo.
-            Ruční Winlink se zastaví na potvrzení operátora.</p>
+            <p><b>VARA a přenos</b> uchovává oddělené příkazové a datové porty
+            a cesty k programům pro FM a HF a modem řídicích rámců. Prázdné
+            pole s programem neznamená chybějící instalaci: znamená „řídit se
+            detekcí“ a šedý text v poli je cesta, kterou Guardian skutečně
+            používá. Soubor vyberte jen tehdy, chcete-li detekci přebít —
+            například u druhé instalace VARA nebo přenosné kopie. Přenos
+            zajišťuje Guardian VARA P2P; výběr zůstává, aby šlo příští
+            transport doplnit bez přestavby stránky.</p>
             <p><b>Chování sítě</b> nastavuje TTL, hledání tras, předávání,
             doručování z fronty, automatické QSY a majáky. Relay či majáky
             zapněte jen tehdy, když rozumíte jejich dopadu do vysílání.</p>
@@ -190,8 +296,8 @@ def help_topics() -> list[HelpTopic]:
             "settings callsign hamlib vox vara ttl language nastavení značka jazyk",
         ),
         _topic(
-            "4. Hamlib, radio and PTT",
-            "4. Hamlib, rádio a PTT",
+            "5. Hamlib, radio and PTT",
+            "5. Hamlib, rádio a PTT",
             """
             <h2>Hamlib, radio and PTT</h2>
             <p>Guardian talks to a Hamlib <code>rigctld</code> TCP service,
@@ -226,20 +332,31 @@ def help_topics() -> list[HelpTopic]:
             "hamlib rigctld radio cat civ ptt rádio",
         ),
         _topic(
-            "5. VARA FM/HF and payload modes",
-            "5. VARA FM/HF a způsoby přenosu",
+            "6. VARA FM/HF and payload modes",
+            "6. VARA FM/HF a způsoby přenosu",
             """
             <h2>VARA and payload modes</h2>
             <p>Guardian connects to VARA's local command and data TCP ports.
             FM and HF settings are remembered separately. Connect VARA verifies
             only the local TCP endpoint; the remote link is created later by
             the ARDOS session.</p>
-            <p><b>VARA P2P</b> is self-contained: after HAVE_MSG, ACK_HAVE and
-            START_VARA, Guardian asks VARA to connect to the next hop and sends
-            the compressed message bundle. <b>Manual Winlink</b> releases the
-            shared resources and asks the operator to complete and confirm the
-            Winlink transfer. Do not confirm before the external transfer has
-            actually finished.</p>
+            <p><b>VARA P2P</b> is self-contained — no Winlink, no internet.
+            After HAVE_MSG, ACK_HAVE and START_VARA, Guardian asks VARA to
+            connect to the next hop and writes one framed envelope. Guardian
+            owns the link for the whole transfer and closes it gracefully, so
+            VARA flushes whatever it still holds before the radio goes quiet.</p>
+            <p>Guardian deliberately does not toggle LISTEN around a
+            connection: VARA's own reference warns that LISTEN ON or OFF
+            arriving mid-connection disconnects it. The data socket is
+            persistent, so before each transfer Guardian discards anything left
+            in it by an earlier session — otherwise a stale envelope would be
+            delivered one message behind.</p>
+            <p>Timing is generous on purpose. An unregistered VARA FM link is
+            capped at 566 bps and its ARQ spends about half the channel on the
+            peer's acknowledgements, so a padded envelope costs tens of seconds
+            of wall clock. Guardian budgets from the envelope size and the
+            reported bitrate rather than a fixed timeout, and a link that is
+            still keying is treated as working, not stuck.</p>
             <p>The control modem is independent from VARA: AFSK 1200 is used
             for FM and MFSK-16 for HF when automatic selection is enabled.</p>
             """,
@@ -248,19 +365,31 @@ def help_topics() -> list[HelpTopic]:
             <p>Guardian se připojuje k místním příkazovým a datovým TCP portům
             VARA. Nastavení FM a HF se pamatují odděleně. Připojení VARA ověří
             pouze místní TCP bod; vzdálené spojení vznikne až během relace ARDOS.</p>
-            <p><b>VARA P2P</b> je samostatný postup: po HAVE_MSG, ACK_HAVE a
-            START_VARA Guardian požádá VARA o spojení s dalším bodem a odešle
-            komprimovaný balíček zprávy. <b>Ruční Winlink</b> uvolní sdílené
-            prostředky a vyzve operátora k dokončení a potvrzení přenosu ve
-            Winlinku. Nepotvrzujte jej před skutečným dokončením externího přenosu.</p>
+            <p><b>VARA P2P</b> je samostatný postup — bez Winlinku a bez
+            internetu. Po rámcích HAVE_MSG, ACK_HAVE a START_VARA požádá
+            Guardian VARA o spojení s dalším bodem a zapíše jednu rámcovanou
+            obálku. Spojení drží po celý přenos a ukončí je korektně, aby VARA
+            odvysílala i to, co ještě má, než rádio ztichne.</p>
+            <p>Guardian záměrně nepřepíná LISTEN kolem spojení: referenční
+            popis VARA varuje, že LISTEN ON nebo OFF doručený uprostřed spojení
+            způsobí rozpad. Datový socket je trvalý, takže před každým přenosem
+            Guardian zahodí, co v něm zbylo po dřívější relaci — jinak by se
+            stará obálka doručila o zprávu pozadu.</p>
+            <p>Časové limity jsou záměrně velkorysé. Neregistrované spojení
+            VARA FM je stropováno na 566 bps a jeho ARQ spotřebuje zhruba
+            polovinu kanálu na potvrzení protistanice, takže doplněná obálka
+            stojí desítky sekund reálného času. Guardian počítá rozpočet z
+            velikosti obálky a hlášené rychlosti, nikoli z pevného limitu, a
+            spojení, které stále klíčuje, považuje za funkční, nikoli za
+            zaseknuté.</p>
             <p>Řídicí modem je nezávislý na VARA: při automatické volbě se pro
             FM používá AFSK 1200 a pro HF MFSK-16.</p>
             """,
             "vara fm hf p2p winlink payload afsk mfsk přenos",
         ),
         _topic(
-            "6. Mail and standardized templates",
-            "6. Pošta a normované šablony",
+            "7. Mail and standardized templates",
+            "7. Pošta a normované šablony",
             """
             <h2>Mail and standardized templates</h2>
             <p>Compose creates a local message bundle containing UTF-8 text,
@@ -302,8 +431,8 @@ def help_topics() -> list[HelpTopic]:
             "mail compose template ics 213 214 iaru sitrep attachment pošta šablona",
         ),
         _topic(
-            "7. Routes, heard stations and sessions",
-            "7. Trasy, slyšené stanice a relace",
+            "8. Routes, heard stations and sessions",
+            "8. Trasy, slyšené stanice a relace",
             """
             <h2>Routes and network state</h2>
             <p>A manual route maps a final destination to a preferred next hop,
@@ -480,8 +609,148 @@ def help_topics() -> list[HelpTopic]:
             "trasa slyšené relace hledání trasy živá topologie",
         ),
         _topic(
-            "8. Station map and own position",
-            "8. Mapa stanic a vlastní poloha",
+            "9. Net alerts and notifications",
+            "9. Výstrahy do sítě a upozornění",
+            """
+            <h2>Net alerts</h2>
+            <p>An alert is broadcast to everyone on the current frequency and
+            flooded hop to hop, so it must fit in a single control burst. What
+            travels is a <b>one-byte code</b> plus an optional short note of at
+            most 25 characters. The code carries the meaning: each station
+            expands it into a full sentence in its own language, so two
+            operators who never agreed on wording still understand each other.
+            A note that is too long is truncated rather than refused — a
+            slightly abbreviated alert still beats one that was never sent.</p>
+            <p>The seed codes cover three priorities. <b>Emergency:</b> MAYDAY,
+            medical emergency, evacuation. <b>Priority:</b> QSY, power outage,
+            running on battery. <b>Routine:</b> QRT, QRV, net test. Codes are
+            permanent once used on the air — new ones are added, never
+            renumbered — so an older station always reads a known code
+            correctly.</p>
+            <p>Sending an alert asks for confirmation and states the airtime it
+            costs, roughly 1.2 s on AFSK and 1.7 s on MFSK per burst. If the
+            dialog's channel sweep is confirmed, the radio then visits every
+            frequency in the route table, repeats the same alert there, and
+            returns to the frequency and mode it started on. Only channels
+            compatible with the active FM or HF control modem are visited.</p>
+            <h2>How an incoming alert is announced</h2>
+            <p>A received alert raises the banner above the workspace and stays
+            there until dismissed; dismissal is tracked by arrival time, so a
+            newer alert behind a dismissed one is still shown. On the map the
+            origin locator gets a pulsing ring, with the sender and kind named
+            in a chip above the canvas.</p>
+            <p>Notification has two deliberate levels. Routine mail gets a tray
+            toast and a soft chime, skipped entirely when Guardian is already
+            the active window. An URGENT or EMERGENCY alert gets a window that
+            stays on top and a sound that repeats until someone acknowledges
+            it. Alerts older than 15 minutes no longer interrupt anyone; the
+            banner and the log keep the history.</p>
+            <p>The chime has one hard rule: it must never reach the
+            transmitter. Guardian's audio output is wired to the radio, and on
+            many stations that same USB codec is also the Windows default
+            device. Guardian therefore checks the default output and stays
+            silent when it cannot prove the sound stays in the shack. It also
+            stays silent while transmitting and while VARA holds the codec —
+            the operator is listening to the channel, not to the desktop.</p>
+            """,
+            """
+            <h2>Výstrahy do sítě</h2>
+            <p>Výstraha se vysílá všem na aktuálním kmitočtu a šíří se hop po
+            hopu, takže se musí vejít do jediného řídicího rámce. Vzduchem
+            putuje <b>jednobajtový kód</b> a volitelná krátká poznámka nejvýše
+            o 25 znacích. Význam nese kód: každá stanice si jej rozvine do celé
+            věty ve svém jazyce, takže si rozumí i dva operátoři, kteří se na
+            znění nikdy nedohodli. Příliš dlouhá poznámka se zkrátí, místo aby
+            byla odmítnuta — mírně zkrácená výstraha je pořád lepší než
+            neodeslaná.</p>
+            <p>Výchozí sada kódů pokrývá tři priority. <b>Nouzové:</b> MAYDAY,
+            zdravotní příhoda, evakuace. <b>Přednostní:</b> QSY, výpadek
+            napájení, provoz z baterie. <b>Běžné:</b> QRT, QRV, test sítě. Kód
+            je po prvním použití ve vzduchu trvalý — nové se přidávají, nikdy se
+            nepřečíslovávají — takže i starší stanice přečte známý kód
+            správně.</p>
+            <p>Odeslání výstrahy vyžaduje potvrzení a uvádí, kolik vysílacího
+            času stojí: zhruba 1,2 s na AFSK a 1,7 s na MFSK za jeden rámec.
+            Potvrdíte-li v dialogu přeladění, rádio pak postupně navštíví každý
+            kmitočet z tabulky tras, zopakuje tam stejnou výstrahu a vrátí se na
+            původní kmitočet i režim. Navštíví jen kanály kompatibilní s právě
+            aktivním řídicím modemem pro FM nebo HF.</p>
+            <h2>Jak se ohlásí příchozí výstraha</h2>
+            <p>Přijatá výstraha vyvolá pruh nad pracovní plochou a zůstane tam,
+            dokud jej nezavřete; zavření se pamatuje podle času příchodu, takže
+            novější výstraha za tou zavřenou se zobrazí také. V mapě dostane
+            místo původu pulzující kroužek a nad plátnem se objeví štítek se
+            značkou odesílatele a druhem výstrahy.</p>
+            <p>Upozorňování má záměrně dvě úrovně. Běžná zpráva dostane
+            oznámení v oznamovací oblasti a tichý zvuk, který se úplně vynechá,
+            pokud je Guardian právě aktivním oknem. Výstraha URGENT nebo
+            EMERGENCY otevře okno, které zůstává navrchu, a zvuk se opakuje,
+            dokud jej někdo nepotvrdí. Výstrahy starší než 15 minut už nikoho
+            nevyrušují; historii drží pruh a provozní log.</p>
+            <p>Pro zvuk platí jedno tvrdé pravidlo: nikdy nesmí odejít do
+            vysílače. Zvukový výstup Guardianu je zapojený do rádia a na mnoha
+            stanicích je tatáž karta USB zároveň výchozím zařízením Windows.
+            Guardian proto kontroluje výchozí výstup a mlčí, pokud nemůže
+            prokázat, že zvuk zůstane v šacku. Mlčí i během vysílání a po dobu,
+            kdy zvukovou kartu drží VARA — operátor v tu chvíli poslouchá kanál,
+            ne plochu.</p>
+            """,
+            "alert mayday evacuation qsy priority notification toast sound "
+            "výstraha nouze evakuace upozornění zvuk oznámení",
+        ),
+        _topic(
+            "10. VARA spectrum and waterfall",
+            "10. Spektrum a waterfall VARA",
+            """
+            <h2>Spectrum and waterfall</h2>
+            <p>The floating spectrum window (<b>View → VARA spectrum &amp;
+            waterfall</b>, Ctrl+Shift+W) shows the receive audio Guardian's own
+            input device is hearing. It opens automatically when the station is
+            configured for VARA P2P, and it is an independent top-level window
+            rather than a child of the shell, so either window can be focused
+            or moved to a second screen.</p>
+            <p>It is a listening aid, not a decoder. It never keys the radio,
+            never opens the transmit path, and does not need VARA to be
+            connected — it reads the same audio input the control modem uses.
+            Use it to confirm that receive audio actually arrives, that the
+            level is neither silent nor clipping, and that a VARA carrier is
+            landing where you expect it in the passband.</p>
+            <p>The spectrum trace is the current FFT of the input; the
+            waterfall below scrolls that trace over time, so a burst that has
+            already ended is still visible for a few seconds. That history is
+            what makes it useful for a link that transmits in short bursts: you
+            can see a peer's reply after the fact.</p>
+            <p>The window follows the application theme. Closing it stops the
+            analysis; it costs nothing while closed.</p>
+            """,
+            """
+            <h2>Spektrum a waterfall</h2>
+            <p>Plovoucí okno spektra (<b>Zobrazení → Spektrum a waterfall
+            VARA</b>, Ctrl+Shift+W) ukazuje přijímaný zvuk, který slyší vstupní
+            zařízení Guardianu. Otevře se samo, je-li stanice nastavena na VARA
+            P2P, a je samostatným oknem, nikoli potomkem hlavního okna, takže
+            lze zaostřit kterékoli z nich nebo je přesunout na druhou
+            obrazovku.</p>
+            <p>Jde o pomůcku pro poslech, nikoli o dekodér. Nikdy nezaklíčuje
+            rádio, neotevírá vysílací cestu a nepotřebuje připojenou VARA —
+            čte tentýž zvukový vstup jako řídicí modem. Použijte jej k ověření,
+            že přijímaný zvuk skutečně přichází, že úroveň není ani nulová, ani
+            přebuzená, a že nosná VARA dopadá v propustném pásmu tam, kam
+            čekáte.</p>
+            <p>Křivka spektra je aktuální FFT vstupu; waterfall pod ní tuto
+            křivku posouvá v čase, takže už skončený rámec je ještě několik
+            sekund vidět. Právě tato historie dělá okno užitečným pro spojení
+            vysílající v krátkých dávkách: odpověď protistanice si prohlédnete
+            i zpětně.</p>
+            <p>Okno se řídí motivem aplikace. Zavřením se analýza zastaví;
+            zavřené nestojí nic.</p>
+            """,
+            "spectrum waterfall fft audio level receive "
+            "spektrum waterfall zvuk úroveň příjem",
+        ),
+        _topic(
+            "11. Station map and own position",
+            "11. Mapa stanic a vlastní poloha",
             """
             <h2>Station map and own position</h2>
             <p>The station map remains useful offline: heard locators, relay
@@ -548,8 +817,8 @@ def help_topics() -> list[HelpTopic]:
             "map position locator detect windows accuracy mapa poloha lokátor přesnost",
         ),
         _topic(
-            "9. Dependencies and first-run readiness",
-            "9. Závislosti a připravenost",
+            "12. Dependencies and first-run readiness",
+            "12. Závislosti a připravenost",
             """
             <h2>Dependencies and readiness</h2>
             <p>Guardian includes Python and Python libraries in the installer.
@@ -584,8 +853,8 @@ def help_topics() -> list[HelpTopic]:
             "dependencies readiness hamlib vara python závislosti připravenost",
         ),
         _topic(
-            "10. Updates, diagnostics and privacy",
-            "10. Aktualizace, diagnostika a soukromí",
+            "13. Updates, diagnostics and privacy",
+            "13. Aktualizace, diagnostika a soukromí",
             """
             <h2>Updates and diagnostics</h2>
             <p>The update check reads a small HTTPS manifest from the trusted
@@ -612,8 +881,8 @@ def help_topics() -> list[HelpTopic]:
             "update sha diagnostics privacy aktualizace diagnostika soukromí",
         ),
         _topic(
-            "11. Troubleshooting",
-            "11. Řešení potíží",
+            "14. Troubleshooting",
+            "14. Řešení potíží",
             """
             <h2>Troubleshooting</h2>
             <h3>Radio does not connect</h3>
@@ -632,6 +901,24 @@ def help_topics() -> list[HelpTopic]:
             <p>This is expected while Control is off or no route/peer responds.
             Inspect Activity, Network routes and Heard stations. Do not repeatedly
             send on an occupied channel.</p>
+            <h3>The transmission meter stops moving</h3>
+            <p>Zero for the first few seconds is normal: VARA has the envelope
+            but has not reported a drained byte yet. A meter that never moves
+            at all usually means VARA is not keying — check that something owns
+            PTT for it (either VARA's own COM port or <i>Let Guardian key the
+            radio for VARA</i>, never both), and watch the PTT indicator. If
+            Activity reports “no BUFFER telemetry”, VARA is transmitting but
+            not reporting; Guardian then holds the link until the modem goes
+            quiet instead of aborting a transfer that is actually working.</p>
+            <h3>Checkboxes or panels look wrong after a theme change</h3>
+            <p>Theme and language apply immediately on Save or Apply. If a
+            dialog was already open when the theme changed, close and reopen
+            it.</p>
+            <h3>A route exists but nothing is sent</h3>
+            <p>A discovered route normally waits for approval — approve it on
+            the Route discovery page, or enable immediate use there. Routes
+            with an expiry are live observations, not stored routes: use
+            <i>Save as manual route</i> to keep one.</p>
             """,
             """
             <h2>Řešení potíží</h2>
@@ -650,8 +937,112 @@ def help_topics() -> list[HelpTopic]:
             <p>Je to očekávané při vypnutém Řízení nebo bez odpovědi trasy či
             protistanice. Zkontrolujte Aktivitu, trasy a Slyšené stanice.
             Neopakujte vysílání na obsazeném kanálu.</p>
+            <h3>Ukazatel přenosu se nehýbe</h3>
+            <p>Nula v prvních sekundách je normální: VARA obálku má, ale zatím
+            nenahlásila jediný odvysílaný bajt. Ukazatel, který se nepohne
+            vůbec, obvykle znamená, že VARA neklíčuje — ověřte, že PTT za ni
+            někdo obsluhuje (buď vlastní port COM ve VARA, nebo <i>Klíčovat
+            rádio pro VARA prostřednictvím Guardianu</i>, nikdy obojí), a
+            sledujte indikaci PTT. Hlásí-li Aktivita „no BUFFER telemetry“,
+            VARA vysílá, ale nehlásí to; Guardian pak drží spojení, dokud modem
+            neztichne, místo aby přerušil přenos, který ve skutečnosti
+            funguje.</p>
+            <h3>Po změně motivu vypadá dialog jinak</h3>
+            <p>Motiv i jazyk se použijí ihned po Uložit nebo Použít. Pokud byl
+            některý dialog v tu chvíli otevřený, zavřete jej a otevřete
+            znovu.</p>
+            <h3>Trasa existuje, ale nic se neodesílá</h3>
+            <p>Nalezená trasa běžně čeká na schválení — schvalte ji na stránce
+            Hledání trasy, nebo tam zapněte okamžité použití. Řádky s expirací
+            jsou živá pozorování, nikoli uložené trasy: chcete-li si některé
+            ponechat, použijte <i>Uložit jako ruční trasu</i>.</p>
             """,
-            "troubleshooting error radio vara audio queued potíže chyba zvuk",
+            "troubleshooting error radio vara audio queued progress "
+            "potíže chyba zvuk fronta ukazatel",
+        ),
+        _topic(
+            "15. Glossary",
+            "15. Slovníček pojmů",
+            """
+            <h2>Glossary</h2>
+            <p><b>ARDOS</b> — Guardian's own control layer: the short frames
+            that negotiate a transfer, carry alerts and announce presence. It
+            is separate from VARA, which only moves the payload.</p>
+            <p><b>Control channel</b> — the live AFSK 1200 or MFSK-16 audio
+            transport carrying ARDOS frames. Nothing is heard or transmitted
+            while it is stopped.</p>
+            <p><b>Payload / envelope</b> — the message bundle VARA carries, in
+            one framed block with a CRC. It is padded to a 256-byte floor so
+            every transfer is a usable air frame.</p>
+            <p><b>Next hop</b> — the station this one actually calls. It equals
+            the destination for a direct contact and is an intermediate station
+            otherwise.</p>
+            <p><b>TTL</b> — how many further hops a frame may take. It bounds
+            flooding; the cap is 8.</p>
+            <p><b>RREQ / RREP</b> — the route request and route reply of
+            multi-hop discovery. A learned route always expires.</p>
+            <p><b>LINK_ADVERT</b> — the experimental advert in which a station
+            publishes its direct neighbours, letting a quiet net draw its own
+            map.</p>
+            <p><b>Topology</b> — an imported or wizard-built graph of station
+            links, shared by the whole net; each PC derives its own routes from
+            it.</p>
+            <p><b>Calling vs working channel</b> — the channel a session is set
+            up on, versus the optional separate channel the VARA payload moves
+            on. Working channels require real CAT on both peers.</p>
+            <p><b>QSY</b> — a change of frequency. Automatic QSY retunes before
+            a VARA transfer and restores the previous frequency afterwards.</p>
+            <p><b>Maidenhead locator</b> — the grid square identifying a
+            position (for example JN99CS). Guardian accepts 2 to 10
+            characters.</p>
+            <p><b>BUFFER</b> — VARA's report of how many bytes are still queued
+            for RF. It is what drives the transmission meter.</p>
+            <p><b>rigctld</b> — the Hamlib TCP service Guardian talks to instead
+            of implementing vendor CAT protocols itself.</p>
+            <p><b>RECEIVED vs DELIVERED</b> — a relay confirms it forwarded the
+            message; only the final station confirms delivery.</p>
+            """,
+            """
+            <h2>Slovníček pojmů</h2>
+            <p><b>ARDOS</b> — vlastní řídicí vrstva Guardianu: krátké rámce,
+            které domlouvají přenos, nesou výstrahy a hlásí přítomnost. Je
+            oddělená od VARA, která přenáší jen samotný obsah.</p>
+            <p><b>Řídicí kanál</b> — živý zvukový přenos AFSK 1200 nebo MFSK-16
+            s rámci ARDOS. Dokud je zastavený, nelze nic slyšet ani vysílat.</p>
+            <p><b>Obálka (payload)</b> — balíček zprávy, který nese VARA, v
+            jednom rámcovaném bloku s CRC. Doplňuje se na minimum 256 bajtů,
+            aby byl každý přenos použitelným rádiovým rámcem.</p>
+            <p><b>Další bod (next hop)</b> — stanice, kterou tato skutečně
+            volá. Při přímém spojení je totožná s cílem, jinak jde o stanici
+            mezilehlou.</p>
+            <p><b>TTL</b> — kolik dalších hopů smí rámec ujít. Omezuje šíření;
+            strop je 8.</p>
+            <p><b>RREQ / RREP</b> — dotaz na trasu a odpověď při vícehopovém
+            hledání. Naučená trasa vždy expiruje.</p>
+            <p><b>LINK_ADVERT</b> — experimentální oznámení, kterým stanice
+            zveřejní své přímé sousedy, takže si tichá síť nakreslí vlastní
+            mapu.</p>
+            <p><b>Topologie</b> — importovaný nebo v průvodci sestavený graf
+            linek sdílený celou sítí; každý počítač si z něj odvodí vlastní
+            trasy.</p>
+            <p><b>Volací a pracovní kanál</b> — kanál, na kterém se relace
+            domluví, oproti volitelnému samostatnému kanálu, na kterém se
+            přenáší obsah VARA. Pracovní kanály vyžadují skutečné CAT na obou
+            stranách.</p>
+            <p><b>QSY</b> — změna kmitočtu. Automatické QSY přeladí před
+            přenosem VARA a po něm obnoví původní kmitočet.</p>
+            <p><b>Maidenhead lokátor</b> — čtverec označující polohu (například
+            JN99CS). Guardian přijímá 2 až 10 znaků.</p>
+            <p><b>BUFFER</b> — hlášení VARA o tom, kolik bajtů ještě čeká na
+            odvysílání. Právě z něj vychází ukazatel přenosu.</p>
+            <p><b>rigctld</b> — služba Hamlibu nad TCP, se kterou Guardian
+            komunikuje místo toho, aby sám implementoval protokoly CAT
+            výrobců.</p>
+            <p><b>RECEIVED a DELIVERED</b> — relay potvrzuje, že zprávu předal;
+            doručení potvrzuje až koncová stanice.</p>
+            """,
+            "glossary terms ardos ttl rreq link advert qsy locator buffer "
+            "slovníček pojmy zkratky",
         ),
     ]
 

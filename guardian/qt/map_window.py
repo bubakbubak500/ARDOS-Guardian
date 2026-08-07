@@ -1100,8 +1100,12 @@ class MapWindow(QDialog):
         self._prefetch_dialog: QProgressDialog | None = None
         self.setWindowTitle(tr("map.title"))
         self.setMinimumSize(760, 560)
+        # A dialog gets no maximise box by default, and the map is the one view
+        # an operator genuinely wants full-screen.
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
 
         outer = QVBoxLayout(self)
+        outer.setSpacing(6)
         intro = QLabel(tr("map.intro"))
         intro.setObjectName("Metadata")
         intro.setWordWrap(True)
@@ -1176,6 +1180,8 @@ class MapWindow(QDialog):
 
         position_group = QGroupBox(tr("map.position_group"))
         position_layout = QVBoxLayout(position_group)
+        position_layout.setContentsMargins(10, 6, 10, 6)
+        position_layout.setSpacing(6)
         controls = QHBoxLayout()
         self.detect_button = QPushButton(tr("map.detect"))
         self.detect_button.setToolTip(tr("map.detect_hint"))
@@ -1238,9 +1244,15 @@ class MapWindow(QDialog):
         position_layout.addWidget(self.location_settings, 0, Qt.AlignmentFlag.AlignLeft)
         outer.addWidget(position_group)
 
+        # Every map tool in one block. What used to be three separate strips --
+        # overlays, actions, and a stray background/centre row below the group
+        # -- cost three lines of the window for nine controls.
         tools_group = QGroupBox(tr("map.tools_group"))
         tools_layout = QVBoxLayout(tools_group)
+        tools_layout.setContentsMargins(10, 6, 10, 6)
+        tools_layout.setSpacing(6)
         overlay_controls = QHBoxLayout()
+        overlay_controls.setSpacing(8)
         overlay_controls.addWidget(QLabel(tr("map.locator_grid")))
         self.grid_combo = QComboBox()
         self.grid_combo.addItem(tr("map.overlay_off"), 0)
@@ -1258,10 +1270,16 @@ class MapWindow(QDialog):
         self.status_colours.setChecked(self.canvas.status_colours)
         self.status_colours.toggled.connect(self._status_colours_toggled)
         overlay_controls.addWidget(self.status_colours)
+        self.background = QCheckBox(tr("map.background"))
+        self.background.setChecked(self.runtime.config.map_background)
+        self.background.setToolTip(tr("map.background_hint"))
+        self.background.toggled.connect(self._background_toggled)
+        overlay_controls.addWidget(self.background)
         overlay_controls.addStretch(1)
         tools_layout.addLayout(overlay_controls)
 
         action_controls = QHBoxLayout()
+        action_controls.setSpacing(8)
         self.measure_button = QPushButton(tr("map.measure"))
         self.measure_button.setCheckable(True)
         self.measure_button.toggled.connect(self._measure_toggled)
@@ -1272,6 +1290,9 @@ class MapWindow(QDialog):
         self.export_button = QPushButton(tr("map.export_png"))
         self.export_button.clicked.connect(self._export_png)
         action_controls.addWidget(self.export_button)
+        home = QPushButton(tr("map.centre"))
+        home.clicked.connect(self._centre)
+        action_controls.addWidget(home)
         action_controls.addStretch(1)
         tools_layout.addLayout(action_controls)
         self.tool_status = QLabel()
@@ -1280,18 +1301,6 @@ class MapWindow(QDialog):
         self.tool_status.hide()
         tools_layout.addWidget(self.tool_status)
         outer.addWidget(tools_group)
-
-        map_controls = QHBoxLayout()
-        map_controls.addStretch(1)
-        self.background = QCheckBox(tr("map.background"))
-        self.background.setChecked(self.runtime.config.map_background)
-        self.background.setToolTip(tr("map.background_hint"))
-        self.background.toggled.connect(self._background_toggled)
-        map_controls.addWidget(self.background)
-        home = QPushButton(tr("map.centre"))
-        home.clicked.connect(self._centre)
-        map_controls.addWidget(home)
-        outer.addLayout(map_controls)
 
         self.status = QLabel()
         self.status.setObjectName("Metadata")
@@ -1303,11 +1312,16 @@ class MapWindow(QDialog):
             tr("common.close")
         )
         buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
 
+        # The tile attribution is a footnote, so it shares the button row
+        # rather than claiming a line under it.
+        footer = QHBoxLayout()
         self.attribution = QLabel()
         self.attribution.setObjectName("Metadata")
-        outer.addWidget(self.attribution)
+        self.attribution.setWordWrap(True)
+        footer.addWidget(self.attribution, 1)
+        footer.addWidget(buttons)
+        outer.addLayout(footer)
 
         self._framed = False
         self._background_toggled(self.background.isChecked())

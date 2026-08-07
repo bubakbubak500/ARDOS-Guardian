@@ -9,6 +9,8 @@ from PySide6.QtCore import QObject, QSettings, Qt, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
+from ..assets import check_path, dash_path, stylesheet_url
+
 
 class ThemePreference(StrEnum):
     DARK = "dark"
@@ -23,6 +25,11 @@ class ThemeTokens:
     surface_2: str
     surface_3: str
     panel_border: str
+    # Checkboxes and radio buttons are small marks on a large surface, so they
+    # need more contrast than a panel edge does. The Windows 11 style paints
+    # them near-black whatever the palette says, which disappears completely in
+    # the dark theme; Guardian draws them itself from this token instead.
+    control_border: str
     divider: str
     text_primary: str
     text_secondary: str
@@ -56,6 +63,7 @@ LIGHT_TOKENS = ThemeTokens(
     surface_2="#f5f7f9",
     surface_3="#e6ebef",
     panel_border="#b8c3cc",
+    control_border="#6d7f8c",
     divider="#cbd3da",
     text_primary="#17232e",
     text_secondary="#3f5363",
@@ -80,6 +88,7 @@ DARK_TOKENS = ThemeTokens(
     surface_2="#16212c",
     surface_3="#1c2a36",
     panel_border="#2b3b49",
+    control_border="#93a5b4",
     divider="#243441",
     text_primary="#edf3f7",
     text_secondary="#aebdca",
@@ -141,6 +150,10 @@ def _palette(tokens: ThemeTokens) -> QPalette:
 
 
 def stylesheet(tokens: ThemeTokens) -> str:
+    # Claiming ::indicator in the sheet stops the widget style drawing the tick,
+    # so the tick has to come from here as an image.
+    check = stylesheet_url(check_path(tokens.text_inverse))
+    dash = stylesheet_url(dash_path(tokens.text_inverse))
     return f"""
 * {{ font-size: {tokens.ui_font_px}px; }}
 QWidget {{ color: {tokens.text_primary}; background: {tokens.application_background}; }}
@@ -230,6 +243,33 @@ QPushButton#primaryAction:disabled {{
     color: {tokens.disabled};
     background: {tokens.surface_1};
     border-color: {tokens.panel_border};
+}}
+QCheckBox {{ spacing: {tokens.spacing_2}px; background: transparent; }}
+QCheckBox::indicator {{
+    width: 14px;
+    height: 14px;
+    background: {tokens.surface_1};
+    border: 1px solid {tokens.control_border};
+    border-radius: {tokens.radius_small}px;
+}}
+QCheckBox::indicator:hover {{ border-color: {tokens.accent}; }}
+QCheckBox::indicator:checked {{
+    background: {tokens.accent};
+    border-color: {tokens.accent};
+    image: {check};
+}}
+QCheckBox::indicator:indeterminate {{
+    background: {tokens.accent};
+    border-color: {tokens.accent};
+    image: {dash};
+}}
+QCheckBox::indicator:disabled {{
+    background: {tokens.surface_2};
+    border-color: {tokens.disabled};
+}}
+QCheckBox::indicator:checked:disabled {{
+    background: {tokens.disabled};
+    border-color: {tokens.disabled};
 }}
 QPlainTextEdit {{
     background: {tokens.surface_1};

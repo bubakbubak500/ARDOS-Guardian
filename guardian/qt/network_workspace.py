@@ -343,13 +343,16 @@ class NetworkWorkspace(QWidget):
         layout.addLayout(self._save_row())
         return page
 
-    def _save_row(self) -> QHBoxLayout:
+    def _save_button(self) -> QPushButton:
         """One save action per page, writing every discovery setting."""
-        row = QHBoxLayout()
         save = QPushButton(tr("network.discovery_save"))
         save.clicked.connect(self._save_discovery_settings)
+        return save
+
+    def _save_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
         row.addStretch()
-        row.addWidget(save)
+        row.addWidget(self._save_button())
         return row
 
     def _live_topology_page(self) -> QWidget:
@@ -407,8 +410,10 @@ class NetworkWorkspace(QWidget):
         live_actions.addWidget(self.link_advert_now)
         live_actions.addStretch()
         live_actions.addWidget(clear_live)
+        # Saving belongs beside the other actions of this page, not on a row of
+        # its own -- an extra line here costs a line of the links table.
+        live_actions.addWidget(self._save_button())
         live_layout.addLayout(live_actions)
-        live_layout.addLayout(self._save_row())
         return live_page
 
     @property
