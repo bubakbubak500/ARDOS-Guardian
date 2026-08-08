@@ -537,6 +537,10 @@ Architected for, not built:
 
 Everything below can be done today; nothing else in this feature is blocking it.
 
+**[docs/OFDM_AIR_TEST.md](OFDM_AIR_TEST.md) is the same procedure as a field sheet**,
+with the readings to record, what each one means, and what to keep afterwards.
+Take that one to the radio; this section is the reasoning behind it.
+
 **Before any RF.** On one PC, confirm the bench passes and produce a reference
 capture:
 
