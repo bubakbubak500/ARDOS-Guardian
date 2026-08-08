@@ -13,8 +13,6 @@ closing the dialog is never destructive -- which is why it is not modal.
 
 from __future__ import annotations
 
-import math
-import wave
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,17 +28,15 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QVBoxLayout,
-    QWidget,
 )
 
 from ..i18n import dual, tr
-from ..modem.recorder import SAMPLE_WIDTH, RecordingSummary
+from ..modem.recorder import RecordingSummary
 from ..ofdm import DecodedBurst, decode_burst
+from ..ofdm.bench import read_wav as _read_wav
 from ..ofdm.config import profile_or_default
 from ..services import TaskResult
-
-#: Full scale for signed 16-bit PCM, matching what `WavRecorder` writes out.
-WAV_SCALE = 32767
+from .measurements import measurement as _measurement, repolish as _repolish
 
 #: The worker-pool task name, so two clicks cannot start two decodes.
 ANALYSIS_TASK = "capture-analysis"
@@ -49,26 +45,21 @@ ANALYSIS_TASK = "capture-analysis"
 def read_wav(path: Path | str) -> tuple[np.ndarray, int]:
     """Read mono 16-bit PCM back to floats in -1..1; channel 0 of a stereo file.
 
-    The same few lines as `read_wav` in `tools/ofdm_bench.py`, written out rather
-    than imported: `tools/` is a directory of scripts, not an importable package,
-    and a UI that imports from it breaks the moment Guardian is frozen.
+    One line of delegation: `guardian.ofdm.bench` holds the single implementation
+    that the modem, the bench tool and this dialog all read files with, so the
+    scaling cannot drift between what the recorder writes and what any of them
+    reads. The wrapper exists only to say the one thing that reader can refuse in
+    the operator's own language.
     """
-    with wave.open(str(path), "rb") as handle:
-        channels = handle.getnchannels()
-        width = handle.getsampwidth()
-        rate = handle.getframerate()
-        raw = handle.readframes(handle.getnframes())
-    if width != SAMPLE_WIDTH:
+    try:
+        return _read_wav(path)
+    except ValueError as exc:
         raise ValueError(
             dual(
-                f"{Path(path).name} is {width * 8}-bit; Guardian reads 16-bit PCM.",
-                f"{Path(path).name} je {width * 8}bitový; Guardian čte 16bitové PCM.",
+                f"{Path(path).name} is not the 16-bit PCM Guardian reads: {exc}",
+                f"{Path(path).name} není 16bitové PCM, které Guardian čte: {exc}",
             )
-        )
-    data = np.frombuffer(raw, dtype="<i2").astype(np.float64) / WAV_SCALE
-    if channels > 1:
-        data = data[::channels]
-    return data, rate
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -108,24 +99,6 @@ def analyse_capture(path: Path | str, profile) -> CaptureAnalysis:
         profile_name=profile.name,
         decoded=decode_burst(profile, samples),
     )
-
-
-def _repolish(widget: QWidget) -> None:
-    # A property the stylesheet selects on only takes effect after a repolish.
-    widget.style().unpolish(widget)
-    widget.style().polish(widget)
-    widget.update()
-
-
-def _measurement(value, template: str) -> str:
-    """A measurement, or the word "unavailable" -- never a zero or a dash.
-
-    A dash reads as "nothing there" and a zero reads as a reading of zero. Both
-    are lies about a figure the receiver never got far enough to measure.
-    """
-    if value is None or (isinstance(value, float) and math.isnan(value)):
-        return tr("record.unavailable")
-    return template.format(value=value)
 
 
 class CaptureResultDialog(QDialog):

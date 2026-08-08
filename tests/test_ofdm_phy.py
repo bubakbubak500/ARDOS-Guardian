@@ -67,8 +67,12 @@ def test_the_preamble_uses_only_even_bins() -> None:
 
 
 def test_registry_lookup_and_unknown_names() -> None:
+    # There was one profile when this was written. There is now a ladder of six,
+    # so the assertion is that BENCH is still in it and still the object the name
+    # resolves to -- the rest of the ladder is pinned in tests/test_bench.py.
     assert profile("BENCH") is BENCH
-    assert profile_names() == ["BENCH"]
+    assert "BENCH" in profile_names()
+    assert profile_names() == sorted(profile_names())
     with pytest.raises(OfdmConfigError):
         profile("VHF_NARROW_50K")
 

@@ -17,6 +17,7 @@ from .modem import make_modem
 from .modem.audio import (DEFAULT_SAMPLE_RATE, AudioControlTransport,
                           resolve_device)
 from .modem.recorder import AudioCapture, WavRecorder, capture_path
+from .ofdm import profile_or_default
 from .payload import make_backend
 from .payload.negotiated import NegotiatedPayload
 from .protocol import (
@@ -656,8 +657,15 @@ class Operations:
             )
             return None
 
+        # The rate has to be the one the *payload* waveform uses, not the control
+        # modem's. A profile above 24 kHz of audio samples at 96 kHz, and a capture
+        # of it taken at 48 kHz would be aliased -- silently useless, since the
+        # bench would then reject it on the rate check and the session would have
+        # to be repeated. When the control channel is being tapped its own rate
+        # wins, because that stream is what is being copied.
+        waveform = profile_or_default(self.config.ofdm_profile)
         sample_rate = (self.audio_transport.fs if self.audio_transport is not None
-                       else DEFAULT_SAMPLE_RATE)
+                       else waveform.sample_rate)
         recorder = WavRecorder(
             capture_path(config_dir() / "captures"),
             sample_rate=sample_rate,

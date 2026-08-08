@@ -1,270 +1,228 @@
-# Guardian OFDM VHF — the first on-air test
+# Guardian OFDM VHF — the on-air tests
 
-A field sheet. Print it or keep it open beside the radio.
+Four tests, in order. Nothing here needs a console, a script, or PowerShell —
+everything is in the application.
 
-The modem has never transmitted. Everything measured so far was measured through
-a simulated channel, and the occupied bandwidth a real radio passes is unknown —
-that is the number this session exists to find.
+*Česká verze: [OFDM_AIR_TEST.cs.md](OFDM_AIR_TEST.cs.md)*
 
-Work through the steps in order. **Steps 1 and 2 need only one radio and a
-recorder, and they are the ones that produce the useful data.** Do not skip
-ahead to a live exchange: if step 4 fails you will not know whether the problem
-is the radio, the audio path or the software, and steps 1–2 tell you which.
+The modem has never transmitted. Every number measured so far came from a
+simulated channel, and the bandwidth a real radio passes is unknown. **Test 2 is
+the one that answers that**, and it is worth more than the other three together.
 
----
-
-## What you need
-
-- Two stations. (Strictly, one station and any recorder will do for step 1, but
-  G2 records for you now — see below.)
-- A VHF simplex channel you are licensed to use and that is quiet. Do not do
-  this on a repeater, a calling channel, or an APRS frequency.
-- G2 2.0.2 or later installed. **The recorder is built in**: no Audacity, no
-  phone against the speaker, and nothing to get wrong about the file format.
-
-## The built-in recorder
-
-Guardian records the audio it receives straight to a file the offline tools can
-read. It writes mono 16-bit PCM at the audio path's own rate, which is exactly
-what `tools\ofdm_bench.py --read-wav` expects, so there is no resampling or
-exporting step where a good capture can be turned into a misleading one.
-
-Captures land in:
-
-```
-%APPDATA%\Guardian-G2\captures\capture-YYYYmmdd-HHMMSS.wav
-```
-
-Start and stop it from the shell. While it runs you can see the elapsed time and
-the peak level, and **watch that level** — it is the difference between a session
-you can use and one you have to repeat. When you stop, Guardian tells you
-straight away whether the capture was silent, clipping, or usable, and can decode
-it there and then to show the sync confidence, SNR, EVM and frequency offset.
-
-It does not need the control channel to be running. A station brought up purely
-to record what the other end transmits is exactly step 1, and that is the case it
-is built for. It will refuse to record while a payload transfer owns the sound
-card, and say so.
-
-Before transmitting, identify. This is an experimental data waveform; a station
-hearing it will not recognise it, so send a voice or CW ID first and say what you
-are doing.
+Do them in order. If test 4 fails and you skipped 1–3, you will not know whether
+the fault is the radio, the audio path, or the software.
 
 ---
 
-## Step 0 — Prove the bench before touching RF (5 minutes, no radio)
+## Before you start
 
-On the PC that will transmit:
+- A VHF simplex channel you are licensed to use and that is quiet. Not a
+  repeater, not a calling channel, not APRS.
+- G2 2.0.3 installed on both stations.
+- **Identify by voice before each session.** This is an experimental data
+  waveform; anyone who hears it will not recognise it. Say what you are doing.
+- Keep transmissions short while you are finding the levels.
 
-```powershell
-cd C:\Users\ok7ps\Documents\Guardian
-python tools\ofdm_bench.py
-python tools\ofdm_bench.py --sweep --runs 20
-```
+Everything lives in two places:
 
-Both must end `result: PASS` and the sweep must end `wrong-byte deliveries: 0`.
-If they do not, stop — something is wrong with the installation, not the radio.
+| | |
+|---|---|
+| **Tools ▸ Modem test** | profiles, bench runs, the file to transmit, decoding any capture |
+| **Home ▸ Record received audio** (or Ctrl+R) | capturing what the radio heard |
 
-Then make a reference file so you have a known-good capture to compare against:
+Captures and generated files go to `%APPDATA%\Guardian-G2\captures\`.
 
-```powershell
-python tools\ofdm_bench.py --single --bytes 512 --write-wav reference.wav
-python tools\ofdm_bench.py --read-wav reference.wav
-```
+### The profile ladder
 
-**Save `reference.wav`.**
+Six rungs, each roughly double the last. Every rung has the same subcarrier
+spacing and the same guard interval, so moving up changes **only** the bandwidth
+— frequency-offset and multipath tolerance stay put.
+
+| Profile | Occupied | Baseband | Sampling | QPSK rate |
+|---|---|---|---|---|
+| `NARROW_1K2` | 1.2 kHz | 539–1758 Hz | 48 kHz | 917 b/s |
+| `BENCH` | 2.4 kHz | 539–2977 Hz | 48 kHz | 1 833 b/s |
+| `WIDE_5K` | 4.9 kHz | 539–5414 Hz | 48 kHz | 3 708 b/s |
+| `WIDE_10K` | 9.8 kHz | 539–10289 Hz | 48 kHz | 7 417 b/s |
+| `WIDE_20K` | 18.8 kHz | 539–19289 Hz | 48 kHz | 14 250 b/s |
+| `WIDE_40K` | 40.0 kHz | 1102–41133 Hz | **96 kHz** | 30 500 b/s |
+
+None is a proven air profile. They exist to be tried.
+
+`WIDE_40K` needs a sound card that will open at 96 kHz — if yours will not, the
+ladder stops at `WIDE_20K`.
+
+**Widening is not free.** The same transmit level spread over twice the carriers
+is 3 dB less per carrier. `BENCH` → `WIDE_20K` costs about 9 dB and buys about
+eight times the throughput. So the widest profile that decodes is not necessarily
+the one to run — the widest that decodes *with margin* is.
 
 ---
 
-## Step 1 — One transmission, recorded, decoded offline
+# Test 1 — Prove the software, no radio (5 minutes)
 
-This is the measurement that matters most, and it involves no Guardian receiver
-at all — which is exactly why it is first. Nothing about it can be confused by a
-software problem at the far end.
+Establishes that anything you see later is the radio, not the installation.
 
-**Station A (transmit):**
+**Tools ▸ Modem test.** Profile `BENCH`, MCS1.
 
-1. Settings ▸ Payload & data modem → *Guardian OFDM VHF (Experimental)*.
-   Leave the profile as BENCH and the MCS as MCS1 QPSK.
-2. Settings ▸ Audio → set the TX device to the interface feeding the radio.
-3. Set the radio to the test channel. Set deviation/mic gain to whatever you
-   normally use for a data mode; note the setting down.
-4. Identify by voice.
-5. Transmit one burst. The simplest way is the bench tool with the audio routed
-   to the radio, or send a short message to a station that will not answer.
+1. **Run one burst.** Must say PASS, and the measured SNR must land within about
+   a dB of the applied SNR.
+2. **Run a transfer.** Must say PASS with 0 retries.
+3. **Run a sweep.** Must end with **wrong-byte deliveries: 0**. If that number is
+   ever anything but zero, stop and tell me — it is the most serious result this
+   modem can produce.
 
-**Station B (receive):**
+Then **save a transmit test file** and **decode it straight back**. That proves
+the file-based path you are about to use over the air.
 
-6. Start recording in Guardian *before* A transmits, and stop after. Read the
-   verdict it gives you: if it says silent or clipping, fix that and repeat
-   before doing anything else.
-7. Decode it — either with the Analyse button on the dialog Guardian shows, or
-   from the command line, which prints more:
+If any of this fails, the problem is not your radio.
 
-```powershell
-python tools\ofdm_bench.py --read-wav %APPDATA%\Guardian-G2\captures\capture-....wav
-```
+---
 
-**Write down, for every capture:** sync confidence, measured SNR, EVM, CFO
-estimate, and whether the result was PASS.
+# Test 2 — What bandwidth does your radio actually pass?
 
-Guardian's own captures are always at the right rate. If you record with
-something else and the rate is wrong the tool will say so and stop — record again
-rather than resampling, because a wrong rate looks exactly like a broken modem.
+**This is the important one.** One radio transmitting, one recording. No Guardian
+receiver is involved, so nothing about the result can be confused by a software
+problem at the far end.
 
-### What the numbers mean
+What decides the answer is not the radio's channel spacing — it is the audio
+bandwidth its receive path passes, and that differs between two taps on the same
+radio.
 
-| Reading | Good | If it is wrong |
+### Do this
+
+**Station A:**
+1. Tools ▸ Modem test → profile `BENCH`, MCS1 → **Save transmit file** with 3
+   repeats. Three bursts from one transmission is three independent
+   measurements.
+2. Play that WAV through the radio, on the test channel, at your normal data
+   deviation. Note the level setting.
+
+**Station B:**
+3. Ctrl+R to start recording *before* A transmits. Stop after.
+4. Read the verdict. **If it says silent or clipping, fix it and repeat before
+   doing anything else** — everything downstream is worthless otherwise.
+5. Press **Analyse**.
+
+### Then climb the ladder
+
+Repeat with `WIDE_5K`, `WIDE_10K`, `WIDE_20K` (and `WIDE_40K` if your card does
+96 kHz). Note where it stops decoding. Then go back one rung and repeat that one
+at three deviation settings — normal, clearly lower, clearly higher.
+
+### Write down, per capture
+
+Profile · deviation · sync confidence · measured SNR · EVM · CFO · channel
+response spread · PASS/FAIL.
+
+| Reading | Healthy | If it is not |
 |---|---|---|
-| `no burst detected` | — | The burst is not in the file, is too quiet, or the rate is wrong. Check the recording level first. |
-| sync confidence | > 0.7 | Below that, the burst is close to the noise. Try more transmit level or a stronger signal path. |
-| measured SNR | > 10 dB | Below 7 dB, MCS1 will start failing. Try MCS0. |
-| EVM | < 40 % | High EVM with a good SNR means distortion, not noise — usually clipping. |
-| CFO estimate | near 0 on FM | A large offset on FM is unexpected and worth reporting. On SSB it is the dial difference and is normal. |
-| RX audio crest | 10–13 dB | Much lower means the path is clipping the peaks. Reduce transmit or receive level. |
-| channel response spread | < 10 dB | A large spread is the radio's audio filter, and it is the finding this session is for. |
+| no burst detected | — | Not in the file, too quiet, or wrong rate. Check the level first. |
+| sync confidence | > 0.7 | Burst is close to the noise. More level, or a narrower profile. |
+| measured SNR | > 10 dB | Under 7 dB MCS1 starts failing. Try MCS0 or step down a rung. |
+| EVM | < 40 % | High EVM with good SNR is distortion, not noise — usually clipping. |
+| CFO | near 0 on FM | A large offset on FM is unexpected; tell me. On SSB it is the dial difference and normal. |
+| channel spread | < 10 dB | **This is the finding.** A large spread is the radio's audio filter — the edge of what it passes. |
 
-**Save every capture WAV.** They are the raw material for everything that
-follows; the printed numbers are a summary of them, not a substitute.
-
----
-
-## Step 2 — Find the real bandwidth (the point of the exercise)
-
-Repeat step 1 while changing one thing at a time. Guardian names each capture by
-timestamp, so keep a note as you go — timestamp, then what you changed. Renaming
-the files afterwards works too; what must not happen is ending up with a folder
-of captures and no record of the conditions.
-
-Vary, in this order:
-
-1. **Transmit level / deviation.** Three settings: what you normally use, clearly
-   lower, clearly higher. Watch the receive crest factor and EVM. Somewhere there
-   is a level above which the path clips; find it.
-2. **MCS.** MCS0 (most robust), MCS1, MCS2. Note which still decode.
-3. **Where the audio is taken from**, if you have a choice — discriminator versus
-   speaker output, for instance. These have very different frequency responses.
-
-The reading to collect above all others is the **channel response spread**, and
-better still the per-carrier response itself. It says which parts of the
-2.4 kHz band the radio actually passes flat. That is what a real air profile is
-derived from, and it cannot be guessed from a datasheet.
+The channel response spread is what a real air profile gets derived from. Send me
+the captures and I will do that with you; the carrier set should come from the
+measurement, not from taste.
 
 ---
 
-## Step 3 — Derive an air profile (at the desk, not at the radio)
+# Test 3 — A live half-duplex exchange
 
-From the step 2 captures, decide which subcarriers the radio passes cleanly, then
-add a new entry beside `BENCH` in `guardian/ofdm/config.py` — do not edit BENCH,
-and do not edit anything else. Every test will still pass, because nothing
-outside that file depends on BENCH's numbers.
+Only now put both stations on the full path, with the profile test 2 showed is
+comfortable.
 
-Send me the captures and I will do this with you; the choice of `first_carrier`
-and `num_carriers` should come from the measured response, not from taste.
+Both stations: Settings ▸ Payload & data modem → *Guardian OFDM VHF
+(Experimental)*, same profile, same MCS. Send a short message — a few hundred
+bytes, not an attachment.
 
----
+This tests the audio pipe against reality. Expect to adjust these, all in the
+same settings page:
 
-## Step 4 — A live half-duplex exchange
-
-Only now put both stations on the full path. Both must be set to
-*Guardian OFDM VHF*, or the handshake will fall back to VARA and you will be
-testing VARA (which is correct behaviour, and worth confirming once
-deliberately).
-
-Send a short message — a few hundred bytes, not an attachment.
-
-What is actually being tested here is the audio pipe against reality, and these
-are the four settings that will need adjusting. All are in Settings ▸ Payload &
-data modem:
-
-| Symptom | Setting | Direction |
+| Symptom | Change | Direction |
 |---|---|---|
-| Peer never answers; nothing decodes at all | *Keying lead before transmit* | Increase. The transmitter is not up before the preamble starts. |
-| Bursts decode but the last block of a message fails | *Keying tail after transmit* | Increase. The tail of the burst is being cut off. |
-| Answers arrive but arrive late; retries climb | *Retransmissions per block* | Leave it; the timeout is the real problem — tell me and I will widen it. |
-| Blocks fail consistently at a good SNR | *OFDM modulation (MCS)* | Drop to MCS0. |
+| Nothing decodes at all; peer never answers | Keying lead before transmit | Up — the transmitter is not up before the preamble starts |
+| Bursts decode but the last block of a message fails | Keying tail after transmit | Up — the tail is being cut off |
+| Blocks fail consistently at a good SNR | OFDM modulation (MCS) | Down to MCS0 |
+| Answers arrive but too late, retries climb | — | Tell me; the timeout needs widening, not a setting |
 
-Then try a message with a small attachment, so segmentation and reassembly get
+Then send a message with a small attachment, so segmentation and reassembly get
 exercised over more than a couple of blocks.
 
-**Save the Guardian log for the whole session.** The `payload` and `control`
-source lines are the ones that matter, and they carry the per-block SNR, EVM,
-retry counts and the reason for every failure.
+**Save the log for the whole session** — the `payload` and `control` lines carry
+the per-block SNR, EVM, retry counts and the reason for every failure.
 
 ---
 
-## Step 5 — A deliberate fallback check
+# Test 4 — End to end, and the fallback
 
-Set one station back to *Guardian VARA P2P* and leave the other on OFDM, then
-send a message. It must complete over VARA, and the log should say so. This
-proves the safety property that lets the two coexist: a station is never played a
-waveform it is not listening for.
+Two parts, both quick, both proving something specific.
+
+**4a — a real message, end to end.** Compose a message with an attachment in Mail
+and send it to the other station over OFDM. Watch it arrive, be acknowledged, and
+show as delivered. This is the whole stack: ARDOS control handshake, transport
+negotiation, OFDM payload, receipt. Note the measured throughput and compare it
+with the profile's PHY rate — the difference is the preamble, header,
+acknowledgements and PTT turnaround, and it is real.
+
+**4b — the safety property.** Set **one** station back to *Guardian VARA P2P*,
+leave the other on OFDM, and send a message. It must complete **over VARA**, and
+the log should say so. This proves a station is never played a waveform it is not
+listening for: both peers have to claim OFDM independently or the pair falls back
+before anything is transmitted.
+
+If 4b does *not* fall back, stop — that is a protocol bug and I need to know
+immediately.
 
 ---
 
 # What to send me
 
-The more of this the better, but the first two items are worth more than
-everything else combined.
+## 1. The captures — worth more than everything else combined
 
-## 1. The WAV captures — the most valuable thing by far
+Everything in `%APPDATA%\Guardian-G2\captures\`, plus a note of what each
+timestamp was (profile, deviation, which test).
 
-Everything in `%APPDATA%\Guardian-G2\captures\` from steps 1 and 2, plus the
-reference file from step 0. Guardian names them by timestamp, so send a note
-saying what each timestamp was — level, MCS, where the audio came from.
+Why they matter more than any log: a capture lets me run the **entire receiver**
+over exactly what your radio produced, as many times as I like, with changes. A
+log tells me the outcome; a capture lets me fix it. The squelch, the burst
+timing, the air profile, the equaliser — all of it can be developed against a
+capture without you going back on the air.
 
-Why they matter more than any log: a capture lets me run the *entire receiver*
-over exactly what your radio produced, as many times as I like, with changes.
-A log tells me the outcome; a WAV lets me fix it. Almost every improvement worth
-making — the squelch, the timing, the profile, the equaliser — can be developed
-against a capture without you touching the radio again.
-
-Do not trim, normalise, denoise, or convert them to MP3. The silence before and
-after the burst is data: the noise floor is what the squelch is measured against,
-and lossy compression destroys the phase relationships the modem depends on.
-Guardian deliberately does none of those things on the way out, so a file it
-wrote is already in the state I want it in — just send it as it is.
+**Do not trim, normalise, denoise, or convert to MP3.** The silence around a
+burst is data — it is the noise floor the squelch is measured against — and lossy
+compression destroys the phase relationships the modem depends on. Guardian
+deliberately does none of those things, so a file it wrote is already right.
 
 ## 2. The Guardian log
 
-Copy the Log workspace out, or send the file from
-`%APPDATA%\Guardian-G2\`. Include the whole session, failures included —
-especially the failures.
+From the Log workspace or `%APPDATA%\Guardian-G2\`. The whole session, failures
+included — especially the failures.
 
 ## 3. The station facts
 
-- Radio model, at each end.
-- Audio interface (AIOC, digirig, sound card, cable into the mic socket…).
-- How the radio is keyed: CAT/Hamlib, VOX, or a serial line.
-- Frequency and mode (FM, NFM, packet-FM…), and the channel bandwidth if the
-  radio has a setting for it.
-- Deviation / mic gain / receive level settings, and what you changed them to.
-- Roughly how far apart the stations were, and whether it was line of sight.
+Radio model at each end · audio interface (AIOC, digirig, sound card, cable into
+the mic socket) · how it keys (CAT/Hamlib, VOX, serial line) · frequency and mode
+· channel bandwidth setting if the radio has one · deviation / mic gain / receive
+level and what you changed them to · rough distance and whether line of sight.
 
-## 4. The numbers you wrote down
+## 4. Your table from test 2
 
-The table from step 1 for each capture. If you only have the numbers and not the
-WAVs, send the numbers — but the WAVs are what let me act.
+The per-capture readings. If you only have numbers and no WAVs, send the numbers
+— but the WAVs are what let me act.
 
 ## 5. What surprised you
 
-Anything that behaved unlike the documentation, took longer than it should have,
-or made you uncertain what the software was doing. That last category is the most
-useful and the least often reported.
+Anything that behaved unlike this document, took longer than it should, or left
+you unsure what the software was doing. That last category is the most useful and
+the least often reported.
 
 ---
 
-## How to send it
+## Sending it
 
-WAV files are large. Zip the captures together; if the archive is too big for
-whatever channel you are using, send step 1's captures first — one clean capture
-at a known level is worth more than ten unlabelled ones.
-
----
-
-## One thing to be careful about
-
-This waveform occupies about 2.4 kHz continuously for up to five seconds per
-burst, and a station that hears it will not know what it is. Keep the channel
-choice conservative, identify before each session, and keep the transmissions
-short while you are finding the levels.
+Zip the captures. If the archive is too big, send test 2's first — one clean
+capture at a known level beats ten unlabelled ones.

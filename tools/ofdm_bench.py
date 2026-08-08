@@ -1,387 +1,275 @@
-"""Bench the Guardian OFDM VHF modem on the PC, with no radio involved.
+"""Print the OFDM bench measurements on a console.
 
-    python tools/ofdm_bench.py                    # a whole message, with ARQ
-    python tools/ofdm_bench.py --single           # one burst, in detail
-    python tools/ofdm_bench.py --sweep            # decode rate against SNR
-    python tools/ofdm_bench.py --single --write-wav b.wav   # capture as audio
-    python tools/ofdm_bench.py --read-wav b.wav   # decode audio back to bytes
+Everything here is also in the application, under **Tools -> Modem test**, and
+that is the way to reach it: no Python, no PowerShell, no shell at all. This
+script exists for a developer who wants the numbers in a terminal or in a diff,
+and it is a thin front end -- every measurement comes from
+`guardian.ofdm.bench`, so the figures printed here and the figures on screen are
+produced by the same code and cannot drift apart.
 
-The WAV modes are what make this useful once there are radios: record the audio a
-receiver actually hears, hand the file to `--read-wav`, and the measurements below
-describe the real channel instead of a simulated one.
-
-Every burst here goes through the deterministic channel simulator -- delay, gain,
-frequency offset, an echo and a clock error -- not a perfect array-to-array
-handover. `--snr 999` is the way to ask for the ideal case.
+    python tools/ofdm_bench.py                      # a whole message, with ARQ
+    python tools/ofdm_bench.py --single             # one burst, in detail
+    python tools/ofdm_bench.py --sweep              # decode rate against SNR
+    python tools/ofdm_bench.py --profiles           # the profile ladder
+    python tools/ofdm_bench.py --transmit tx.wav    # a clean file to put on air
+    python tools/ofdm_bench.py --read-wav rx.wav    # decode a capture
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 import sys
-import threading
-import wave
 from pathlib import Path
-
-import numpy as np
 
 # Runnable straight from a checkout, without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from guardian.ofdm import (BENCH, OfdmLink, PhyHeader, build_burst,  # noqa: E402
-                           burst_duration, decode_burst, mcs, profile,
-                           profile_names, simulated_pair, split_blocks)
-from guardian.ofdm.channel import Channel, ChannelSpec, realistic  # noqa: E402
-from guardian.ofdm.config import OfdmProfile  # noqa: E402
-from guardian.ofdm.constellation import bits_per_symbol  # noqa: E402
-from guardian.ofdm.framing import OfdmFrameType, header_symbols  # noqa: E402
+from guardian.ofdm import bench  # noqa: E402
+from guardian.ofdm.config import (DEFAULT_PROFILE_NAME, MCS_TABLE,  # noqa: E402
+                                  PROFILE_LADDER, mcs, profile)
 
-WAV_SCALE = 32767
+RULE = "=" * 70
+THIN = "-" * 70
 
 
-def _q(x: float) -> float:
-    """Gaussian tail probability, from the stdlib error function."""
-    return 0.5 * math.erfc(x / math.sqrt(2.0))
+def _value(value, unit: str = "", digits: int = 1) -> str:
+    """Render a measurement, or say it is unavailable rather than printing a 0."""
+    if value is None:
+        return "unavailable"
+    return f"{value:.{digits}f}{unit}"
 
 
-def uncoded_ber(modulation: str, snr_db: float) -> float:
-    """Textbook uncoded bit error rate for a square constellation.
-
-    Printed beside the measured figures as a sanity check on the whole chain's
-    normalisation: if the modem's own numbers do not sit near these, something is
-    scaled wrong long before any RF is involved. The coded result must of course
-    be far better than this.
-    """
-    bits = bits_per_symbol(modulation)
-    order = 1 << bits
-    es_over_n0 = 10.0 ** (snr_db / 10.0)
-    eb_over_n0 = es_over_n0 / bits
-    if bits <= 2:  # BPSK and QPSK are the same curve per bit
-        return _q(math.sqrt(2.0 * eb_over_n0))
-    root = math.sqrt(order)
-    return ((4.0 / bits) * (1.0 - 1.0 / root)
-            * _q(math.sqrt(3.0 * bits / (order - 1.0) * eb_over_n0)))
+def _percent(value, digits: int = 2) -> str:
+    return _value(None if value is None else value * 100.0, " %", digits)
 
 
-def write_wav(path: Path, samples: np.ndarray, sample_rate: int) -> None:
-    """Write mono 16-bit PCM with the stdlib `wave` module."""
-    clipped = np.clip(np.asarray(samples, dtype=np.float64), -1.0, 1.0)
-    with wave.open(str(path), "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(sample_rate)
-        handle.writeframes((clipped * WAV_SCALE).astype("<i2").tobytes())
+def show_facts(facts: bench.WaveformFacts) -> None:
+    print(f"profile:              {facts.profile}")
+    print(f"sample rate:          {facts.sample_rate} Hz")
+    print(f"FFT size:             {facts.fft_size}   CP {facts.cp_length} samples"
+          f" ({facts.cp_ms:.2f} ms)")
+    print(f"subcarrier spacing:   {facts.subcarrier_spacing:.3f} Hz")
+    print(f"active carriers:      {facts.carriers}"
+          f"  ({facts.data_carriers} data + {facts.pilots} pilot)")
+    print(f"occupied bandwidth:   {facts.occupied:.0f} Hz  ({facts.band} baseband)")
+    print("                      [profile-derived; sample rate is NOT bandwidth,"
+          " and no RF claim is made]")
+    print(f"symbol duration:      {facts.symbol_ms:.2f} ms")
+    print(f"MCS:                  {facts.mcs_label}")
+    print(f"bits per symbol:      {facts.coded_bits_per_symbol} coded /"
+          f" {facts.information_bits_per_symbol} information")
+    print(f"PHY rate:             {facts.phy_rate:.0f} bit/s"
+          "  [payload carriers only, before preamble/header/ACK overhead]")
+    print(f"block size:           {facts.block_size} bytes")
+    print(f"header:               {facts.header_symbols} symbols at {mcs(0).label}")
+    print(f"full block airtime:   {facts.full_block_seconds:.3f} s")
 
 
-def read_wav(path: Path) -> tuple[np.ndarray, int]:
-    """Read mono 16-bit PCM back to floats in -1..1. Takes channel 0 of a stereo file."""
-    with wave.open(str(path), "rb") as handle:
-        channels = handle.getnchannels()
-        width = handle.getsampwidth()
-        rate = handle.getframerate()
-        raw = handle.readframes(handle.getnframes())
-    if width != 2:
-        raise SystemExit(f"{path}: need 16-bit PCM, got {width * 8}-bit")
-    data = np.frombuffer(raw, dtype="<i2").astype(np.float64) / WAV_SCALE
-    if channels > 1:
-        data = data[::channels]
-    return data, rate
+def show_profiles() -> int:
+    print("Guardian OFDM VHF profile ladder")
+    print(RULE)
+    print("None of these is a proven air profile. They exist to be tried on a real")
+    print("radio, in this order, until one stops working -- what decides the answer")
+    print("is the audio bandwidth the receive path passes, not the channel spacing.")
+    print()
+    header = (f"{'profile':12} {'occupied':>10} {'band':>18} {'sampling':>9}"
+              f" {'carriers':>9} {'QPSK rate':>11} {'block':>8}")
+    print(header)
+    for name in PROFILE_LADDER:
+        facts = bench.describe(profile(name), 1)
+        print(f"{name:12} {facts.occupied / 1000:8.2f} kHz {facts.band:>18}"
+              f" {facts.sample_rate / 1000:7.0f} k {facts.data_carriers:9d}"
+              f" {facts.phy_rate:9.0f} b/s {facts.full_block_seconds:7.2f} s")
+    print()
+    print("Every rung shares one subcarrier spacing (46.875 Hz) and one guard")
+    print("(2.67 ms), so frequency-offset and multipath tolerance do not change as")
+    print("you move up -- only the bandwidth does.")
+    print()
+    print("Widening is not free: the same transmit level over twice the carriers is")
+    print("3 dB less per carrier. BENCH to WIDE_20K is about 9 dB for about eight")
+    print("times the throughput.")
+    return 0
 
 
-def describe_profile(prof: OfdmProfile, index: int) -> list[str]:
-    """The waveform parameters, spelled out."""
-    scheme = mcs(index)
-    low, high = prof.occupied_band
-    coded = prof.coded_bits_per_symbol(scheme.bits_per_symbol)
-    rate = scheme.code_rate
-    net = coded * rate.numerator / rate.denominator / prof.symbol_duration
-    return [
-        f"profile:              {prof.name}   [simulation/bench profile,"
-        " not a VHF air profile]",
-        f"sample rate:          {prof.sample_rate} Hz",
-        f"FFT size:             {prof.fft_size}   CP {prof.cp_length} samples"
-        f" ({prof.cp_duration * 1000:.2f} ms)",
-        f"subcarrier spacing:   {prof.subcarrier_spacing:.3f} Hz",
-        f"active carriers:      {prof.num_carriers}"
-        f"  ({prof.num_data_carriers} data + {prof.num_pilots} pilot)",
-        f"occupied bandwidth:   {prof.occupied_bandwidth:.0f} Hz"
-        f"  ({low:.0f}-{high:.0f} Hz baseband)",
-        "                      [profile-derived; sample rate is NOT bandwidth,"
-        " and no RF claim is made]",
-        f"symbol duration:      {prof.symbol_duration * 1000:.2f} ms",
-        f"MCS:                  {scheme.label}",
-        f"bits per symbol:      {coded} coded / "
-        f"{coded * rate.numerator // rate.denominator} information",
-        f"PHY rate:             {net:.0f} bit/s"
-        "  [payload carriers only, before preamble/header/ACK overhead]",
-        f"block size:           {prof.block_size} bytes",
-        f"header:               {header_symbols(prof)} symbols at"
-        f" {mcs(0).label}",
-    ]
-
-
-def run_single(prof: OfdmProfile, index: int, payload_bytes: int,
-               snr_db: float, seed: int, wav_out: Path | None) -> int:
-    """One block through the channel, reported in full. Returns an exit code."""
-    rng = np.random.default_rng(seed)
-    payload = rng.integers(0, 256, payload_bytes, dtype=np.uint8).tobytes()
-    blocks = split_blocks(payload, prof.block_size)
-    if len(blocks) > 1:
-        print(f"note: {payload_bytes} bytes is {len(blocks)} blocks; benching the"
-              f" first {len(blocks[0])} of them. Use --arq for the whole message.")
-    block = blocks[0]
-
-    header = PhyHeader(OfdmFrameType.DATA, msg_id=0x0FD, block_seq=0,
-                       block_count=len(blocks), mcs=index, payload_len=len(block))
-    clean = build_burst(prof, header, block)
-    channel = realistic(prof, snr_db=snr_db, seed=seed)
-    aired = channel(clean)
-    decoded = decode_burst(prof, aired)
-    metrics = decoded.metrics
-    identical = decoded.payload == block
-
+def show_burst(result: bench.BurstResult) -> int:
+    metrics = result.metrics
     print("Guardian OFDM VHF bench")
-    print("=" * 66)
-    for line in describe_profile(prof, index):
-        print(line)
-    print("-" * 66)
-    print(f"channel:              {channel.spec.describe()}")
-    print(f"                      [SNR is in-band; the wideband SNR of this audio"
-          f" is {10 * math.log10(prof.bandwidth_fraction):+.1f} dB]")
-    print(f"TX payload:           {len(block)} bytes")
-    print(f"waveform:             {len(clean)} samples"
-          f"  ({burst_duration(prof, header):.3f} s at {prof.sample_rate} Hz)")
-    print(f"crest factor:         {20 * math.log10(np.max(np.abs(clean)) / np.sqrt(np.mean(clean ** 2))):.1f} dB"
-          f"  (TX RMS {np.sqrt(np.mean(clean ** 2)):.3f} of full scale)")
-    print("-" * 66)
-    print(f"simulated SNR:        {snr_db:.1f} dB in-band")
-    print(f"measured SNR:         "
-          f"{'unavailable' if metrics.snr_db is None else f'{metrics.snr_db:.1f} dB'}")
-    print(f"EVM:                  "
-          f"{'unavailable' if metrics.evm_rms is None else f'{metrics.evm_rms * 100:.2f} %'}"
+    print(RULE)
+    show_facts(result.facts)
+    print(THIN)
+    print(f"channel:              {result.channel}")
+    print("                      [SNR is in-band; the wideband SNR of this audio"
+          f" is {result.wideband_offset_db:+.1f} dB]")
+    print(f"TX payload:           {result.payload_bytes} bytes")
+    print(f"waveform:             {result.samples} samples"
+          f"  ({result.seconds:.3f} s)")
+    print(f"crest factor:         {result.tx_crest_db:.1f} dB"
+          f"  (TX RMS {result.tx_rms:.3f} of full scale)")
+    print(THIN)
+    print(f"simulated SNR:        {result.applied_snr_db:.1f} dB in-band")
+    print(f"measured SNR:         {_value(metrics.snr_db, ' dB')}")
+    print(f"EVM:                  {_percent(metrics.evm_rms)}"
           f"  ({metrics.evm_source})")
-    print(f"sync confidence:      {metrics.sync_confidence:.3f}"
-          if metrics.sync_confidence is not None else "sync confidence:      unavailable")
-    print(f"CFO estimate:         {metrics.cfo_hz:+.2f} Hz"
-          if metrics.cfo_hz is not None else "CFO estimate:         unavailable")
-    if metrics.phase_slope is not None:
-        print(f"pilot phase slope:    {metrics.phase_slope:+.5f} rad/carrier"
-              "  (timing or clock offset)")
-    if metrics.audio_rms is not None:
-        print(f"RX audio RMS:         {metrics.audio_rms:.4f} of full scale"
-              f"  (crest {metrics.crest_factor_db:.1f} dB)")
-    if metrics.channel_response is not None:
-        power = np.abs(metrics.channel_response) ** 2
-        print(f"channel response:     {10 * np.log10(power.max() / power.min()):.1f} dB"
-              " spread across the band")
-    print(f"uncoded BER (theory): {uncoded_ber(mcs(index).modulation, snr_db):.2e}"
+    print(f"sync confidence:      {_value(metrics.sync_confidence, '', 3)}")
+    print(f"CFO estimate:         {_value(metrics.cfo_hz, ' Hz', 2)}")
+    print(f"pilot phase slope:    {_value(metrics.phase_slope, ' rad/carrier', 5)}")
+    print(f"RX audio RMS:         {_value(metrics.audio_rms, '', 4)} of full scale"
+          f"  (crest {_value(metrics.crest_factor_db, ' dB')})")
+    print(f"channel response:     {_value(result.channel_spread_db, ' dB')}"
+          " spread across the band")
+    print(f"uncoded BER (theory): {result.uncoded_ber:.2e}"
           "  [the code must beat this by orders of magnitude]")
-    print("retries:              0  [single burst; use --arq to exercise ARQ]")
-    print(f"result:               {'PASS' if identical else 'FAIL'}"
+    print("retries:              0  [single burst; omit --single to exercise ARQ]")
+    print(f"result:               {'PASS' if result.passed else 'FAIL'}"
           f"{'' if metrics.error is None else '  -- ' + metrics.error}")
-    print(f"RX payload identical: {'YES' if identical else 'NO'}")
-
-    if wav_out is not None:
-        write_wav(wav_out, aired, prof.sample_rate)
-        print(f"\nwrote {wav_out}  ({len(aired) / prof.sample_rate:.2f} s,"
-              f" {prof.sample_rate} Hz mono 16-bit)")
-    return 0 if identical else 1
+    print(f"RX payload identical: {'YES' if result.identical else 'NO'}")
+    if result.wav_path is not None:
+        print(f"\nwrote {result.wav_path}")
+    return 0 if result.passed else 1
 
 
-def run_arq(prof: OfdmProfile, index: int, payload_bytes: int, snr_db: float,
-            seed: int) -> int:
-    """A whole message across a simulated duplex link, with acknowledgements."""
-    rng = np.random.default_rng(seed)
-    payload = rng.integers(0, 256, payload_bytes, dtype=np.uint8).tobytes()
-    spec = ChannelSpec(snr_db=snr_db, gain=0.7, delay=911, freq_offset_hz=2.0,
-                       multipath=((0, 1.0), (int(prof.sample_rate / 1000), 0.3)),
-                       trailing=prof.symbol_samples)
-    near, far = simulated_pair(prof, spec, seed=seed)
-    sender = OfdmLink(prof, near, mcs_index=index, ptt_turnaround=0.25,
-                      timeout_margin=0.5, on_log=lambda m: print(f"  tx | {m}"))
-    receiver = OfdmLink(prof, far, mcs_index=index, ptt_turnaround=0.25,
-                        timeout_margin=0.5, on_log=lambda m: print(f"  rx | {m}"))
-
+def show_transfer(result: bench.TransferResult) -> int:
     print("Guardian OFDM VHF bench -- ARQ over a simulated duplex link")
-    print("=" * 66)
-    for line in describe_profile(prof, index):
-        print(line)
-    print(f"channel:              {spec.describe()}")
-    print("-" * 66)
-
-    received: dict[str, bytes | None] = {}
-    listener = threading.Thread(
-        target=lambda: received.__setitem__("data", receiver.receive_message(msg_id=0x0FD)),
-        daemon=True,
-    )
-    listener.start()
-    ok = sender.send_message(0x0FD, payload)
-    listener.join(timeout=600)
-    identical = received.get("data") == payload
-
-    print("-" * 66)
-    print(f"TX payload:           {len(payload)} bytes"
-          f" in {len(split_blocks(payload, prof.block_size))} blocks")
-    print(f"simulated SNR:        {snr_db:.1f} dB in-band")
-    snr = receiver.adaptation.mean_snr_db
-    print(f"measured SNR:         "
-          f"{'unavailable' if snr is None else f'{snr:.1f} dB'}  (mean over bursts)")
-    evm = receiver.adaptation.evm_history
-    print(f"EVM:                  "
-          f"{'unavailable' if not evm else f'{float(np.mean(evm)) * 100:.2f} %'}")
-    last = receiver.last_metrics
-    if last is not None:
-        print(f"sync confidence:      {last.sync_confidence:.3f}"
-              if last.sync_confidence is not None
-              else "sync confidence:      unavailable")
-        print(f"CFO estimate:         {last.cfo_hz:+.2f} Hz"
-              if last.cfo_hz is not None else "CFO estimate:         unavailable")
-        if last.phase_slope is not None:
-            print(f"pilot phase slope:    {last.phase_slope:+.5f} rad/carrier")
-        if last.audio_rms is not None:
-            print(f"RX audio RMS:         {last.audio_rms:.4f} of full scale"
-                  f"  (crest {last.crest_factor_db:.1f} dB)")
-    worst = receiver.adaptation.worst_carriers
-    if worst is not None and receiver.adaptation.carrier_power is not None:
-        power = receiver.adaptation.carrier_power
-        print(f"channel response:     "
-              f"{10 * np.log10(power.max() / power.min()):.1f} dB spread;"
-              f" weakest carriers {[int(index) for index in worst[:3]]}")
-    print(f"uncoded BER (theory): {uncoded_ber(mcs(index).modulation, snr_db):.2e}")
-    print(f"retries:              {sender.status.retries}")
-    print(f"blocks:               {sender.adaptation.summary()}")
-    per = sender.adaptation.packet_error_rate
-    print(f"packet error rate:    "
-          f"{'unavailable' if per is None else f'{per * 100:.1f} %'}")
-    print(f"channel occupancy:    {sender.channel_seconds:.1f} s of airtime"
+    print(RULE)
+    show_facts(result.facts)
+    print(f"channel:              {result.channel}")
+    print(THIN)
+    for line in result.log:
+        print(f"  {line}")
+    print(THIN)
+    print(f"TX payload:           {result.payload_bytes} bytes"
+          f" in {result.blocks} blocks")
+    print(f"simulated SNR:        {result.applied_snr_db:.1f} dB in-band")
+    print(f"measured SNR:         {_value(result.measured_snr_db, ' dB')}"
+          "  (mean over bursts)")
+    print(f"EVM:                  {_percent(result.measured_evm)}")
+    print(f"retries:              {result.retries}")
+    print(f"blocks acked:         {result.blocks_acked}/{result.blocks}")
+    print(f"packet error rate:    {_percent(result.packet_error_rate, 1)}")
+    print(f"channel occupancy:    {result.channel_seconds:.1f} s of airtime"
           " (both directions, plus PTT turnaround)")
-    print(f"measured throughput:  "
-          f"{'unavailable' if sender.status.est_bitrate_bps is None else f'{sender.status.est_bitrate_bps:.0f} bit/s'}"
+    print(f"measured throughput:  {_value(result.throughput_bps, ' bit/s', 0)}"
           "  [end to end, ACKs and retries included]")
-    print(f"result:               {'PASS' if ok and identical else 'FAIL'}")
-    print(f"RX payload identical: {'YES' if identical else 'NO'}")
-    return 0 if (ok and identical) else 1
+    print(f"result:               {'PASS' if result.passed else 'FAIL'}")
+    print(f"RX payload identical: {'YES' if result.identical else 'NO'}")
+    return 0 if result.passed else 1
 
 
-def run_sweep(prof: OfdmProfile, index: int, runs: int, seed: int) -> int:
-    """Decode rate and measured SNR against applied SNR, one block per run."""
-    rng = np.random.default_rng(seed)
-    payload = rng.integers(0, 256, prof.block_size, dtype=np.uint8).tobytes()
-    header = PhyHeader(OfdmFrameType.DATA, 0x0FD, 0, 1, index, len(payload))
-    clean = build_burst(prof, header, payload)
-
+def show_sweep(result: bench.SweepResult) -> int:
     print("Guardian OFDM VHF bench -- SNR sweep")
-    print("=" * 66)
-    for line in describe_profile(prof, index):
-        print(line)
-    print("-" * 66)
-    print(f"{runs} seeded runs per point, one {len(payload)}-byte block each.")
-    print(f"{'in-band SNR':>12} {'decoded':>9} {'measured':>10} {'EVM':>8}"
+    print(RULE)
+    show_facts(result.facts)
+    print(THIN)
+    print(f"{result.runs} seeded runs per point, one"
+          f" {result.facts.block_size}-byte block each.")
+    print(f"{'in-band SNR':>12} {'decoded':>9} {'measured':>12} {'EVM':>9}"
           f" {'wrong bytes':>12} {'uncoded BER':>12}")
-    worst = 0
-    for snr_db in (24, 20, 16, 14, 12, 10, 8, 6, 5, 4, 2):
-        good = 0
-        wrong = 0
-        measured: list[float] = []
-        evms: list[float] = []
-        for run in range(runs):
-            spec = ChannelSpec(snr_db=float(snr_db), delay=577,
-                               trailing=prof.symbol_samples)
-            decoded = decode_burst(prof, Channel(prof, spec, seed=seed + run)(clean))
-            if decoded.metrics.snr_db is not None:
-                measured.append(decoded.metrics.snr_db)
-            if decoded.metrics.evm_rms is not None:
-                evms.append(decoded.metrics.evm_rms)
-            if decoded.payload == payload:
-                good += 1
-            elif decoded.payload is not None:
-                # The one outcome that must never happen at any SNR: bytes
-                # delivered that are not the bytes sent.
-                wrong += 1
-        worst = max(worst, wrong)
-        print(f"{snr_db:>9} dB {good:>4}/{runs:<4}"
-              f" {(f'{np.mean(measured):.1f} dB' if measured else '   --   '):>10}"
-              f" {(f'{np.mean(evms) * 100:.1f} %' if evms else '  --  '):>8}"
-              f" {wrong:>12} {uncoded_ber(mcs(index).modulation, snr_db):>12.1e}")
-    print("-" * 66)
-    print(f"wrong-byte deliveries: {worst}"
-          f"  ({'PASS -- the CRC never let a bad block through' if not worst else 'FAIL'})")
-    return 0 if not worst else 1
+    for point in result.points:
+        print(f"{point.applied_snr_db:>9.0f} dB {point.decoded:>4}/{point.runs:<4}"
+              f" {_value(point.measured_snr_db, ' dB'):>12}"
+              f" {_percent(point.measured_evm, 0):>9}"
+              f" {point.wrong_bytes:>12} {point.uncoded_ber:>12.1e}")
+    print(THIN)
+    print(f"reliable down to:     {_value(result.lowest_reliable_snr_db, ' dB', 0)}")
+    print(f"nothing decodes at:   {_value(result.cliff_snr_db, ' dB', 0)}")
+    wrong = result.wrong_byte_deliveries
+    verdict = ("PASS -- the CRC never let a bad block through" if not wrong
+               else "FAIL -- bytes were delivered that were not sent")
+    print(f"wrong-byte deliveries: {wrong}  ({verdict})")
+    return 0 if not wrong else 1
 
 
-def run_read_wav(prof: OfdmProfile, path: Path) -> int:
-    """Decode a captured WAV file, whatever produced it."""
-    samples, rate = read_wav(path)
+def show_capture(result: bench.CaptureResult) -> int:
     print("Guardian OFDM VHF bench -- decoding a WAV capture")
-    print("=" * 66)
-    print(f"file:                 {path}")
-    print(f"samples:              {len(samples)}"
-          f"  ({len(samples) / rate:.2f} s at {rate} Hz)")
-    if rate != prof.sample_rate:
-        print(f"result:               FAIL -- file is {rate} Hz, profile"
-              f" {prof.name} expects {prof.sample_rate} Hz")
+    print(RULE)
+    print(f"file:                 {result.path}")
+    print(f"samples:              {result.samples}"
+          f"  ({result.seconds:.2f} s at {result.sample_rate} Hz)")
+    print(f"audio RMS:            {result.audio_rms:.4f} of full scale"
+          f"  (peak {result.audio_peak:.4f})")
+    print(THIN)
+    if result.header is None:
+        print(f"result:               FAIL -- {result.error}")
         return 1
-    print(f"audio RMS:            {np.sqrt(np.mean(samples ** 2)):.4f} of full scale")
-    decoded = decode_burst(prof, samples)
-    metrics = decoded.metrics
-    print("-" * 66)
-    if decoded.header is None:
-        print(f"result:               FAIL -- {metrics.error}")
-        return 1
-    print(f"header:               {decoded.header.summary()}")
-    print(f"measured SNR:         "
-          f"{'unavailable' if metrics.snr_db is None else f'{metrics.snr_db:.1f} dB'}")
-    print(f"EVM:                  "
-          f"{'unavailable' if metrics.evm_rms is None else f'{metrics.evm_rms * 100:.2f} %'}")
-    print(f"CFO estimate:         {metrics.cfo_hz:+.2f} Hz")
-    print(f"sync confidence:      {metrics.sync_confidence:.3f}")
-    print(f"payload:              "
-          f"{'--' if decoded.payload is None else f'{len(decoded.payload)} bytes'}")
-    print(f"result:               {'PASS' if decoded.ok else 'FAIL'}"
-          f"{'' if metrics.error is None else '  -- ' + metrics.error}")
-    return 0 if decoded.ok else 1
+    print(f"header:               {result.header.summary()}")
+    print(f"measured SNR:         {_value(result.metrics.snr_db, ' dB')}")
+    print(f"EVM:                  {_percent(result.metrics.evm_rms)}")
+    print(f"CFO estimate:         {_value(result.metrics.cfo_hz, ' Hz', 2)}")
+    print(f"sync confidence:      {_value(result.metrics.sync_confidence, '', 3)}")
+    payload = ("--" if result.payload_bytes is None
+               else f"{result.payload_bytes} bytes")
+    print(f"payload:              {payload}")
+    print(f"result:               {'PASS' if result.passed else 'FAIL'}"
+          f"{'' if not result.error else '  -- ' + result.error}")
+    return 0 if result.passed else 1
+
+
+def show_transmit(prof, mcs_index: int, path: Path, payload_bytes: int,
+                  repeats: int, seed: int) -> int:
+    _, written = bench.make_test_burst(prof, mcs_index, payload_bytes=payload_bytes,
+                                       seed=seed, repeats=repeats, wav_path=path)
+    facts = bench.describe(prof, mcs_index)
+    print(f"wrote {written}")
+    print(f"  {repeats} clean burst(s) of {min(payload_bytes, prof.block_size)}"
+          f" bytes at {facts.mcs_label}, {facts.occupied:.0f} Hz occupied,"
+          f" {facts.sample_rate} Hz mono")
+    print("  No channel is applied: play this through the radio, record the far"
+          " end, and decode the recording with --read-wav.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Bench the Guardian OFDM VHF modem without a radio.")
-    parser.add_argument("--profile", default=BENCH.name, choices=profile_names(),
+        description="Bench the Guardian OFDM VHF modem without a radio. The same "
+                    "measurements are in the application under Tools -> Modem test.")
+    parser.add_argument("--profile", default=DEFAULT_PROFILE_NAME,
+                        choices=list(PROFILE_LADDER),
                         help="waveform profile (default: %(default)s)")
     parser.add_argument("--mcs", type=int, default=1,
+                        choices=[entry.index for entry in MCS_TABLE],
                         help="MCS index for the data section (default: %(default)s)")
-    parser.add_argument("--bytes", type=int, default=4096,
-                        help="payload size (default: %(default)s)")
+    parser.add_argument("--bytes", type=int, default=4096, help="payload size")
     parser.add_argument("--snr", type=float, default=15.0,
-                        help="in-band SNR in dB; use a large value for an ideal"
+                        help="in-band SNR in dB; a large value asks for an ideal"
                              " channel (default: %(default)s)")
-    parser.add_argument("--seed", type=int, default=0xA5,
-                        help="channel seed (default: 0x%(default)X)")
+    parser.add_argument("--seed", type=int, default=0xA5, help="channel seed")
+    parser.add_argument("--runs", type=int, default=10, help="runs per sweep point")
     parser.add_argument("--single", action="store_true",
-                        help="bench one burst in detail instead of a whole"
-                             " message; this is the mode that reports the"
-                             " per-carrier receiver measurements")
+                        help="bench one burst in detail instead of a whole message")
     parser.add_argument("--sweep", action="store_true",
                         help="report decode rate against SNR")
-    parser.add_argument("--runs", type=int, default=10,
-                        help="runs per sweep point (default: %(default)s)")
+    parser.add_argument("--profiles", action="store_true",
+                        help="list the profile ladder and stop")
+    parser.add_argument("--transmit", type=Path, metavar="FILE",
+                        help="write a CLEAN burst (no channel applied) to play"
+                             " through a radio")
+    parser.add_argument("--repeats", type=int, default=3,
+                        help="bursts in a --transmit file (default: %(default)s)")
     parser.add_argument("--write-wav", type=Path, metavar="FILE",
-                        help="also write the channel output as a WAV file")
+                        help="also write the channel output of --single as a WAV")
     parser.add_argument("--read-wav", type=Path, metavar="FILE",
                         help="decode a WAV capture instead of simulating")
     args = parser.parse_args(argv)
 
-    prof = profile(args.profile)
-    mcs(args.mcs)  # reject an unknown index before doing any work
+    if args.profiles:
+        return show_profiles()
 
+    prof = profile(args.profile)
     if args.read_wav is not None:
-        return run_read_wav(prof, args.read_wav)
+        return show_capture(bench.decode_capture(prof, args.read_wav))
+    if args.transmit is not None:
+        return show_transmit(prof, args.mcs, args.transmit, args.bytes,
+                             args.repeats, args.seed)
     if args.sweep:
-        return run_sweep(prof, args.mcs, args.runs, args.seed)
+        return show_sweep(bench.run_sweep(prof, args.mcs, runs=args.runs,
+                                          seed=args.seed))
     if args.single or args.write_wav is not None:
-        return run_single(prof, args.mcs, args.bytes, args.snr, args.seed,
-                          args.write_wav)
-    return run_arq(prof, args.mcs, args.bytes, args.snr, args.seed)
+        return show_burst(bench.run_burst(prof, args.mcs, payload_bytes=args.bytes,
+                                          snr_db=args.snr, seed=args.seed,
+                                          wav_path=args.write_wav))
+    return show_transfer(bench.run_transfer(prof, args.mcs,
+                                            payload_bytes=args.bytes,
+                                            snr_db=args.snr, seed=args.seed))
 
 
 if __name__ == "__main__":

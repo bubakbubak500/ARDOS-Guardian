@@ -241,11 +241,41 @@ to four candidate positions in a buffer before giving up, so a false alarm sitti
 
 ---
 
-## 5. The BENCH profile
+## 5. The profile ladder
+
+Six profiles, each roughly double the last, selectable in Settings and in
+Tools -> Modem test:
+
+| Profile | Occupied | Baseband | Sampling | QPSK rate |
+|---|---|---|---|---|
+| `NARROW_1K2` | 1.2 kHz | 539-1758 Hz | 48 kHz | 917 b/s |
+| `BENCH` | 2.4 kHz | 539-2977 Hz | 48 kHz | 1 833 b/s |
+| `WIDE_5K` | 4.9 kHz | 539-5414 Hz | 48 kHz | 3 708 b/s |
+| `WIDE_10K` | 9.8 kHz | 539-10289 Hz | 48 kHz | 7 417 b/s |
+| `WIDE_20K` | 18.8 kHz | 539-19289 Hz | 48 kHz | 14 250 b/s |
+| `WIDE_40K` | 40.0 kHz | 1102-41133 Hz | 96 kHz | 30 500 b/s |
+
+Every rung shares **one subcarrier spacing (46.875 Hz) and one guard interval
+(2.67 ms)**, deliberately: frequency-offset tolerance is set by the spacing and
+multipath tolerance by the guard, so climbing the ladder changes the bandwidth and
+nothing else. Each rung is tested through the simulator at every MCS, so widening
+really is a profile entry rather than a code change.
+
+Widening costs SNR. The same transmit level over twice the carriers is 3 dB less
+per carrier; measured across this ladder, `BENCH` to `WIDE_20K` costs about 9 dB
+and buys about eight times the throughput. The widest profile that decodes is not
+necessarily the one to run -- the widest that decodes *with margin* is.
+
+None of them is a proven air profile. `WIDE_40K` additionally needs a sound card
+that will open at 96 kHz.
+
+### BENCH, the reference
 
 **This is a simulation and bench profile.** Its numbers were chosen to make tests
 deterministic and conservative, not from any measurement of what a VHF radio
-passes. Nothing outside `guardian/ofdm/config.py` depends on them.
+passes, and the whole test suite is written against them -- so it is the rung to
+compare everything with, and the one to leave alone. Nothing outside
+`guardian/ofdm/config.py` depends on these values.
 
 | Parameter | Value | Derived |
 |---|---|---|
@@ -476,10 +506,13 @@ readiness flow are unchanged for VARA stations.
 
 Architected for, not built:
 
-* **The final RF bandwidth.** It comes from hardware measurement. Until then
-  BENCH is a bench profile and says so everywhere.
-* **Radio-specific profiles** (Quansheng, IC-705) and a 50 kHz mode. New profile
-  entries when there are measurements to base them on.
+* **The final RF bandwidth.** There is now a ladder from 1.2 kHz to 40 kHz to try
+  (§5), but which rung a given radio can actually carry comes from measuring one.
+  Until then every rung says it is a candidate, and BENCH remains the default.
+* **Radio-specific profiles** (Quansheng, IC-705). New entries beside the ladder
+  when there are measurements to base them on. A 40 kHz rung exists, so the
+  "50 kHz mode" that used to be listed here is now a matter of choosing a carrier
+  set rather than of building anything.
 * **Automatic MCS selection.** The measurements an adaptation controller needs are
   all collected (§10); nothing decides anything yet. Inventing thresholds before
   there is on-air data to fit them to would only encode a guess.
@@ -535,63 +568,25 @@ Architected for, not built:
 
 ## 11. The first two-radio VHF test
 
-Everything below can be done today; nothing else in this feature is blocking it.
+**[docs/OFDM_AIR_TEST.md](OFDM_AIR_TEST.md) is the procedure**, with a Czech
+version beside it at [OFDM_AIR_TEST.cs.md](OFDM_AIR_TEST.cs.md) -- four numbered
+tests, each with a stated purpose, and no step in any of them needs a console.
+That document is the authority; this section only records why it is shaped the
+way it is.
 
-**[docs/OFDM_AIR_TEST.md](OFDM_AIR_TEST.md) is the same procedure as a field sheet**,
-with the readings to record, what each one means, and what to keep afterwards.
-Take that one to the radio; this section is the reasoning behind it.
+Test 1 proves the software with no radio, so that anything seen later is the
+radio rather than the installation. Test 2 is the one that matters: one radio
+transmitting a generated file, one recording, climbing the profile ladder. No
+Guardian receiver is involved in it at all, which is the point -- nothing about
+the result can be confused by a software problem at the far end, and the reading
+it produces (the per-carrier channel response) is what a real air profile has to
+be derived from. Test 3 puts the audio pipe against reality, which is where the
+keying lead, keying tail and turnaround get their real values. Test 4 sends a
+real message end to end and then deliberately mismatches the two stations, to
+prove the pair falls back to VARA before anything is transmitted.
 
-**Before any RF.** On one PC, confirm the bench passes and produce a reference
-capture:
-
-```powershell
-python tools\ofdm_bench.py                       # a whole message, with ARQ
-python tools\ofdm_bench.py --single              # one burst, in detail
-python tools\ofdm_bench.py --sweep --runs 20     # decode rate against SNR
-python tools\ofdm_bench.py --single --bytes 512 --write-wav reference.wav
-python tools\ofdm_bench.py --read-wav reference.wav
-```
-
-**Step 1 — one radio, one receiver, no ARQ.** Set both stations to
-`payload_backend = ofdm_vhf`, profile BENCH, MCS1. Transmit a burst from station A
-on a VHF simplex channel. Record the receive audio at station B *as a file* (any
-recorder — this step does not involve Guardian's receiver at all) and decode it
-offline:
-
-```powershell
-python tools\ofdm_bench.py --read-wav capture.wav
-```
-
-This is the measurement that matters most, and it is worth doing before anything
-else because it is the one that cannot be confused by a software problem. What to
-record: sync confidence, measured SNR, EVM, CFO estimate, and the per-carrier
-channel response. The channel response across the band is what will decide the
-real occupied bandwidth.
-
-**Step 2 — vary the waveform against the radio.** Repeat step 1 with different
-transmit levels (deviation), with MCS0 and MCS2, and with the audio taken from
-different points in the chain. Watch for: clipping (visible as a low crest factor
-on receive), a channel response that rolls off at one end (the radio's audio
-filter, which is the real bandwidth limit), and any frequency offset (should be
-near zero on FM, non-zero on SSB).
-
-**Step 3 — derive an air profile.** From the step 2 channel responses, choose
-`first_carrier` and `num_carriers` to cover only the band the radio actually
-passes flat, and add a new entry to `PROFILES` in `guardian/ofdm/config.py`. Do
-not change BENCH; add beside it. The tests will pass unchanged because nothing
-outside that file depends on BENCH's numbers.
-
-**Step 4 — a live half-duplex exchange.** Only now enable the full path on both
-stations and send a real message. What is being tested here is `RadioAudioPipe`
-against reality: whether the squelch triggers on a real FM signal, whether
-`ofdm_tx_lead_ms` is long enough for the transmitter to come up, whether
-`ofdm_tx_tail_ms` and the tail guard cover what the USB audio path buffers, and
-whether the ARQ timeouts survive a real PTT turnaround. Expect to tune the lead,
-tail and turnaround; they are settings for exactly this reason.
-
-**Step 5 — measure, then decide about adaptation.** With per-block SNR, EVM, PER
-and retransmission rate logged from a real link, the MCS thresholds stop being
-guesses. That is the next milestone.
+The order is not arbitrary: each test can only be diagnosed if the ones before
+it passed.
 
 ---
 
@@ -641,14 +636,26 @@ rejected by older releases, so they create a safe capability gap by construction
 
 ## 13. Running it
 
-```powershell
-# The whole physical layer, no radio and no Qt involved. About 45 seconds.
-python -m pytest tests\test_ofdm_constellation.py tests\test_ofdm_phy.py `
-                 tests\test_ofdm_sync.py tests\test_ofdm_channel.py `
-                 tests\test_ofdm_link.py tests\test_ofdm_payload.py -q
+**In the application: Tools -> Modem test.** Profile and MCS pickers with the
+resolved waveform shown beside them, then a single burst, a full ARQ transfer, or
+a decode-rate sweep against SNR -- plus writing a clean burst to a WAV to play
+through a radio, and decoding any WAV back. Everything slow runs off the UI
+thread and the sweep is cancellable. No console is involved in any of it.
 
-# Measurements
+The measurement engine is `guardian/ofdm/bench.py`, which returns data rather
+than printing it. `tools/ofdm_bench.py` is a thin front end over the same engine
+for a developer who wants the numbers in a terminal or in a diff -- one
+implementation, so the two cannot disagree:
+
+```powershell
+python tools\ofdm_bench.py --profiles      # the ladder
 python tools\ofdm_bench.py --help
+
+# The whole physical layer, no radio and no Qt involved. About a minute.
+python -m pytest tests	est_ofdm_constellation.py tests	est_ofdm_phy.py `
+                 tests	est_ofdm_sync.py tests	est_ofdm_channel.py `
+                 tests	est_ofdm_link.py tests	est_ofdm_payload.py `
+                 tests	est_bench.py -q
 ```
 
 `tools/ofdm_bench.py` reports the profile, sample rate, FFT size, occupied

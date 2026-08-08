@@ -385,7 +385,13 @@ Select it in *Settings → Payload* as **Guardian OFDM VHF (Experimental)**. VAR
 
 It is a real OFDM modem — BPSK through 64-QAM, forward error correction, interleaving, channel estimation, per-carrier equalisation, and stop-and-wait ARQ with retries and duplicate suppression. It reports what it measures: SNR, EVM, frequency offset, the channel response of every subcarrier.
 
-**It has not been on the air yet.** Everything measured so far was measured through a simulated channel on a PC, and the bandwidth a real VHF radio passes is still to be determined. `tools/ofdm_bench.py` runs the whole modem with no radio attached, and can write a burst to a WAV file or decode one back. [docs/ofdm-vhf.md](docs/ofdm-vhf.md) has the numbers and the limitations; [docs/OFDM_AIR_TEST.md](docs/OFDM_AIR_TEST.md) is the first on-air session as a field sheet.
+**It has not been on the air yet.** Everything measured so far was measured through a simulated channel on a PC, and the bandwidth a real VHF radio passes is still to be determined. [docs/ofdm-vhf.md](docs/ofdm-vhf.md) has the numbers and the limitations; [docs/OFDM_AIR_TEST.md](docs/OFDM_AIR_TEST.md) is the on-air procedure as four numbered tests ([česky](docs/OFDM_AIR_TEST.cs.md)).
+
+### Testing it without a radio
+
+**Tools ▸ Modem test** runs the whole modem with no radio attached: pick one of six waveform profiles from 1.2 kHz to 40 kHz occupied, see exactly what that means, then run a single burst, a full ARQ transfer, or a decode-rate sweep against SNR. It also writes a clean burst to a WAV file for playing through a radio, and decodes any WAV back to bytes.
+
+No console, no scripts. (`tools/ofdm_bench.py` prints the same measurements for a developer who wants them in a terminal — it is a thin front end over the same engine.)
 
 ### Recording what the radio heard
 

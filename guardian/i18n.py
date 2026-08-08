@@ -309,6 +309,216 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Právě se dekóduje jiný záznam; zkuste to za chvíli.",
     ),
     "record.unavailable": ("unavailable", "nedostupné"),
+    # Measuring the OFDM modem from inside the application. There is no console
+    # and no script: the same engine `tools/ofdm_bench.py` drives is reachable
+    # here, so the figure an operator reads is the figure a developer reads.
+    "menu.modem": ("Modem test", "Test modemu"),
+    "modem.title": ("Modem test", "Test modemu"),
+    "modem.intro": (
+        "Measure the OFDM modem without a radio, then with one. Pick a waveform "
+        "profile and a modulation; the panel below states exactly what that "
+        "pairing is. Every measurement runs in the background — the station "
+        "keeps working while it does.",
+        "Změřte modem OFDM nejprve bez rádia a potom s ním. Zvolte profil "
+        "vlnového průběhu a modulaci; panel níže přesně uvádí, co tato "
+        "kombinace znamená. Každé měření běží na pozadí — stanice mezitím dál "
+        "pracuje.",
+    ),
+    "modem.profile": ("Waveform profile", "Profil vlnového průběhu"),
+    "modem.mcs": ("Modulation (MCS)", "Modulace (MCS)"),
+    "modem.facts": ("What this waveform is", "Co tento vlnový průběh je"),
+    "modem.untried": (
+        "No profile in the ladder has been measured on a real radio. They exist "
+        "to be tried: what matters is the audio bandwidth the receive path "
+        "passes, and that differs between two taps on the same radio.",
+        "Žádný profil na této škále nebyl změřen na skutečném rádiu. Existují "
+        "proto, aby se vyzkoušely: rozhoduje šířka zvukového pásma, kterou "
+        "propustí přijímací cesta, a ta se liší i mezi dvěma vývody jednoho "
+        "rádia.",
+    ),
+    "modem.needs_fast_card": (
+        "This profile samples at {rate} Hz. It needs a sound card that will "
+        "open at that rate; a card that will not cannot use this rung at all. "
+        "Like the rest of the ladder, it has not been measured on the air.",
+        "Tento profil vzorkuje na {rate} Hz. Vyžaduje zvukovou kartu, která se "
+        "na tomto kmitočtu otevře; karta, která to neumí, tento stupeň vůbec "
+        "nepoužije. Stejně jako celá škála nebyl změřen na pásmu.",
+    ),
+    "modem.tab_burst": ("One burst", "Jedno vysílání"),
+    "modem.tab_transfer": ("Whole transfer", "Celý přenos"),
+    "modem.tab_sweep": ("Decode rate vs SNR", "Úspěšnost podle odstupu"),
+    "modem.tab_files": ("Files", "Soubory"),
+    "modem.snr": ("In-band SNR", "Odstup v pásmu"),
+    "modem.snr_hint": (
+        "Signal-to-noise ratio measured across the occupied carriers only. The "
+        "same audio has a lower wideband figure, which the report also states.",
+        "Odstup signálu od šumu měřený pouze v obsazených nosných. Tentýž zvuk "
+        "má nižší širokopásmovou hodnotu, kterou zpráva rovněž uvádí.",
+    ),
+    "modem.payload": ("Payload", "Data"),
+    "modem.seed": ("Seed", "Semínko"),
+    "modem.seed_hint": (
+        "The channel simulator is deterministic: the same seed gives the same "
+        "result, so two runs can be compared.",
+        "Simulátor kanálu je deterministický: stejné semínko dá stejný "
+        "výsledek, takže dvě měření lze srovnat.",
+    ),
+    "modem.idle": ("Nothing measured yet.", "Zatím nic změřeno."),
+    "modem.running": ("Measuring…", "Měřím…"),
+    "modem.busy": (
+        "A measurement is already running. Wait for it, or cancel it.",
+        "Jedno měření již běží. Vyčkejte na ně, nebo je přerušte.",
+    ),
+    "modem.task_failed": (
+        "The measurement failed: {error}",
+        "Měření selhalo: {error}",
+    ),
+    "modem.cancel": ("Cancel", "Přerušit"),
+    "modem.run_burst": ("Run one burst", "Změřit jedno vysílání"),
+    "modem.burst_hint": (
+        "One block through the channel simulator with everything switched on — "
+        "delay, gain, an echo, a dial error and a clock offset. Ask for a very "
+        "large SNR to see the ideal case.",
+        "Jeden blok přes simulátor kanálu se vším zapnutým — zpožděním, "
+        "zesílením, odrazem, odchylkou ladění a rozdílem hodin. Ideální případ "
+        "získáte zadáním velmi vysokého odstupu.",
+    ),
+    "modem.burst_ok": (
+        "The block came back byte for byte.",
+        "Blok se vrátil bajt po bajtu.",
+    ),
+    "modem.burst_bad": (
+        "The block did not come back intact. The frame line says how far the "
+        "receiver got.",
+        "Blok se nevrátil neporušený. Řádek s rámcem uvádí, kam se přijímač "
+        "dostal.",
+    ),
+    "modem.run_transfer": ("Run a transfer", "Změřit přenos"),
+    "modem.transfer_hint": (
+        "A whole message over a simulated duplex link, with acknowledgements "
+        "and retransmissions. Larger payloads take proportionally longer, and a "
+        "narrow profile takes longer again.",
+        "Celá zpráva přes simulovaný duplexní spoj, s potvrzováním a "
+        "opakováním. Větší objem dat trvá odpovídajícím dílem déle a úzký "
+        "profil ještě déle.",
+    ),
+    "modem.transfer_ok": (
+        "The message arrived complete and identical.",
+        "Zpráva dorazila celá a shodná.",
+    ),
+    "modem.transfer_bad": (
+        "The message did not arrive intact. The link log says where it stopped.",
+        "Zpráva nedorazila neporušená. Log spoje uvádí, kde se zastavila.",
+    ),
+    "modem.run_sweep": ("Run the sweep", "Spustit rozmítání"),
+    "modem.sweep_hint": (
+        "Decode rate against in-band SNR, one block per run. This locates the "
+        "cliff — the signal level at which this pairing gives up. It is the "
+        "slow measurement: the full ladder at ten runs is thousands of decodes "
+        "and takes minutes.",
+        "Úspěšnost dekódování podle odstupu v pásmu, jeden blok na opakování. "
+        "Najde hranu — úroveň signálu, na které tato kombinace končí. Je to "
+        "pomalé měření: celá škála po deseti opakováních jsou tisíce dekódování "
+        "a trvá minuty.",
+    ),
+    "modem.sweep_detail": ("SNR points", "Body odstupu"),
+    "modem.sweep_full": (
+        "Full ladder ({count} points)",
+        "Celá škála ({count} bodů)",
+    ),
+    "modem.sweep_coarse": (
+        "Coarse ({count} points)",
+        "Hrubá ({count} bodů)",
+    ),
+    "modem.sweep_runs": ("Runs per point", "Opakování na bod"),
+    "modem.sweep_running": (
+        "Measuring point {done} of {total}…",
+        "Měřím bod {done} z {total}…",
+    ),
+    "modem.sweep_cancelling": (
+        "Stopping after this point…",
+        "Zastavuji po tomto bodu…",
+    ),
+    "modem.sweep_cancelled": (
+        "Cancelled after {count} point(s). What was measured stands.",
+        "Přerušeno po {count} bodech. Co bylo změřeno, platí.",
+    ),
+    "modem.sweep_done": (
+        "Sweep complete: {count} point(s).",
+        "Rozmítání dokončeno: {count} bodů.",
+    ),
+    "modem.col_snr": ("SNR asked (dB)", "Zadaný odstup (dB)"),
+    "modem.col_decoded": ("Decoded", "Dekódováno"),
+    "modem.col_wrong": ("Wrong bytes", "Chybné bajty"),
+    "modem.col_measured": ("SNR measured (dB)", "Měřený odstup (dB)"),
+    "modem.col_evm": ("EVM (%)", "Chyba vektoru (%)"),
+    "modem.col_ber": ("Uncoded BER", "BER bez kódu"),
+    "modem.col_verdict": ("Verdict", "Hodnocení"),
+    "modem.reliable": ("every run", "každé opakování"),
+    "modem.unreliable": ("not every run", "ne každé opakování"),
+    "modem.wrong_bytes_none": (
+        "No block was ever delivered with the wrong bytes. That is the result "
+        "that matters most: below the cliff a block must be rejected, never "
+        "handed back corrupted.",
+        "Žádný blok nebyl nikdy vydán s chybnými bajty. To je nejdůležitější "
+        "výsledek: pod hranou musí být blok odmítnut, nikdy vydán poškozený.",
+    ),
+    "modem.wrong_bytes_alarm": (
+        "SERIOUS: {count} block(s) were delivered with the wrong bytes. A block "
+        "that fails must be rejected, never handed back corrupted. This is a "
+        "modem defect, not a channel result — report it before trusting any "
+        "other figure on this page.",
+        "ZÁVAŽNÉ: {count} bloků bylo vydáno s chybnými bajty. Blok, který "
+        "selže, musí být odmítnut, nikdy vydán poškozený. To je závada modemu, "
+        "nikoli vlastnost kanálu — nahlaste ji, než uvěříte jakémukoli jinému "
+        "číslu na této stránce.",
+    ),
+    "modem.repeats": ("Bursts in the file", "Vysílání v souboru"),
+    "modem.gap": ("Gap between them", "Mezera mezi nimi"),
+    "modem.save_tx": (
+        "Save a transmit test file…",
+        "Uložit soubor pro vysílání…",
+    ),
+    "modem.make_hint": (
+        "A clean waveform with no channel applied — what the modem would put on "
+        "the sound card. Playing it through a radio and recording the far end "
+        "measures the radio instead of the simulator. Several bursts with gaps "
+        "give several independent measurements from one transmission.",
+        "Čistý vlnový průběh bez kanálu — přesně to, co by modem poslal na "
+        "zvukovou kartu. Přehrání do rádia a nahrání druhé strany měří rádio, "
+        "nikoli simulátor. Několik vysílání s mezerami dá z jednoho přenosu "
+        "několik nezávislých měření.",
+    ),
+    "modem.open_wav": (
+        "Open and decode a WAV…",
+        "Otevřít a dekódovat WAV…",
+    ),
+    "modem.open_hint": (
+        "Any WAV file, whatever wrote it — a Guardian recording, or a capture "
+        "made on another computer. It must be mono 16-bit PCM at the selected "
+        "profile's sample rate.",
+        "Jakýkoli soubor WAV, ať jej zapsal kdokoli — záznam Guardianu nebo "
+        "nahrávka z jiného počítače. Musí být mono 16bitové PCM na vzorkovacím "
+        "kmitočtu zvoleného profilu.",
+    ),
+    "modem.wav_filter": ("WAV audio (*.wav)", "Zvuk WAV (*.wav)"),
+    "modem.capture_ok": (
+        "A frame decoded from this file with the {profile} profile.",
+        "Z tohoto souboru byl dekódován rámec profilem {profile}.",
+    ),
+    "modem.capture_bad": (
+        "No frame decoded from this file. The frame line says why.",
+        "Z tohoto souboru se nedekódoval žádný rámec. Důvod uvádí řádek s "
+        "rámcem.",
+    ),
+    "modem.capture_rate": (
+        "The file is {rate} Hz but the selected profile expects {expected} Hz. "
+        "Nothing can decode until they match — pick the profile the file was "
+        "made with.",
+        "Soubor má {rate} Hz, ale zvolený profil očekává {expected} Hz. Dokud "
+        "se neshodují, nelze dekódovat nic — zvolte profil, se kterým soubor "
+        "vznikl.",
+    ),
     # Mail
     "mail.title": ("Mail", "Pošta"),
     "mail.compose": ("Compose", "Nová zpráva"),

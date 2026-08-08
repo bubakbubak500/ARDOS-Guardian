@@ -291,35 +291,80 @@ class OfdmProfile:
         }
 
 
-# The one profile that exists today. It is a SIMULATION AND BENCH profile: its
-# numbers were chosen to make tests deterministic and conservative, not from any
-# measurement of what a VHF radio passes. Nothing outside this module may depend
-# on these values.
+# ---------------------------------------------------------------------------- #
+#  The profile ladder
+# ---------------------------------------------------------------------------- #
 #
-#   48000 Hz / 1024      -> 46.875 Hz subcarrier spacing
-#   cp 128               -> 2.667 ms guard, far longer than any audio-path
-#                           delay spread, and long enough that a plateau of
-#                           that width is easy to find in noise
-#   bins 12..63          -> 539 Hz .. 2977 Hz, about 2.44 kHz occupied, which
-#                           fits inside a stock 2.5-3 kHz FM voice channel
-#   pilot spacing 7      -> 8 pilots, 44 data carriers
-#   block 512 bytes      -> one Guardian attachment spans many blocks
-BENCH = OfdmProfile(
-    name="BENCH",
-    sample_rate=48000,
-    fft_size=1024,
-    cp_length=128,
-    first_carrier=12,
-    num_carriers=52,
-    pilot_spacing=7,
-    preamble_symbols=2,
-    training_symbols=2,
-    block_size=512,
+# None of these is a proven air profile. They exist so the question "how much
+# bandwidth does this radio actually pass?" can be answered by trying them,
+# which is the only way it can be answered -- what matters is not the radio's
+# channel spacing but the audio bandwidth its receive path passes, and that
+# differs between two taps on the same radio.
+#
+# Everything in the ladder shares one deliberate choice: **46.875 Hz subcarrier
+# spacing**, from 48000/1024 and equally from 96000/2048. Frequency-offset
+# tolerance is set by the spacing, so a burst that survives a given dial error
+# on one profile survives it on all of them, and moving up the ladder changes
+# only the bandwidth. The 2.667 ms guard is likewise held constant, so the
+# multipath the link tolerates does not change either.
+#
+# Widening costs SNR: the same transmit level spread over twice the carriers is
+# 3 dB less per carrier. Measured across this ladder, 2.4 kHz -> 18.8 kHz costs
+# about 9 dB and buys about eight times the throughput. That trade is the
+# operator's to make with a real signal in front of them, which is why the
+# ladder is exposed rather than one value being guessed here.
+
+def _at_48k(name: str, first: int, count: int) -> OfdmProfile:
+    """A 48 kHz profile: 46.875 Hz spacing, 2.667 ms guard, 24 ms symbols."""
+    return OfdmProfile(
+        name=name, sample_rate=48000, fft_size=1024, cp_length=128,
+        first_carrier=first, num_carriers=count, pilot_spacing=7,
+        preamble_symbols=2, training_symbols=2, block_size=512,
+    )
+
+
+#: The simulation and bench reference. Its numbers were chosen to make tests
+#: deterministic and conservative, not from any measurement of a radio, and the
+#: whole test suite is written against them -- so it is the profile to compare
+#: everything else with, and the one to leave alone. Bins 12..63 put it inside a
+#: stock 2.5-3 kHz FM voice channel.
+BENCH = _at_48k("BENCH", 12, 52)
+
+#: For a radio whose audio is narrower than expected, or a badly crowded channel.
+#: The header costs 13 of the symbols in a 512-byte burst here, so the overhead
+#: is severe -- this is a fallback, not a starting point.
+NARROW_1K2 = _at_48k("NARROW_1K2", 12, 26)
+
+#: The rungs to try on air, in order. Each roughly doubles the previous one.
+WIDE_5K = _at_48k("WIDE_5K", 12, 104)
+WIDE_10K = _at_48k("WIDE_10K", 12, 208)
+
+#: As wide as 48 kHz sampling allows with room to spare below the Nyquist bin.
+WIDE_20K = _at_48k("WIDE_20K", 12, 400)
+
+#: Past 24 kHz of audio the sound card has to run faster, so this one samples at
+#: 96 kHz with the FFT and guard scaled to match. It needs a sound card that will
+#: open at 96 kHz; if one will not, the ladder stops at WIDE_20K.
+WIDE_40K = OfdmProfile(
+    name="WIDE_40K", sample_rate=96000, fft_size=2048, cp_length=256,
+    first_carrier=24, num_carriers=854, pilot_spacing=7,
+    preamble_symbols=2, training_symbols=2, block_size=512,
 )
 
-PROFILES: dict[str, OfdmProfile] = {BENCH.name: BENCH}
+PROFILES: dict[str, OfdmProfile] = {
+    profile.name: profile
+    for profile in (NARROW_1K2, BENCH, WIDE_5K, WIDE_10K, WIDE_20K, WIDE_40K)
+}
 
-#: What a station uses until hardware measurements produce an air profile.
+#: Ascending by occupied bandwidth -- the order to try them in on air, and the
+#: order to list them in. `profile_names()` sorts alphabetically, which would put
+#: NARROW between the WIDEs and read as nonsense in a picker.
+PROFILE_LADDER: tuple[str, ...] = tuple(
+    entry.name for entry in sorted(PROFILES.values(),
+                                   key=lambda item: item.occupied_bandwidth)
+)
+
+#: What a station uses until measurements on a real radio say otherwise.
 DEFAULT_PROFILE_NAME = BENCH.name
 
 

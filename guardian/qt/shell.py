@@ -47,6 +47,7 @@ from .help_dialog import HelpDialog
 from .inputs import FrequencySpinBox
 from .log_workspace import LogWorkspace
 from .mail_workspace import MailWorkspace
+from .modem_workspace import ModemWorkspace
 from .network_workspace import NetworkWorkspace
 from .readiness_dialog import ReadinessDialog
 from .runtime import ShellRuntime
@@ -190,6 +191,7 @@ class GuardianMainWindow(QMainWindow):
             ("mail", tr("menu.mail")),
             ("network", tr("menu.network")),
             ("log", tr("menu.log")),
+            ("modem", tr("menu.modem")),
         )
         for index, (name, label) in enumerate(workspace_labels):
             action = QAction(label, self)
@@ -227,6 +229,13 @@ class GuardianMainWindow(QMainWindow):
         diagnostics = QAction(tr("menu.diagnostics"), self)
         diagnostics.triggered.connect(self._show_diagnostics)
         tools_menu.addAction(diagnostics)
+        # The modem bench is a workspace, so its checkable action belongs to the
+        # View group above. It is listed here as well because Tools is where an
+        # operator looks for something that measures the station, next to
+        # readiness and diagnostics -- this entry only switches to it.
+        modem_test = QAction(tr("menu.modem"), self)
+        modem_test.triggered.connect(lambda: self._show_workspace("modem"))
+        tools_menu.addAction(modem_test)
         tools_menu.addSeparator()
         updates = QAction(tr("menu.updates"), self)
         updates.triggered.connect(self._check_for_updates)
@@ -290,6 +299,7 @@ class GuardianMainWindow(QMainWindow):
             "mail": MailWorkspace(self.runtime),
             "network": NetworkWorkspace(self.runtime),
             "log": LogWorkspace(self.runtime),
+            "modem": ModemWorkspace(self.runtime),
         }
         for workspace in self.workspace_names.values():
             self.workspace_stack.addWidget(workspace)
@@ -623,6 +633,7 @@ class GuardianMainWindow(QMainWindow):
             "mail": tr("menu.mail"),
             "network": tr("menu.network"),
             "log": tr("menu.log"),
+            "modem": tr("menu.modem"),
         }
         self.statusBar().showMessage(
             tr("workspace.status", name=display_names[name])

@@ -32,12 +32,13 @@ from ..install.dependencies import find_vara_fm, find_vara_hf
 from ..install.hamlib_installer import existing_rigctld
 from ..modem.audio import match_device_name, scan_audio_devices
 from ..ofdm import MCS_TABLE
-from ..ofdm.config import profile_or_default
+from ..ofdm.config import PROFILE_LADDER, profile_or_default
 from ..protocol import MAX_PTT_DELAY_MS, PTT_DELAY_STEP_MS
 from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.usb_serial import list_serial_ports, port_device
 from .theme import ThemePreference
 from .inputs import UppercaseLineEdit, callsign_list
+from .ofdm_labels import profile_rung_label
 
 _CALLSIGN = re.compile(r"^[A-Z0-9/]{3,16}$")
 
@@ -958,6 +959,10 @@ class SettingsDialog(QDialog):
         self.vara_mode.currentTextChanged.connect(self._sync_bandwidth_row)
         self._ofdm_only_rows: list[tuple[QLabel | None, QWidget]] = []
         for text, widget in (
+            (
+                dual("OFDM waveform profile", "Profil vlnového průběhu OFDM"),
+                self.ofdm_profile,
+            ),
             (dual("OFDM modulation (MCS)", "Modulace OFDM (MCS)"), self.ofdm_mcs),
             (
                 dual("Keying lead before transmit", "Předstih klíčování"),
@@ -979,6 +984,10 @@ class SettingsDialog(QDialog):
             label = QLabel(text)
             form.addRow(label, widget)
             self._ofdm_only_rows.append((label, widget))
+        # Full width and no caption of its own: it is advice about the choice
+        # above it, not another field.
+        form.addRow(self.ofdm_profile_hint)
+        self._ofdm_only_rows.append((None, self.ofdm_profile_hint))
         form.addRow(dual("Control-burst modem", "Modem řídicích rámců"), self.control_modem)
 
         form.addRow(self.vara_host_ptt)
@@ -989,15 +998,66 @@ class SettingsDialog(QDialog):
         self.payload_backend.currentIndexChanged.connect(self._sync_payload_rows)
         self._sync_payload_rows()
 
+    def _ofdm_summary_text(self, waveform) -> str:
+        """The resolved waveform in one paragraph, read-only by design."""
+        low, high = waveform.occupied_band
+        return dual(
+            f"{waveform.name} (experimental) · sample rate "
+            f"{waveform.sample_rate} Hz · occupied {low:.0f}–{high:.0f} Hz "
+            f"({waveform.occupied_bandwidth:.0f} Hz) · FFT {waveform.fft_size} "
+            f"· cyclic prefix {waveform.cp_length} · {waveform.num_carriers} "
+            f"active carriers ({waveform.num_data_carriers} data + "
+            f"{waveform.num_pilots} pilot) · spacing "
+            f"{waveform.subcarrier_spacing:.1f} Hz · symbol "
+            f"{waveform.symbol_duration * 1000:.1f} ms",
+            f"{waveform.name} (experimentální) · vzorkování "
+            f"{waveform.sample_rate} Hz · zabírá {low:.0f}–{high:.0f} Hz "
+            f"({waveform.occupied_bandwidth:.0f} Hz) · FFT {waveform.fft_size} "
+            f"· ochranný interval {waveform.cp_length} · {waveform.num_carriers} "
+            f"aktivních nosných ({waveform.num_data_carriers} datových + "
+            f"{waveform.num_pilots} pilotních) · rozestup "
+            f"{waveform.subcarrier_spacing:.1f} Hz · symbol "
+            f"{waveform.symbol_duration * 1000:.1f} ms",
+        )
+
     def _build_ofdm_widgets(self) -> None:
         """Editable OFDM knobs plus a read-only view of the resolved waveform.
 
-        FFT size, cyclic prefix, carrier set and sample rate are deliberately
-        absent: the occupied RF bandwidth a VHF radio actually passes is still
-        to be measured on real radios, so changing it has to be a new profile
-        entry in guardian/ofdm/config.py -- reviewed, named and testable -- and
-        never a field an operator can drag out of a working waveform.
+        The profile is chosen from the ladder in guardian/ofdm/config.py, in
+        ascending occupied bandwidth -- that is the order the rungs are meant to
+        be tried in, and it is what makes the choice answerable: how much audio
+        bandwidth a given radio's receive path passes can only be found out by
+        trying. Which is why the individual DSP numbers are still not fields.
+
+        FFT size, cyclic prefix, carrier set and sample rate stay read-only:
+        they belong to the profile as a reviewed, named, testable whole, and are
+        never something an operator can drag out of a working waveform. What the
+        picker offers is a set of such wholes; the summary below it says what the
+        chosen one is.
         """
+        self.ofdm_profile = QComboBox()
+        # PROFILE_LADDER, not profile_names(): the ladder is ordered by occupied
+        # bandwidth. Alphabetical order would list NARROW_1K2 between the WIDEs,
+        # which reads as nonsense in a picker whose whole point is the sequence.
+        for name in PROFILE_LADDER:
+            entry = profile_or_default(name)
+            self.ofdm_profile.addItem(profile_rung_label(entry), name)
+        self.ofdm_profile.setCurrentIndex(
+            max(0, self.ofdm_profile.findData(self.config.ofdm_profile))
+        )
+        self.ofdm_profile.currentIndexChanged.connect(self._sync_ofdm_summary)
+        self.ofdm_profile.setToolTip(dual(
+            "Both stations must use the same profile. Wider carries more per "
+            "second but needs a stronger signal for it: the same transmit power "
+            "spread over twice the carriers is 3 dB less on each one.",
+            "Obě stanice musí použít stejný profil. Širší přenese více za "
+            "sekundu, ale potřebuje k tomu silnější signál: stejný vysílací "
+            "výkon rozložený na dvojnásobek nosných je na každé z nich o 3 dB "
+            "slabší.",
+        ))
+        self.ofdm_profile_hint = QLabel()
+        self.ofdm_profile_hint.setObjectName("Metadata")
+        self.ofdm_profile_hint.setWordWrap(True)
         self.ofdm_mcs = QComboBox()
         for scheme in MCS_TABLE:
             self.ofdm_mcs.addItem(scheme.label, scheme.index)
@@ -1017,28 +1077,42 @@ class SettingsDialog(QDialog):
         self.ofdm_tx_tail = _spin(0, 2_000, self.config.ofdm_tx_tail_ms)
         self.ofdm_tx_tail.setSuffix(dual(" ms", " ms"))
         self.ofdm_max_retries = _spin(0, 20, self.config.ofdm_max_retries)
-        waveform = profile_or_default(self.config.ofdm_profile)
-        low, high = waveform.occupied_band
-        self.ofdm_summary = QLabel(dual(
-            f"{waveform.name} (experimental) · sample rate "
-            f"{waveform.sample_rate} Hz · occupied {low:.0f}–{high:.0f} Hz "
-            f"({waveform.occupied_bandwidth:.0f} Hz) · FFT {waveform.fft_size} "
-            f"· cyclic prefix {waveform.cp_length} · {waveform.num_carriers} "
-            f"active carriers ({waveform.num_data_carriers} data + "
-            f"{waveform.num_pilots} pilot) · spacing "
-            f"{waveform.subcarrier_spacing:.1f} Hz · symbol "
-            f"{waveform.symbol_duration * 1000:.1f} ms",
-            f"{waveform.name} (experimentální) · vzorkování "
-            f"{waveform.sample_rate} Hz · zabírá {low:.0f}–{high:.0f} Hz "
-            f"({waveform.occupied_bandwidth:.0f} Hz) · FFT {waveform.fft_size} "
-            f"· ochranný interval {waveform.cp_length} · {waveform.num_carriers} "
-            f"aktivních nosných ({waveform.num_data_carriers} datových + "
-            f"{waveform.num_pilots} pilotních) · rozestup "
-            f"{waveform.subcarrier_spacing:.1f} Hz · symbol "
-            f"{waveform.symbol_duration * 1000:.1f} ms",
-        ))
+        self.ofdm_summary = QLabel()
         self.ofdm_summary.setObjectName("Metadata")
         self.ofdm_summary.setWordWrap(True)
+        self._sync_ofdm_summary()
+
+    def _sync_ofdm_summary(self) -> None:
+        """Restate the waveform whenever the profile picker moves.
+
+        Without this the summary would keep describing whatever was saved, which
+        is worse than having no summary: it would contradict the picker sitting
+        directly above it.
+        """
+        waveform = profile_or_default(str(self.ofdm_profile.currentData()))
+        self.ofdm_summary.setText(self._ofdm_summary_text(waveform))
+        # A rung that needs a faster sound card is a failure the operator can
+        # anticipate at the moment of choosing rather than debug afterwards.
+        if waveform.sample_rate != 48000:
+            self.ofdm_profile_hint.setText(dual(
+                f"{waveform.name} needs a sound card that will open at "
+                f"{waveform.sample_rate} Hz. If yours will not, the ladder "
+                "stops one rung lower. No rung has been measured on the air; "
+                "both stations must be set to the same one.",
+                f"{waveform.name} vyžaduje zvukovou kartu, která se otevře na "
+                f"{waveform.sample_rate} Hz. Pokud to vaše neumí, škála končí o "
+                "jeden stupeň níž. Žádný stupeň nebyl změřen na pásmu; obě "
+                "stanice musí být nastaveny na tentýž.",
+            ))
+        else:
+            self.ofdm_profile_hint.setText(dual(
+                "No rung has been measured on the air — they exist to be tried, "
+                "starting narrow and widening while the link still holds. Both "
+                "stations must be set to the same one.",
+                "Žádný stupeň nebyl změřen na pásmu — existují proto, aby se "
+                "vyzkoušely: začněte úzkým a rozšiřujte, dokud spoj drží. Obě "
+                "stanice musí být nastaveny na tentýž.",
+            ))
 
     def _sync_payload_rows(self) -> None:
         """Show only the rows the selected payload transport actually uses.
@@ -1252,6 +1326,7 @@ class SettingsDialog(QDialog):
         cfg.vara_fm_path = self.vara_fm_path.text()
         cfg.vara_hf_path = self.vara_hf_path.text()
         cfg.payload_backend = self.payload_backend.currentData()
+        cfg.ofdm_profile = str(self.ofdm_profile.currentData())
         cfg.ofdm_mcs = int(self.ofdm_mcs.currentData())
         cfg.ofdm_tx_lead_ms = self.ofdm_tx_lead.value()
         cfg.ofdm_tx_tail_ms = self.ofdm_tx_tail.value()

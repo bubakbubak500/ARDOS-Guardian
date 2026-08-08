@@ -18,7 +18,7 @@ from guardian.config import StationConfig
 from guardian.i18n import tr
 from guardian.modem.audio import AudioDeviceScan
 from guardian.ofdm import MCS_TABLE
-from guardian.ofdm.config import profile_or_default
+from guardian.ofdm.config import PROFILE_LADDER, profile_or_default
 from guardian.install.dependencies import (
     DependencyKind,
     DependencyStatus,
@@ -721,6 +721,125 @@ def test_ofdm_summary_reports_the_resolved_profile_and_offers_no_dsp_fields() ->
         }
         assert not any("FFT" in caption for caption in captions)
         assert not any("prefix" in caption.lower() for caption in captions)
+    finally:
+        dialog.close()
+
+
+def test_the_ofdm_profile_picker_offers_the_ladder_in_bandwidth_order() -> None:
+    # The occupied bandwidth a radio really passes can only be found out by
+    # trying, so the profile is a choice -- offered in the order the rungs are
+    # meant to be tried in, which is not the alphabetical order of their names.
+    _application()
+    config = StationConfig(callsign="OK7PS", payload_backend="ofdm_vhf")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        offered = [
+            dialog.ofdm_profile.itemData(index)
+            for index in range(dialog.ofdm_profile.count())
+        ]
+        assert offered == list(PROFILE_LADDER)
+        widths = [profile_or_default(name).occupied_bandwidth for name in offered]
+        assert widths == sorted(widths)
+        # No rung is a proven air profile, and every label says so rather than
+        # letting the default read as measured.
+        labels = [
+            dialog.ofdm_profile.itemText(index)
+            for index in range(dialog.ofdm_profile.count())
+        ]
+        assert all("untried on air" in label for label in labels)
+        # The one rung that needs a faster sound card names the rate where it is
+        # chosen: a card that will not open at it is a failure to anticipate.
+        fast = [
+            name for name in offered
+            if profile_or_default(name).sample_rate != 48_000
+        ]
+        assert fast
+        for name in fast:
+            label = labels[offered.index(name)]
+            rate = profile_or_default(name).sample_rate
+            assert f"{rate // 1000} kHz sound card" in label
+    finally:
+        dialog.close()
+
+
+def test_every_ladder_rung_is_restored_and_written_back(monkeypatch) -> None:
+    _application()
+    monkeypatch.setattr(StationConfig, "save", lambda self: None)
+    for name in PROFILE_LADDER:
+        # Restored: a station already set to this rung must open on it.
+        config = StationConfig(
+            callsign="OK7PS", payload_backend="ofdm_vhf", ofdm_profile=name
+        )
+        dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+        try:
+            assert dialog.ofdm_profile.currentData() == name
+            assert profile_or_default(name).name in dialog.ofdm_summary.text()
+        finally:
+            dialog.close()
+
+        # Written back: selecting it reaches the station profile on apply.
+        config = StationConfig(callsign="OK7PS", payload_backend="ofdm_vhf")
+        dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+        try:
+            dialog.ofdm_profile.setCurrentIndex(
+                dialog.ofdm_profile.findData(name)
+            )
+            assert dialog.apply()
+            assert config.ofdm_profile == name
+        finally:
+            dialog.close()
+
+
+def test_the_waveform_summary_follows_the_profile_picker() -> None:
+    # A summary that kept describing the saved profile would contradict the
+    # picker sitting directly above it, which is worse than having no summary.
+    _application()
+    config = StationConfig(
+        callsign="OK7PS", payload_backend="ofdm_vhf", ofdm_profile="BENCH"
+    )
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        assert "BENCH" in dialog.ofdm_summary.text()
+        assert "96000" not in dialog.ofdm_profile_hint.text()
+
+        dialog.ofdm_profile.setCurrentIndex(
+            dialog.ofdm_profile.findData("WIDE_20K")
+        )
+        wide = profile_or_default("WIDE_20K")
+        text = dialog.ofdm_summary.text()
+        assert "WIDE_20K" in text
+        assert "BENCH" not in text
+        assert str(wide.num_carriers) in text
+        assert f"{wide.occupied_bandwidth:.0f}" in text
+        # Still not editable, whichever rung is chosen.
+        assert dialog.ofdm_summary not in set(dialog.findChildren(QComboBox))
+
+        dialog.ofdm_profile.setCurrentIndex(
+            dialog.ofdm_profile.findData("WIDE_40K")
+        )
+        assert "96000" in dialog.ofdm_summary.text()
+        hint = dialog.ofdm_profile_hint.text()
+        assert "96000" in hint
+        assert "sound card" in hint
+        assert dialog.ofdm_profile_hint.objectName() == "Metadata"
+    finally:
+        dialog.close()
+
+
+def test_the_profile_picker_is_hidden_for_a_vara_station() -> None:
+    # A VARA station never builds an OFDM waveform, so the choice would be a
+    # setting that reaches nothing.
+    _application()
+    config = StationConfig(callsign="OK7PS", payload_backend="vara_p2p")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        assert dialog.ofdm_profile.isHidden()
+        assert dialog.ofdm_profile_hint.isHidden()
+        dialog.payload_backend.setCurrentIndex(
+            dialog.payload_backend.findData("ofdm_vhf")
+        )
+        assert not dialog.ofdm_profile.isHidden()
+        assert not dialog.ofdm_profile_hint.isHidden()
     finally:
         dialog.close()
 
