@@ -44,15 +44,25 @@ def _workspace(profile: str = "BENCH") -> tuple[ShellRuntime, ModemWorkspace]:
     return runtime, ModemWorkspace(runtime)
 
 
+def _pump(workspace: ModemWorkspace) -> None:
+    """One turn of the shell's poll: drain the pool, then show the progress.
+
+    Exactly what `GuardianMainWindow._refresh` does every 500 ms, so the tests
+    drive the workspace through the same path the application does.
+    """
+    workspace.runtime.drain_workers()
+    workspace.refresh()
+
+
 def _wait(workspace: ModemWorkspace, timeout: float = 300.0) -> None:
-    """Stand in for the shell poll: drain until the measurement lands."""
+    """Poll until the measurement lands."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        workspace.poll()
+        _pump(workspace)
         if workspace._running is None:
             return
         time.sleep(0.01)
-    workspace.poll()
+    _pump(workspace)
     raise AssertionError("the measurement never finished")
 
 
@@ -265,7 +275,7 @@ def test_the_transfer_log_streams_in_before_the_transfer_finishes() -> None:
         streamed = False
         deadline = time.monotonic() + 300.0
         while time.monotonic() < deadline:
-            workspace.poll()
+            _pump(workspace)
             if workspace.transfer_log.toPlainText().strip():
                 streamed = streamed or workspace._running is not None
             if workspace._running is None:
@@ -314,7 +324,7 @@ def test_cancelling_a_sweep_stops_it_early_and_keeps_what_was_measured() -> None
         assert workspace.sweep_cancel.isEnabled()
         deadline = time.monotonic() + 300.0
         while time.monotonic() < deadline:
-            workspace.poll()
+            _pump(workspace)
             if workspace.sweep_table.rowCount() >= 1:
                 workspace.cancel_sweep()
             if workspace._running is None:

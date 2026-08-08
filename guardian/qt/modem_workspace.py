@@ -886,22 +886,25 @@ class ModemWorkspace(QWidget):
         going insensitive rather than by silently dropping the second click.
         """
         if self._running is not None:
-            status.setText(tr("modem.busy"))
-            status.setProperty("statusRole", "warning")
-            repolish(status)
-            return False
+            return self._refuse(status)
+        # The pool can refuse independently -- a task of this name still
+        # finishing, or a pool closed because Guardian is shutting down.
         if not self.runtime.operations.workers.submit(
             task, work, lambda result: self._finish(result, status, render)
         ):
-            status.setText(tr("modem.busy"))
-            status.setProperty("statusRole", "warning")
-            repolish(status)
-            return False
+            return self._refuse(status)
         self._set_running(task)
         status.setText(tr("modem.running"))
         status.setProperty("statusRole", "info")
         repolish(status)
         return True
+
+    def _refuse(self, status: QLabel) -> bool:
+        """Say on the page why nothing started, and report that nothing did."""
+        status.setText(tr("modem.busy"))
+        status.setProperty("statusRole", "warning")
+        repolish(status)
+        return False
 
     def _finish(self, result: TaskResult, status: QLabel, render) -> None:
         try:
@@ -941,12 +944,14 @@ class ModemWorkspace(QWidget):
                 self._add_sweep_row(value)
 
     def refresh(self) -> None:
-        """Called by the shell's poll, which has already drained the pool."""
-        self._drain_pending()
+        """Show what the running measurement has produced so far.
 
-    def poll(self) -> None:
-        """Drain both the pool and the queue. For callers outside the shell poll."""
-        self.runtime.drain_workers()
+        Called by the shell's poll, which has already drained the worker pool.
+        The pool's own completions therefore arrive whether or not this workspace
+        is the visible one -- and `_finish` drains this queue before it renders,
+        so a measurement watched from another workspace still ends up complete.
+        Only the filling-in as it happens depends on being looked at.
+        """
         self._drain_pending()
 
     # -- small shared widget shapes -----------------------------------------
