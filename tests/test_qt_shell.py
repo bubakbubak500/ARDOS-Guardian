@@ -482,6 +482,39 @@ def test_the_live_indicator_shows_elapsed_time_and_the_peak_level_so_far(
         runtime.close()
 
 
+def test_the_recording_control_reads_in_czech_too(tmp_path, monkeypatch) -> None:
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-record-czech.ini"),
+        QSettings.Format.IniFormat,
+    )
+    set_language(Language.CZECH)
+    runtime = ShellRuntime()
+    window = GuardianMainWindow(runtime, settings)
+    summary = RecordingSummary(
+        path=tmp_path / "capture.wav",
+        sample_rate=48_000,
+        samples=48_000,
+        rms=0.05,
+        peak=0.4,
+        clipped_samples=0,
+    )
+    state = _fake_recorder(runtime, monkeypatch, summary)
+    try:
+        assert window.record_button.text() == "Nahrávat přijímaný zvuk"
+        assert window.record_action.text() == "Nahrávat přijímaný zvuk"
+        window.record_button.click()
+        assert window.record_button.text() == "Ukončit nahrávání"
+        state["seconds"], state["level"] = 4.0, 1.0
+        window._apply_snapshot(runtime.snapshots.read())
+        assert "Nahrávám 4.0 s" in window.recording_indicator.text()
+        assert "přebuzeno" in window.recording_indicator.text()
+    finally:
+        window.close()
+        runtime.close()
+        set_language(Language.ENGLISH)
+
+
 def test_closing_the_shell_closes_an_open_capture_file(
     tmp_path, monkeypatch
 ) -> None:
