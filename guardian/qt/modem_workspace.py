@@ -159,10 +159,13 @@ class ModemWorkspace(QWidget):
         return host
 
     def _facts_panel(self) -> QWidget:
+        # An existing panel identity rather than a new one: the theme already
+        # styles WorkspacePanel, and inventing a name the stylesheet says
+        # nothing about would leave this reading as loose text on the page.
         host = QFrame()
-        host.setObjectName("FactsPanel")
+        host.setObjectName("WorkspacePanel")
         layout = QVBoxLayout(host)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(4)
 
         heading = QLabel(tr("modem.facts"))
