@@ -55,11 +55,9 @@ jobs:
       - name: Build installer and update manifest
         shell: pwsh
         run: |
-          # NOTE: this base URL still points at the public G1 repository. Actions
-          # is disabled on G2; fix the URL before re-enabling it (see G2.md).
           .\build_installer.ps1 `
             -Compiler "${{ steps.tools.outputs.iscc }}" `
-            -ReleaseBaseUrl "https://github.com/bubakbubak500/ARDOS-Guardian/releases/latest/download"
+            -ReleaseBaseUrl "https://github.com/bubakbubak500/ARDOS-Guardian-G2/releases/latest/download"
 
       - name: Package application and checksums
         shell: pwsh

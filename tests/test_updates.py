@@ -125,3 +125,16 @@ def test_download_reports_byte_progress_through_verification(tmp_path) -> None:
     assert updates[0] == (0, len(payload))
     assert updates[-1] == (len(payload), len(payload))
     assert len(updates) >= 3
+
+
+def test_the_g2_line_never_updates_itself_from_the_public_g1_repository() -> None:
+    # G1's manifest is harmless today -- it advertises 1.0.0, older than any G2
+    # build, so nothing is offered. But the first G1 release numbered above the
+    # installed G2 version would have this station download and run a *G1*
+    # installer: a different AppId into a different directory, leaving G1
+    # installed and G2 untouched, after the operator pressed "update".
+    assert "ARDOS-Guardian-G2/" in DEFAULT_MANIFEST_URL
+    assert "/ARDOS-Guardian/" not in DEFAULT_MANIFEST_URL
+    # The comparison itself is version-only, which is exactly why the URL has to
+    # carry the separation.
+    assert is_newer("3.0.0", "2.0.1")

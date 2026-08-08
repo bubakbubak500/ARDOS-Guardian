@@ -74,7 +74,9 @@ if ($ReleaseBaseUrl) {
         version = $version
         installer_url = "$base/Guardian-G2-$version-setup-win-x64.exe"
         sha256 = $hash
-        notes_url = "https://github.com/bubakbubak500/ARDOS-Guardian/releases/tag/v$version"
+        # G2 release notes, not G1's -- see the comment on DEFAULT_MANIFEST_URL
+        # in guardian/updates.py for why the lines must never be crossed.
+        notes_url = "https://github.com/bubakbubak500/ARDOS-Guardian-G2/releases/tag/v$version"
     }
     $manifestJson = $manifest | ConvertTo-Json
     $manifestPath = Join-Path $root "release\release-manifest.json"

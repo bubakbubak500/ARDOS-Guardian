@@ -15,8 +15,20 @@ from . import __version__
 from .config import config_dir
 from .i18n import dual
 
+# The G2 line updates from the G2 repository, never from the public G1 one.
+#
+# This is a safety property, not tidiness. G1's manifest happens to be harmless
+# today -- it advertises 1.0.0, which is older than any G2 build, so nothing is
+# offered. But the first G1 release numbered above the installed G2 version would
+# have this station download and run a *G1* installer: a different AppId into a
+# different directory, leaving the operator with G1 installed and G2 untouched,
+# having pressed a button that said "update".
+#
+# The G2 repository is private, so an unauthenticated fetch answers 404 and the
+# updater reports no update available. That is the correct behaviour until a G2
+# release is actually published, and it can never offer a G1 build.
 DEFAULT_MANIFEST_URL = (
-    "https://github.com/bubakbubak500/ARDOS-Guardian/"
+    "https://github.com/bubakbubak500/ARDOS-Guardian-G2/"
     "releases/latest/download/release-manifest.json"
 )
 ALLOWED_DOWNLOAD_HOSTS = {
