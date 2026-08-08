@@ -5,6 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from guardian.ofdm.config import profile_or_default
 from guardian.qt.runtime import ShellRuntime
 from guardian.services import MailboxSnapshot
 from guardian.qt.shell import GuardianMainWindow
@@ -177,6 +178,173 @@ def test_spectrum_auto_opens_only_for_vara_p2p(tmp_path) -> None:
         runtime.config.payload_backend = "vara_p2p"
         window.show_spectrum_if_applicable()
         assert calls == 1
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_spectrum_stays_shut_for_the_ofdm_transport(tmp_path) -> None:
+    # The sentinel above proves unknown transports are refused; this names the
+    # real second transport, so the day OFDM grows a view of its own it is a
+    # decision someone makes here rather than a silent side effect.
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-spectrum-ofdm.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    window = GuardianMainWindow(runtime, settings)
+    calls = 0
+
+    def record_show() -> None:
+        nonlocal calls
+        calls += 1
+
+    window.show_spectrum = record_show
+    try:
+        runtime.config.payload_backend = "ofdm_vhf"
+        window.show_spectrum_if_applicable()
+        assert calls == 0
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_station_header_names_the_transport_it_is_actually_using(tmp_path) -> None:
+    # The fall-through label was the literal "Winlink", left from the hand-off
+    # 0.6.26 removed: an OFDM station announced a workflow it does not have.
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-header.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    runtime.config.callsign = "OK7PS"
+    # Stated, not assumed: the runtime loads the config the session has been
+    # writing, so a neighbouring test's choice would otherwise decide this one.
+    runtime.config.payload_backend = "vara_p2p"
+    window = GuardianMainWindow(runtime, settings)
+    try:
+        window._apply_snapshot(runtime.snapshots.read())
+        assert "VARA P2P" in window.context_value.text()
+
+        runtime.config.payload_backend = "ofdm_vhf"
+        window._apply_snapshot(runtime.snapshots.read())
+        text = window.context_value.text()
+        assert "OFDM VHF" in text
+        assert "Winlink" not in text
+        assert "OK7PS" in text
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_home_readiness_rows_report_what_the_transport_depends_on(
+    tmp_path, monkeypatch
+) -> None:
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-ready-rows.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    runtime.config.callsign = "OK7PS"
+    runtime.config.vara_mode = "FM"
+    runtime.config.payload_backend = "vara_p2p"
+    runtime.config.radio_backend = "none"
+    window = GuardianMainWindow(runtime, settings)
+
+    def rows() -> list[tuple[str, str, str]]:
+        return [
+            tuple(
+                window.readiness.topLevelItem(index).text(column)
+                for column in range(3)
+            )
+            for index in range(window.readiness.topLevelItemCount())
+        ]
+
+    try:
+        window._apply_snapshot(runtime.snapshots.read())
+        vara_rows = rows()
+        # Regression-pinned: a VARA station's table is exactly what it was.
+        assert len(vara_rows) == 5
+        assert vara_rows[3][0] == "VARA FM"
+        assert vara_rows[3][2] == (
+            f"{runtime.config.vara_host}:{runtime.config.vara_cmd_port}"
+        )
+
+        # An OFDM station: the modem is Guardian's own, so the TCP endpoint is
+        # replaced by the two audio devices, keying and the waveform profile.
+        runtime.config.payload_backend = "ofdm_vhf"
+        runtime.config.radio_backend = "hamlib"
+        runtime.config.ptt_type = "RTS"
+        runtime.config.audio_input = "USB Audio CODEC RX"
+        runtime.config.audio_output = "USB Audio CODEC TX"
+        monkeypatch.setattr(
+            "guardian.qt.shell.resolve_device",
+            lambda name, kind: 4 if kind == "input" else name,
+        )
+        window._apply_snapshot(runtime.snapshots.read())
+        ofdm_rows = rows()
+        components = [row[0] for row in ofdm_rows]
+        assert not any("VARA" in component for component in components)
+        assert components[3:] == [
+            "Radio audio in (RX)",
+            "Radio audio out (TX)",
+            "Transmit keying",
+            "OFDM waveform",
+            "Payload workflow",
+        ]
+        # An int from resolve_device means Guardian can open the stream; the
+        # name coming back means it could not be found on this computer.
+        assert ofdm_rows[3][1] == "Available"
+        assert ofdm_rows[4][1] == "Missing"
+        assert "USB Audio CODEC TX" in ofdm_rows[4][2]
+        assert ofdm_rows[5][1] == "Configured"
+        assert "RTS" in ofdm_rows[5][2]
+        waveform = profile_or_default(runtime.config.ofdm_profile)
+        assert ofdm_rows[6][1] == "Experimental"
+        assert waveform.name in ofdm_rows[6][2]
+        assert f"{waveform.occupied_bandwidth:.0f}" in ofdm_rows[6][2]
+        assert "OFDM VHF" in ofdm_rows[7][1]
+
+        # Nothing selected is a different failure from nothing found.
+        runtime.config.audio_input = ""
+        window._apply_snapshot(runtime.snapshots.read())
+        assert rows()[3][1] == "Not configured"
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_the_audio_rows_do_not_enumerate_portaudio_on_every_tick(
+    tmp_path, monkeypatch
+) -> None:
+    # The table is rebuilt twice a second and resolve_device walks the whole
+    # PortAudio device list; doing that per tick on the UI thread is a stall.
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-audio-probe.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    runtime.config.callsign = "OK7PS"
+    runtime.config.payload_backend = "ofdm_vhf"
+    runtime.config.audio_input = "RX device"
+    runtime.config.audio_output = "TX device"
+    asked: list[tuple[str, str]] = []
+
+    def counting_resolve(name, kind):
+        asked.append((name, kind))
+        return 7
+
+    # Patched before the window exists: building it refreshes once already.
+    monkeypatch.setattr("guardian.qt.shell.resolve_device", counting_resolve)
+    window = GuardianMainWindow(runtime, settings)
+    try:
+        for _ in range(8):
+            window._apply_snapshot(runtime.snapshots.read())
+        assert asked == [("RX device", "input"), ("TX device", "output")]
     finally:
         window.close()
         runtime.close()

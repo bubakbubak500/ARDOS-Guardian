@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -16,7 +17,13 @@ from PySide6.QtWidgets import (
 from guardian.config import StationConfig
 from guardian.i18n import tr
 from guardian.modem.audio import AudioDeviceScan
-from guardian.install.dependencies import DependencyKind, DependencyStatus
+from guardian.ofdm import MCS_TABLE
+from guardian.ofdm.config import profile_or_default
+from guardian.install.dependencies import (
+    DependencyKind,
+    DependencyStatus,
+    inspect_dependencies,
+)
 from guardian.operations import PTT_TEST_SECONDS
 from guardian.qt.diagnostics_dialog import DiagnosticsDialog
 from guardian.qt.readiness_dialog import ReadinessDialog
@@ -55,9 +62,13 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         assert config.operator_name == "Operator"
         assert config.vara_mode == "HF"
         assert config.vara_cmd_port == config.vara_hf_cmd_port
-        # The manual Winlink hand-off was removed in 0.6.26; VARA P2P is
-        # the only transport the picker offers.
-        assert dialog.payload_backend.count() == 1
+        # The picker offered a single transport until Guardian OFDM VHF landed.
+        # VARA P2P keeps index 0 and stays what an untouched dialog saves:
+        # OFDM is experimental and must never become the default by accident.
+        assert dialog.payload_backend.count() == 2
+        assert dialog.payload_backend.itemData(0) == "vara_p2p"
+        assert dialog.payload_backend.currentData() == "vara_p2p"
+        assert dialog.payload_backend.itemData(1) == "ofdm_vhf"
         assert config.payload_backend == "vara_p2p"
         assert config.audio_input == "USB Audio CODEC RX"
         assert config.audio_output == "USB Audio CODEC TX"
@@ -567,4 +578,227 @@ def test_diagnostics_carry_what_the_audio_backend_itself_reports() -> None:
         assert "host_apis" in audio or "host_apis_error" in audio
     finally:
         diagnostics.close()
+        runtime.close()
+
+
+def test_payload_picker_restores_the_saved_transport(monkeypatch) -> None:
+    # The picker hard-set index 0 while there was one item, so it never read
+    # config.payload_backend back: an OFDM station reopened settings, saw VARA
+    # selected and would have saved VARA over its own choice.
+    _application()
+    # apply() persists, and the saved file is shared by every test in the
+    # session; the claim here is about the object, so keep it off disk.
+    monkeypatch.setattr(StationConfig, "save", lambda self: None)
+    config = StationConfig(callsign="OK7PS", payload_backend="ofdm_vhf")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        assert dialog.payload_backend.currentData() == "ofdm_vhf"
+        assert dialog.apply()
+        assert config.payload_backend == "ofdm_vhf"
+    finally:
+        dialog.close()
+
+
+def test_ofdm_knobs_are_written_back_to_the_station_config(monkeypatch) -> None:
+    _application()
+    monkeypatch.setattr(StationConfig, "save", lambda self: None)
+    config = StationConfig(callsign="OK7PS", payload_backend="ofdm_vhf")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        assert dialog.ofdm_mcs.currentData() == config.ofdm_mcs
+        # Read the offered list from the table rather than naming indices here:
+        # the dialog must offer what the modem implements, not a copy of it.
+        assert [
+            dialog.ofdm_mcs.itemData(index)
+            for index in range(dialog.ofdm_mcs.count())
+        ] == [scheme.index for scheme in MCS_TABLE]
+        assert dialog.ofdm_mcs.itemText(0) == MCS_TABLE[0].label
+
+        dialog.ofdm_mcs.setCurrentIndex(dialog.ofdm_mcs.findData(2))
+        dialog.ofdm_tx_lead.setValue(450)
+        dialog.ofdm_tx_tail.setValue(150)
+        dialog.ofdm_max_retries.setValue(6)
+        assert dialog.apply()
+
+        assert config.ofdm_mcs == 2
+        assert config.ofdm_tx_lead_ms == 450
+        assert config.ofdm_tx_tail_ms == 150
+        assert config.ofdm_max_retries == 6
+    finally:
+        dialog.close()
+
+
+def test_payload_selection_shows_only_the_rows_that_transport_uses() -> None:
+    # Four TCP ports and two executable pickers on an OFDM station invite the
+    # operator to maintain settings that reach nothing.
+    _application()
+    config = StationConfig(callsign="OK7PS", vara_mode="HF")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        # isHidden(), not isVisibleTo(dialog): every widget here lives on a tab
+        # page, and QTabWidget hides the pages it is not showing, so
+        # isVisibleTo would be False for the whole page whatever this row does.
+        assert not dialog.vara_host.isHidden()
+        assert not dialog.vara_fm_cmd.isHidden()
+        assert not dialog.vara_hf_path.isHidden()
+        assert not dialog.vara_host_ptt.isHidden()
+        assert not dialog.vara_hf_bandwidth.isHidden()
+        assert dialog.ofdm_mcs.isHidden()
+        assert dialog.ofdm_summary.isHidden()
+
+        dialog.payload_backend.setCurrentIndex(
+            dialog.payload_backend.findData("ofdm_vhf")
+        )
+        assert dialog.vara_host.isHidden()
+        assert dialog.vara_fm_cmd.isHidden()
+        assert dialog.vara_hf_data.isHidden()
+        assert dialog.vara_fm_path.isHidden()
+        assert dialog.vara_host_ptt.isHidden()
+        # Hidden even in HF mode here: with OFDM carrying the payload there is
+        # no VARA session for a bandwidth command to reach.
+        assert dialog.vara_hf_bandwidth.isHidden()
+        # The caption goes with its field, or the page keeps an orphan label.
+        assert dialog.vara_hf_bandwidth_label.isHidden()
+        assert not dialog.ofdm_mcs.isHidden()
+        assert not dialog.ofdm_tx_lead.isHidden()
+        assert not dialog.ofdm_tx_tail.isHidden()
+        assert not dialog.ofdm_max_retries.isHidden()
+        assert not dialog.ofdm_summary.isHidden()
+        # The control plane belongs to neither transport exclusively.
+        assert not dialog.vara_mode.isHidden()
+        assert not dialog.control_modem.isHidden()
+
+        dialog.payload_backend.setCurrentIndex(
+            dialog.payload_backend.findData("vara_p2p")
+        )
+        assert not dialog.vara_host.isHidden()
+        assert not dialog.vara_host_ptt.isHidden()
+        assert not dialog.vara_hf_bandwidth.isHidden()
+        assert dialog.ofdm_mcs.isHidden()
+        assert dialog.ofdm_summary.isHidden()
+    finally:
+        dialog.close()
+
+
+def test_ofdm_summary_reports_the_resolved_profile_and_offers_no_dsp_fields() -> None:
+    # The occupied RF bandwidth is still to be measured on real radios, so the
+    # waveform geometry is reported, never offered as a field.
+    _application()
+    config = StationConfig(callsign="OK7PS", payload_backend="ofdm_vhf")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        waveform = profile_or_default(config.ofdm_profile)
+        low, high = waveform.occupied_band
+        text = dialog.ofdm_summary.text()
+        assert waveform.name in text
+        assert str(waveform.sample_rate) in text
+        assert str(waveform.fft_size) in text
+        assert str(waveform.cp_length) in text
+        assert str(waveform.num_carriers) in text
+        assert str(waveform.num_data_carriers) in text
+        assert str(waveform.num_pilots) in text
+        assert f"{low:.0f}" in text
+        assert f"{high:.0f}" in text
+        assert f"{waveform.occupied_bandwidth:.0f}" in text
+        assert f"{waveform.symbol_duration * 1000:.1f}" in text
+        assert "xperimental" in text
+        # Sample rate is not bandwidth; the summary states both so the two can
+        # never be read as one number.
+        assert f"{waveform.occupied_bandwidth:.0f}" != str(waveform.sample_rate)
+
+        assert dialog.ofdm_summary.objectName() == "Metadata"
+        assert dialog.ofdm_summary.wordWrap()
+        widgets = set(dialog.findChildren(QSpinBox)) | set(
+            dialog.findChildren(QComboBox)
+        )
+        assert dialog.ofdm_summary not in widgets
+        # The geometry is readable prose in the summary and nowhere else: no
+        # row caption offers FFT size or cyclic prefix as something to change.
+        captions = {
+            label.text()
+            for label in dialog.findChildren(QLabel)
+            if label is not dialog.ofdm_summary
+        }
+        assert not any("FFT" in caption for caption in captions)
+        assert not any("prefix" in caption.lower() for caption in captions)
+    finally:
+        dialog.close()
+
+
+def test_ofdm_station_has_no_vara_blocker_anywhere(tmp_path) -> None:
+    # The condition this transport exists for: a station that never launches
+    # VARA must not be held back by an executable it will never use.
+    config = StationConfig(
+        callsign="OK7PS",
+        payload_backend="ofdm_vhf",
+        rigctld_path=str(tmp_path / "missing-rigctld.exe"),
+        vara_fm_path=str(tmp_path / "missing-VARAFM.exe"),
+        vara_hf_path=str(tmp_path / "missing-VARA.exe"),
+    )
+    by_kind = {status.kind: status for status in inspect_dependencies(config)}
+
+    # Every kind keeps a row -- "not needed" is reported, not hidden.
+    assert set(by_kind) == set(DependencyKind)
+    assert not by_kind[DependencyKind.VARA_FM].required
+    assert not by_kind[DependencyKind.VARA_HF].required
+    # Hamlib is not VARA's dependency: the OFDM modem keys the radio itself.
+    assert by_kind[DependencyKind.HAMLIB].required
+    # The vendor installer stays reachable for an operator who switches back.
+    assert by_kind[DependencyKind.VARA_FM].can_install
+    assert by_kind[DependencyKind.VARA_FM].official_url
+
+
+def test_vara_station_still_requires_its_vara_executables(tmp_path) -> None:
+    config = StationConfig(
+        callsign="OK7PS",
+        vara_fm_path=str(tmp_path / "missing-VARAFM.exe"),
+        vara_hf_path=str(tmp_path / "missing-VARA.exe"),
+    )
+    by_kind = {status.kind: status for status in inspect_dependencies(config)}
+    assert by_kind[DependencyKind.VARA_FM].required
+    assert by_kind[DependencyKind.VARA_HF].required
+    assert not by_kind[DependencyKind.VARA_FM].available
+
+
+def test_readiness_verdict_follows_the_payload_workflow(tmp_path) -> None:
+    # An OFDM station used to read "not ready" forever, because the verdict
+    # indexed the VARA row for the active flavour whatever carried the payload.
+    _application()
+    settings = QSettings(
+        str(tmp_path / "ofdm-readiness.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    runtime.config.callsign = "OK7PS"
+    runtime.config.radio_backend = "vox"
+    runtime.config.payload_backend = "ofdm_vhf"
+    runtime.config.vara_fm_path = str(tmp_path / "missing-VARAFM.exe")
+    runtime.config.vara_hf_path = str(tmp_path / "missing-VARA.exe")
+    runtime.dependency_statuses = inspect_dependencies(runtime.config)
+    dialog = ReadinessDialog(runtime, settings)
+    try:
+        dialog._scan_pending = False
+        dialog._render()
+        texts = {label.text() for label in dialog.findChildren(QLabel)}
+        assert dialog.summary.property("statusRole") == "success", dialog.summary.text()
+        assert any("Not needed" in text for text in texts)
+        assert any(
+            "Not needed by the selected payload workflow" in text
+            for text in texts
+        )
+        # The vendor download stays one click away for a later switch back.
+        buttons = {button.text() for button in dialog.findChildren(QPushButton)}
+        assert "Download and install…" in buttons
+
+        # The same missing executable becomes a blocker again under VARA P2P.
+        runtime.config.payload_backend = "vara_p2p"
+        runtime.dependency_statuses = inspect_dependencies(runtime.config)
+        dialog._render()
+        assert dialog.summary.property("statusRole") == "warning"
+        assert any(
+            "◆ " + tr("common.missing") == label.text()
+            for label in dialog.findChildren(QLabel)
+        )
+    finally:
+        dialog.close()
         runtime.close()

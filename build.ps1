@@ -14,7 +14,7 @@ if (-not $python) {
 }
 $spec = Join-Path $root "Guardian.spec"
 $versionInfo = Join-Path $root "build\version_info.txt"
-$executable = Join-Path $root "dist\Guardian\Guardian.exe"
+$executable = Join-Path $root "dist\Guardian-G2\Guardian-G2.exe"
 $buildTemp = Join-Path $root ".build-temp"
 
 if (-not $python -or -not (Test-Path -LiteralPath $python)) {
@@ -45,7 +45,9 @@ try {
     }
 
     Write-Host "Generating application icon and Windows version metadata..." -ForegroundColor Cyan
-    & $python -c "from guardian.assets.icon import ensure_ico; from pathlib import Path; ensure_ico(Path(r'guardian/assets/guardian.ico'))"
+    # overwrite: the working tree may hold an .ico from an older revision of the
+    # artwork, and PyInstaller and Inno Setup would ship it unchanged.
+    & $python -c "from guardian.assets.icon import ensure_ico; from pathlib import Path; ensure_ico(Path(r'guardian/assets/guardian.ico'), overwrite=True)"
     if ($LASTEXITCODE -ne 0) { throw "Application icon generation failed." }
     & $python tools\write_version_info.py --output $versionInfo
     if ($LASTEXITCODE -ne 0) { throw "Version metadata generation failed." }
@@ -54,12 +56,12 @@ try {
     & $python -m PyInstaller --noconfirm --clean $spec
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
     if (-not (Test-Path -LiteralPath $executable)) {
-        throw "PyInstaller completed without producing Guardian.exe."
+        throw "PyInstaller completed without producing Guardian-G2.exe."
     }
 
     $version = & $python -c "from guardian import __version__; print(__version__)"
     $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-    Write-Host "Build complete: dist\Guardian\Guardian.exe" -ForegroundColor Green
+    Write-Host "Build complete: dist\Guardian-G2\Guardian-G2.exe" -ForegroundColor Green
     Write-Host "Version: $version" -ForegroundColor DarkGray
     Write-Host "SHA-256: $hash" -ForegroundColor DarkGray
 } finally {

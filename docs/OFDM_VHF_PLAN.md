@@ -1,8 +1,17 @@
 # Guardian OFDM VHF — Implementation Plan for G2.0.1
 
-Status: **ACTIVE PLANNING DOCUMENT** — this file and [OriginalPrompt.md](OriginalPrompt.md)
-are the two authoritative inputs for the `ofdm_vhf` development effort on the
-private **G2** line. Update this file as decisions are made; do not let it rot.
+Status: **DELIVERED in 2.0.1.** This file is kept as the record of what was
+planned and why. For what the modem actually is, what it measured, what it does
+not do and how to take it to a radio, read **[ofdm-vhf.md](ofdm-vhf.md)** — that
+is the living document. The original task statement is
+[OriginalPrompt.md](OriginalPrompt.md).
+
+Where the implementation departed from this plan, the plan was wrong and the
+reasons are recorded in §13 below. The headline ones: the interleaver is a
+multiplicative stride rather than a block interleaver, acquisition filters to the
+occupied band before correlating, the Schmidl-Cox metric is normalised by both
+windows instead of one, and the frequency offset is refined in the bin domain
+rather than from the preamble.
 
 - Original task statement: [docs/OriginalPrompt.md](OriginalPrompt.md)
 - Target: release **G2.0.1** (`guardian/_version.py` → `"2.0.1"`), built locally
@@ -769,3 +778,105 @@ still hard-codes the public `-ReleaseBaseUrl`).
       occupied RF bandwidth and that no over-the-air rates are claimed.
 - [ ] `_version.py == "2.0.1"`, `docs/RELEASE_NOTES_2.0.1.md` exists, local
       build + installer produced from the tagged commit on `g2`.
+
+---
+
+## 13. Where the implementation departed from this plan
+
+Recorded because each of these was a plan that turned out to be wrong when
+measured, and the reasons are worth keeping.
+
+**The interleaver (§4.4).** The plan specified a block interleaver, write rows /
+read columns. The implementation is a single multiplicative stride,
+`out[(i·s) mod n] = in[i]`, with `s` near `n/φ` and coprime to `n`. The block
+interleaver put consecutive coded bits into consecutive OFDM symbols on the *same*
+carrier, which is exactly the wrong answer for a notch — the impairment the
+interleaver exists to survive. The stride separates them in both symbol and
+carrier, and because the symbol length divides the block length, a dead carrier
+provably maps to arithmetic progressions in the coded stream rather than a clump.
+Measured worst-case separations are in `interleaving.py`.
+
+**Acquisition bandwidth.** Not in the plan at all, and worth about 10 dB. Every
+time-domain step of acquisition originally saw the whole 24 kHz audio band while
+the burst occupied a tenth of it, so a burst at 8 dB in-band SNR presented about
+−2 dB to the detector and was simply not found — even though the demodulator
+downstream would have decoded it comfortably, because the FFT it works from
+discards out-of-band bins for free. Acquisition now runs on a band-limited copy.
+The demodulator deliberately does **not** get that copy: a brick wall across a
+burst clips the skirts its own symbol boundaries produce, which is inter-symbol
+distortion the cyclic prefix was never sized for.
+
+**The Schmidl-Cox normalisation (§5.2).** The plan used the textbook
+`M = |P|²/R²`, normalising by the second window's energy alone. That is unbounded
+at the *trailing* edge of a burst, where a loud first half meets a quiet second
+one: the metric reached 45 there, forty-five times higher than a real burst can
+score, and the detector locked onto the end of every strong burst. Dividing by the
+product of both windows makes it a correlation coefficient bounded at 1.
+
+**An energy gate, which the plan did not anticipate.** A normalised metric is
+blind to amplitude. Band-limiting leaves the guard intervals holding a faint
+filter tail which is very nearly a sine wave and therefore correlates with itself
+beautifully — it scored 0.94 on silence 40 dB below the burst beside it. A
+candidate must now carry a quarter of the buffer's loudest window energy.
+
+**The frequency-offset estimate (§5.3).** The plan took `ε̂ = angle(P)/π` from the
+preamble and stopped. That leaves a residual, because the correlation window only
+partly overlaps the repetition and because the Hilbert transform behind the
+analytic signal is not local — the two halves of a preamble symbol pick up
+different contributions from the rest of the burst however exactly they are
+aligned. The residual showed up as an artificial ~55 dB ceiling on the reported SNR
+of a perfectly clean channel. The offset is now refined in the bin domain from the
+phase the second training symbol accumulated relative to the first, where an FFT
+has no edge effects to bias it. The preamble still does the coarse work, because
+the bin-domain measurement wraps outside ±20.8 Hz and the preamble is unambiguous
+across a whole subcarrier spacing.
+
+**Fine timing (§5.2).** The plan correlated against "the known preamble"; the
+implementation matched-filters against the whole burst head, every preamble and
+training symbol concatenated. Two reasons. The training symbols are identical to
+each other, so one of them correlates equally well at either position and the frame
+would land a symbol out roughly half the time. And the head is the longest known
+sequence in the burst, which is where the timing precision comes from at low SNR.
+
+**The detection threshold (§5.2).** Planned as 0.25 with the rationale that it is
+what a 0 dB burst produces. Measured over forty 3-second buffers of band-limited
+noise, that accepted noise as a burst in 40% of buffers. Raised to 0.40, which
+accepted none and still detects about 2.5 dB below the point where the decoder
+gives up. `decode_burst` also works up to four candidate positions in a buffer, so
+a false alarm earlier than the real burst can no longer lose an exchange.
+
+**Two training symbols are mandatory, not optional (§4.1).** The plan allowed
+1–2. Validation now requires 2, because differencing them is the only honest
+source of a noise measurement — with one there is nothing to subtract and every
+SNR the receiver reported would be a guess.
+
+**Throughput is measured from airtime, not wall clock (§7).** `est_bitrate_bps`
+first measured wall-clock and therefore reported 37 kbit/s in simulation, where a
+burst is handed over instantly. Channel occupancy — airtime in both directions plus
+a turnaround per change of direction — is the same quantity on air and in
+simulation, and is what the radios really spend.
+
+**`config.ofdm_settings()` was not built (§8.3).** It would have made
+`guardian/config.py` depend on `guardian.ofdm` and therefore on numpy, and that
+module is deliberately dependency-free. The backend resolves the profile name
+itself; `ofdm.config.profile_or_default` is the shared helper for the GUI and
+readiness.
+
+**`NegotiatedPayload` was added (§8.4).** The plan said the agreed transport would
+be "consumed by Operations when constructing/looking up the backend for that
+transfer" without saying how. A station configured for OFDM needs both backends
+available at once, because whether a given hop uses OFDM is not known until that
+hop's ACK arrives. A station configured for VARA is not wrapped at all, so the path
+that has been on air for releases is untouched.
+
+**Viterbi vectorisation happened (§11 risk 1), and was necessary.** The mitigation
+the plan held in reserve turned out to be required rather than optional: a 512-byte
+block is ~8.2k coded bits, and the per-state Python loop dominated everything. The
+vectorised trellis decodes one in about 36 ms. Equivalence with the previous
+implementation was verified across 55 trials including tie-heavy pure noise, so the
+tie-breaking rule is provably unchanged and the MFSK control modem is unaffected.
+
+**One echo result contradicted the plan's assumption.** An echo at three times the
+cyclic prefix decodes, while one at twice the prefix does not. That is geometry
+rather than robustness and is not something to rely on; `docs/ofdm-vhf.md` records
+it as measured behaviour so it does not get mistaken for a guarantee.

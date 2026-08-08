@@ -139,6 +139,7 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "readiness.component": ("Component", "Součást"),
     "readiness.state": ("State", "Stav"),
     "readiness.detail": ("Detail", "Podrobnosti"),
+    "readiness.not_required": ("Not needed", "Není potřeba"),
     "readiness.hint": (
         "Use Tools > Station readiness to locate or install missing components.",
         "Chybějící součásti vyhledejte nebo nainstalujte přes Provoz > "
@@ -231,6 +232,40 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "ready.payload_detail": (
         "Uses the shared ARDOS session and payload controller",
         "Používá společný řadič relací a přenosu ARDOS",
+    ),
+    # Guardian OFDM VHF needs no vendor modem, so the home table trades the
+    # VARA endpoint row for what this transport actually depends on: the two
+    # audio devices, something that keys the radio, and the waveform profile.
+    "ready.audio_rx": ("Radio audio in (RX)", "Zvuk z rádia (příjem)"),
+    "ready.audio_tx": ("Radio audio out (TX)", "Zvuk do rádia (vysílání)"),
+    "ready.no_audio_device": (
+        "No device selected in Station settings ▸ Audio",
+        "V Nastavení stanice ▸ Zvuk není vybráno zařízení",
+    ),
+    "ready.audio_unresolved": (
+        "Selected device was not found on this computer: {name}",
+        "Vybrané zařízení nebylo v tomto počítači nalezeno: {name}",
+    ),
+    "ready.keying": ("Transmit keying", "Klíčování vysílače"),
+    "ready.keying_cat": (
+        "Guardian keys the radio through Hamlib ({ptt})",
+        "Guardian klíčuje rádio přes Hamlib ({ptt})",
+    ),
+    "ready.keying_vox": (
+        "Serial PTT line {line}",
+        "Sériová linka PTT {line}",
+    ),
+    "ready.keying_missing": (
+        "The OFDM modem keys the radio itself — configure radio control first",
+        "Modem OFDM klíčuje rádio sám — nejprve nastavte řízení rádia",
+    ),
+    "ready.ofdm_profile": ("OFDM waveform", "Vlnový průběh OFDM"),
+    "ready.experimental": ("Experimental", "Experimentální"),
+    "ready.ofdm_profile_detail": (
+        "{profile}, about {bandwidth} Hz occupied — bench profile, not yet "
+        "measured on the air",
+        "{profile}, zabírá asi {bandwidth} Hz — laboratorní profil, dosud "
+        "neměřený na pásmu",
     ),
     # Mail
     "mail.title": ("Mail", "Pošta"),
@@ -941,7 +976,11 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Nejprve nastavení rádia uložte nebo použijte — test klíčuje rádio, "
         "které Guardian skutečně používá, ne hodnoty zobrazené zde.",
     ),
-    "settings.vara": ("VARA & payload", "VARA a přenos"),
+    # The key keeps the name it was born with: renaming it to settings.payload
+    # would touch every call site and the help text for no operator benefit.
+    # The wording is what an operator reads, and the page now hosts two data
+    # modems, not just VARA.
+    "settings.vara": ("Payload & data modem", "Přenos a datový modem"),
     "settings.network": ("Network behavior", "Chování sítě"),
     "settings.separate_working_channels": (
         "Use separate VARA working channels (advanced, CAT only)",

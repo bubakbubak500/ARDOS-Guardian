@@ -55,6 +55,8 @@ jobs:
       - name: Build installer and update manifest
         shell: pwsh
         run: |
+          # NOTE: this base URL still points at the public G1 repository. Actions
+          # is disabled on G2; fix the URL before re-enabling it (see G2.md).
           .\build_installer.ps1 `
             -Compiler "${{ steps.tools.outputs.iscc }}" `
             -ReleaseBaseUrl "https://github.com/bubakbubak500/ARDOS-Guardian/releases/latest/download"
@@ -63,14 +65,14 @@ jobs:
         shell: pwsh
         run: |
           $version = python -c "from guardian import __version__; print(__version__)"
-          $installer = "release\Guardian-$version-setup-win-x64.exe"
+          $installer = "release\Guardian-G2-$version-setup-win-x64.exe"
           $signature = Get-AuthenticodeSignature -FilePath $installer
           if ($signature.Status -ne "NotSigned") {
             throw "Unexpected installer signing state: $($signature.Status)"
           }
-          Compress-Archive -Path "dist\Guardian\*" `
-            -DestinationPath "release\Guardian-$version-win-x64.zip"
-          Get-ChildItem "release\Guardian-$version-*" |
+          Compress-Archive -Path "dist\Guardian-G2\*" `
+            -DestinationPath "release\Guardian-G2-$version-win-x64.zip"
+          Get-ChildItem "release\Guardian-G2-$version-*" |
             Get-FileHash -Algorithm SHA256 |
             ForEach-Object {
               "$($_.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($_.Path))"
@@ -82,8 +84,8 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: |
-            release/Guardian-*-setup-win-x64.exe
-            release/Guardian-*-win-x64.zip
+            release/Guardian-G2-*-setup-win-x64.exe
+            release/Guardian-G2-*-win-x64.zip
 
       - name: Publish GitHub Release
         shell: pwsh
@@ -96,11 +98,11 @@ jobs:
             throw "Release notes are missing: $notes"
           }
           gh release create "${{ github.ref_name }}" `
-            "release\Guardian-$version-setup-win-x64.exe" `
-            "release\Guardian-$version-win-x64.zip" `
+            "release\Guardian-G2-$version-setup-win-x64.exe" `
+            "release\Guardian-G2-$version-win-x64.zip" `
             "release\release-manifest.json" `
             "release\SHA256SUMS.txt" `
-            --title "Guardian $version" `
+            --title "Guardian G2 $version" `
             --notes-file $notes `
             --latest `
             --verify-tag

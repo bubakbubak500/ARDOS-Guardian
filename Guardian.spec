@@ -1,5 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Portable PyInstaller definition for the Guardian Windows application."""
+"""Portable PyInstaller definition for the Guardian Windows application.
+
+The G2 line builds as Guardian-G2.exe into dist\\Guardian-G2 so it can be
+installed and run next to a public G1 Guardian on the same machine.
+"""
 
 from pathlib import Path
 
@@ -42,7 +46,7 @@ exe = EXE(
     analysis.scripts,
     [],
     exclude_binaries=True,
-    name="Guardian",
+    name="Guardian-G2",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -64,5 +68,5 @@ collection = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="Guardian",
+    name="Guardian-G2",
 )

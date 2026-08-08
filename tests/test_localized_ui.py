@@ -3,10 +3,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QLineEdit, QPlainTextEdit
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPlainTextEdit
 
 from guardian.config import StationConfig
-from guardian.i18n import Language, set_language
+from guardian.i18n import Language, TRANSLATIONS, set_language
 from guardian.message.forms import FORMS
 from guardian.qt.help_dialog import HelpDialog, help_topics
 from guardian.qt.mail_workspace import ComposeDialog
@@ -134,4 +134,106 @@ def test_help_is_detailed_searchable_and_bilingual() -> None:
         )
     finally:
         dialog.close()
+        set_language(Language.ENGLISH)
+
+
+def test_payload_page_is_bilingual_in_both_directions() -> None:
+    # The page used to describe VARA only; it now hosts two data modems and the
+    # experimental one has to say so in whichever language the operator reads.
+    _application()
+    config = StationConfig(callsign="OK7PS", payload_backend="ofdm_vhf")
+
+    set_language(Language.ENGLISH)
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        titles = [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())]
+        assert "Payload & data modem" in titles
+        assert dialog.payload_backend.itemText(0) == "Guardian VARA P2P"
+        assert (
+            dialog.payload_backend.itemText(1)
+            == "Guardian OFDM VHF (Experimental)"
+        )
+        summary = dialog.ofdm_summary.text()
+        assert "experimental" in summary
+        assert "sample rate" in summary
+        captions = {label.text() for label in dialog.findChildren(QLabel)}
+        assert "OFDM modulation (MCS)" in captions
+        assert "Keying lead before transmit" in captions
+    finally:
+        dialog.close()
+
+    set_language(Language.CZECH)
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        titles = [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())]
+        assert "Přenos a datový modem" in titles
+        assert (
+            dialog.payload_backend.itemText(1)
+            == "Guardian OFDM VHF (Experimentální)"
+        )
+        summary = dialog.ofdm_summary.text()
+        assert "experimentální" in summary
+        assert "vzorkování" in summary
+        assert "nosných" in summary
+        captions = {label.text() for label in dialog.findChildren(QLabel)}
+        assert "Modulace OFDM (MCS)" in captions
+        assert "Předstih klíčování" in captions
+        assert "Použitý vlnový průběh" in captions
+    finally:
+        dialog.close()
+        set_language(Language.ENGLISH)
+
+
+def test_ofdm_readiness_rows_and_keys_exist_in_both_languages(tmp_path) -> None:
+    _application()
+    for key in (
+        "ready.audio_rx",
+        "ready.audio_tx",
+        "ready.no_audio_device",
+        "ready.audio_unresolved",
+        "ready.keying",
+        "ready.keying_cat",
+        "ready.keying_vox",
+        "ready.keying_missing",
+        "ready.ofdm_profile",
+        "ready.ofdm_profile_detail",
+        "ready.experimental",
+        "readiness.not_required",
+        "settings.vara",
+    ):
+        assert key in TRANSLATIONS, key
+        english, czech = TRANSLATIONS[key]
+        assert english and czech and english != czech, key
+
+    set_language(Language.CZECH)
+    settings = QSettings(
+        str(tmp_path / "ofdm-czech.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    runtime.config.callsign = "OK7PS"
+    runtime.config.payload_backend = "ofdm_vhf"
+    runtime.config.radio_backend = "vox"
+    runtime.config.ptt_line = "RTS"
+    window = GuardianMainWindow(runtime, settings)
+    try:
+        window._apply_snapshot(runtime.snapshots.read())
+        table = [
+            (
+                window.readiness.topLevelItem(index).text(0),
+                window.readiness.topLevelItem(index).text(2),
+            )
+            for index in range(window.readiness.topLevelItemCount())
+        ]
+        components = [component for component, _ in table]
+        assert "Zvuk z rádia (příjem)" in components
+        assert "Zvuk do rádia (vysílání)" in components
+        assert "Klíčování vysílače" in components
+        assert "Vlnový průběh OFDM" in components
+        details = [detail for _, detail in table]
+        assert any("Sériová linka PTT RTS" == detail for detail in details)
+        assert any("neměřený na pásmu" in detail for detail in details)
+    finally:
+        window.close()
+        runtime.close()
         set_language(Language.ENGLISH)

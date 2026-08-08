@@ -31,6 +31,8 @@ from ..i18n import Language, dual, language, set_language, tr
 from ..install.dependencies import find_vara_fm, find_vara_hf
 from ..install.hamlib_installer import existing_rigctld
 from ..modem.audio import match_device_name, scan_audio_devices
+from ..ofdm import MCS_TABLE
+from ..ofdm.config import profile_or_default
 from ..protocol import MAX_PTT_DELAY_MS, PTT_DELAY_STEP_MS
 from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.usb_serial import list_serial_ports, port_device
@@ -842,22 +844,37 @@ class SettingsDialog(QDialog):
         form = self._page(
             tr("settings.vara"),
             dual(
-                "Select the active VARA flavor and its ports. An empty "
-                "executable field follows detection; the grey text is the path "
-                "Guardian uses.",
-                "Zvolte variantu VARA a její porty. Prázdné pole s programem "
-                "se řídí detekcí; šedý text je cesta, kterou Guardian používá.",
+                "Choose what carries the message payload. VARA P2P drives the "
+                "vendor modem over TCP; Guardian OFDM VHF is an experimental "
+                "built-in modem that uses the soundcard and Guardian's own "
+                "keying. An empty executable field follows detection; the grey "
+                "text is the path Guardian uses.",
+                "Zvolte, co přenáší obsah zprávy. VARA P2P řídí modem "
+                "dodavatele přes TCP; Guardian OFDM VHF je experimentální "
+                "vestavěný modem, který používá zvukovou kartu a vlastní "
+                "klíčování Guardianu. Prázdné pole s programem se řídí "
+                "detekcí; šedý text je cesta, kterou Guardian používá.",
             ),
         )
         self.vara_mode = QComboBox()
         self.vara_mode.addItems(["FM", "HF"])
         self.vara_mode.setCurrentText(self.config.vara_mode)
-        # The manual Winlink hand-off was dropped in 0.6.26 once VARA P2P was
-        # proven on air. The picker stays for the next transport rather than
-        # being rebuilt from scratch.
+        # VARA P2P stays item 0: it is the default transport and the only one
+        # proven on air. The saved value is restored rather than assumed --
+        # while there was one item the hard-set index hid the fact that the
+        # dialog never read config.payload_backend back at all.
         self.payload_backend = QComboBox()
         self.payload_backend.addItem("Guardian VARA P2P", "vara_p2p")
-        self.payload_backend.setCurrentIndex(0)
+        self.payload_backend.addItem(
+            dual(
+                "Guardian OFDM VHF (Experimental)",
+                "Guardian OFDM VHF (Experimentální)",
+            ),
+            "ofdm_vhf",
+        )
+        self.payload_backend.setCurrentIndex(
+            max(0, self.payload_backend.findData(self.config.payload_backend))
+        )
         self.vara_host = QLineEdit(self.config.vara_host)
         self.vara_fm_cmd = _spin(1, 65_535, self.config.vara_fm_cmd_port)
         self.vara_fm_data = _spin(1, 65_535, self.config.vara_fm_data_port)
@@ -915,28 +932,138 @@ class SettingsDialog(QDialog):
             "Guardian reaguje na povely VARA PTT ON/OFF přes Hamlib. "
             "Nenastavujte ve VARA současně vlastnictví stejného portu COM.",
         ))
+        self._build_ofdm_widgets()
+        # Both stay visible for either payload: the VARA flavour and the
+        # control-burst modem describe the control plane, which every transport
+        # rides on, and the flavour still picks the band Guardian works in.
         form.addRow(dual("Active VARA mode", "Aktivní režim VARA"), self.vara_mode)
         form.addRow(dual("Payload workflow", "Způsob přenosu"), self.payload_backend)
-        form.addRow(dual("VARA host", "Adresa VARA"), self.vara_host)
-        form.addRow(dual("VARA FM command port", "Příkazový port VARA FM"), self.vara_fm_cmd)
-        form.addRow(dual("VARA FM data port", "Datový port VARA FM"), self.vara_fm_data)
-        form.addRow(dual("VARA FM executable", "Program VARA FM"), self.vara_fm_path)
-        form.addRow(dual("VARA HF command port", "Příkazový port VARA HF"), self.vara_hf_cmd)
-        form.addRow(dual("VARA HF data port", "Datový port VARA HF"), self.vara_hf_data)
-        form.addRow(dual("VARA HF executable", "Program VARA HF"), self.vara_hf_path)
+        self._vara_only_rows: list[tuple[QLabel | None, QWidget]] = []
+        for text, widget in (
+            (dual("VARA host", "Adresa VARA"), self.vara_host),
+            (dual("VARA FM command port", "Příkazový port VARA FM"), self.vara_fm_cmd),
+            (dual("VARA FM data port", "Datový port VARA FM"), self.vara_fm_data),
+            (dual("VARA FM executable", "Program VARA FM"), self.vara_fm_path),
+            (dual("VARA HF command port", "Příkazový port VARA HF"), self.vara_hf_cmd),
+            (dual("VARA HF data port", "Datový port VARA HF"), self.vara_hf_data),
+            (dual("VARA HF executable", "Program VARA HF"), self.vara_hf_path),
+        ):
+            label = QLabel(text)
+            form.addRow(label, widget)
+            self._vara_only_rows.append((label, widget))
         self.vara_hf_bandwidth_label = QLabel(
             dual("VARA HF bandwidth", "Šířka pásma VARA HF")
         )
         form.addRow(self.vara_hf_bandwidth_label, self.vara_hf_bandwidth)
         self.vara_mode.currentTextChanged.connect(self._sync_bandwidth_row)
-        self._sync_bandwidth_row(self.vara_mode.currentText())
+        self._ofdm_only_rows: list[tuple[QLabel | None, QWidget]] = []
+        for text, widget in (
+            (dual("OFDM modulation (MCS)", "Modulace OFDM (MCS)"), self.ofdm_mcs),
+            (
+                dual("Keying lead before transmit", "Předstih klíčování"),
+                self.ofdm_tx_lead,
+            ),
+            (
+                dual("Keying tail after transmit", "Doběh klíčování"),
+                self.ofdm_tx_tail,
+            ),
+            (
+                dual("Retransmissions per block", "Opakování jednoho bloku"),
+                self.ofdm_max_retries,
+            ),
+            (
+                dual("Waveform in use", "Použitý vlnový průběh"),
+                self.ofdm_summary,
+            ),
+        ):
+            label = QLabel(text)
+            form.addRow(label, widget)
+            self._ofdm_only_rows.append((label, widget))
         form.addRow(dual("Control-burst modem", "Modem řídicích rámců"), self.control_modem)
 
         form.addRow(self.vara_host_ptt)
+        # Guardian keying VARA is a VARA-only arrangement: the OFDM modem always
+        # keys the radio itself, so the checkbox would promise a choice there is
+        # none of. No label of its own, hence the None.
+        self._vara_only_rows.append((None, self.vara_host_ptt))
+        self.payload_backend.currentIndexChanged.connect(self._sync_payload_rows)
+        self._sync_payload_rows()
+
+    def _build_ofdm_widgets(self) -> None:
+        """Editable OFDM knobs plus a read-only view of the resolved waveform.
+
+        FFT size, cyclic prefix, carrier set and sample rate are deliberately
+        absent: the occupied RF bandwidth a VHF radio actually passes is still
+        to be measured on real radios, so changing it has to be a new profile
+        entry in guardian/ofdm/config.py -- reviewed, named and testable -- and
+        never a field an operator can drag out of a working waveform.
+        """
+        self.ofdm_mcs = QComboBox()
+        for scheme in MCS_TABLE:
+            self.ofdm_mcs.addItem(scheme.label, scheme.index)
+        self.ofdm_mcs.setCurrentIndex(
+            max(0, self.ofdm_mcs.findData(self.config.ofdm_mcs))
+        )
+        self.ofdm_tx_lead = _spin(0, 3_000, self.config.ofdm_tx_lead_ms)
+        self.ofdm_tx_lead.setSuffix(dual(" ms", " ms"))
+        self.ofdm_tx_lead.setToolTip(dual(
+            "Silence held after the transmitter is keyed, before the waveform "
+            "starts. A cheap handheld needs the whole lead or the preamble "
+            "goes out while the PA is still coming up.",
+            "Ticho po zaklíčování vysílače, než začne vlnový průběh. Levná "
+            "ručka potřebuje celý předstih, jinak preambule odejde ještě "
+            "během rozběhu koncového stupně.",
+        ))
+        self.ofdm_tx_tail = _spin(0, 2_000, self.config.ofdm_tx_tail_ms)
+        self.ofdm_tx_tail.setSuffix(dual(" ms", " ms"))
+        self.ofdm_max_retries = _spin(0, 20, self.config.ofdm_max_retries)
+        waveform = profile_or_default(self.config.ofdm_profile)
+        low, high = waveform.occupied_band
+        self.ofdm_summary = QLabel(dual(
+            f"{waveform.name} (experimental) · sample rate "
+            f"{waveform.sample_rate} Hz · occupied {low:.0f}–{high:.0f} Hz "
+            f"({waveform.occupied_bandwidth:.0f} Hz) · FFT {waveform.fft_size} "
+            f"· cyclic prefix {waveform.cp_length} · {waveform.num_carriers} "
+            f"active carriers ({waveform.num_data_carriers} data + "
+            f"{waveform.num_pilots} pilot) · spacing "
+            f"{waveform.subcarrier_spacing:.1f} Hz · symbol "
+            f"{waveform.symbol_duration * 1000:.1f} ms",
+            f"{waveform.name} (experimentální) · vzorkování "
+            f"{waveform.sample_rate} Hz · zabírá {low:.0f}–{high:.0f} Hz "
+            f"({waveform.occupied_bandwidth:.0f} Hz) · FFT {waveform.fft_size} "
+            f"· ochranný interval {waveform.cp_length} · {waveform.num_carriers} "
+            f"aktivních nosných ({waveform.num_data_carriers} datových + "
+            f"{waveform.num_pilots} pilotních) · rozestup "
+            f"{waveform.subcarrier_spacing:.1f} Hz · symbol "
+            f"{waveform.symbol_duration * 1000:.1f} ms",
+        ))
+        self.ofdm_summary.setObjectName("Metadata")
+        self.ofdm_summary.setWordWrap(True)
+
+    def _sync_payload_rows(self) -> None:
+        """Show only the rows the selected payload transport actually uses.
+
+        A station on OFDM VHF never launches VARA, so leaving four TCP ports and
+        two executable pickers on the page invites the operator to maintain
+        settings that reach nothing.
+        """
+        ofdm = self.payload_backend.currentData() == "ofdm_vhf"
+        for label, widget in self._vara_only_rows:
+            widget.setVisible(not ofdm)
+            if label is not None:
+                label.setVisible(not ofdm)
+        for label, widget in self._ofdm_only_rows:
+            widget.setVisible(ofdm)
+            if label is not None:
+                label.setVisible(ofdm)
+        self._sync_bandwidth_row(self.vara_mode.currentText())
 
     def _sync_bandwidth_row(self, mode: str) -> None:
         """Bandwidth is a VARA HF command; hide it when the station is on FM."""
-        visible = mode.upper() == "HF"
+        visible = (
+            mode.upper() == "HF"
+            and self.payload_backend.currentData() != "ofdm_vhf"
+        )
         self.vara_hf_bandwidth.setVisible(visible)
         self.vara_hf_bandwidth_label.setVisible(visible)
 
@@ -1078,11 +1205,17 @@ class SettingsDialog(QDialog):
                     "Při řízení přes Hamlib vyberte podporovaný model rádia.",
                 )
             )
-        for label, field in (
-            ("rigctld", self.rigctld_path),
-            ("VARA FM", self.vara_fm_path),
-            ("VARA HF", self.vara_hf_path),
-        ):
+        checked_paths = [("rigctld", self.rigctld_path)]
+        # Only complain about a VARA executable the station is going to launch.
+        # The rows are hidden under OFDM VHF, so a stale path left over from a
+        # VARA setup would have refused every save with an error pointing at a
+        # field the operator cannot see.
+        if self.payload_backend.currentData() == "vara_p2p":
+            checked_paths += [
+                ("VARA FM", self.vara_fm_path),
+                ("VARA HF", self.vara_hf_path),
+            ]
+        for label, field in checked_paths:
             value = field.text()
             if value and Path(value).suffix.lower() == ".exe" and not Path(value).is_file():
                 errors.append(
@@ -1119,6 +1252,10 @@ class SettingsDialog(QDialog):
         cfg.vara_fm_path = self.vara_fm_path.text()
         cfg.vara_hf_path = self.vara_hf_path.text()
         cfg.payload_backend = self.payload_backend.currentData()
+        cfg.ofdm_mcs = int(self.ofdm_mcs.currentData())
+        cfg.ofdm_tx_lead_ms = self.ofdm_tx_lead.value()
+        cfg.ofdm_tx_tail_ms = self.ofdm_tx_tail.value()
+        cfg.ofdm_max_retries = self.ofdm_max_retries.value()
         cfg.control_modem = self.control_modem.currentData()
         cfg.vara_hf_bandwidth = self.vara_hf_bandwidth.currentData()
         cfg.vara_host_ptt = self.vara_host_ptt.isChecked()

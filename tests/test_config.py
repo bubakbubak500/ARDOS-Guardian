@@ -1,7 +1,16 @@
 import json
 from pathlib import Path
 
-from guardian.config import StationConfig
+import pytest
+
+from guardian import config as config_module
+from guardian.config import StationConfig, config_dir
+
+
+@pytest.fixture
+def fresh_seed_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-arm the once-per-process G1 seeding check for a single test."""
+    monkeypatch.setattr(config_module, "_seed_checked", False)
 
 
 def test_config_round_trip_and_ignores_unknown_keys(tmp_path: Path) -> None:
@@ -173,3 +182,77 @@ def test_vara_mode_remembers_independent_ports_and_selects_modem() -> None:
     assert (config.vara_cmd_port, config.vara_data_port) == (8300, 8301)
     config.apply_vara_mode("HF")
     assert (config.vara_cmd_port, config.vara_data_port) == (8500, 8501)
+
+
+# G2 keeps its station state in its own directory so that a G1 build installed
+# on the same machine cannot rewrite it. All of these use a monkeypatched
+# APPDATA -- never the operator's real profile.
+
+
+def test_config_dir_is_the_g2_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh_seed_check: None
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+
+    directory = config_dir()
+
+    assert directory == tmp_path / "Guardian-G2"
+    assert directory.is_dir()
+    assert not (tmp_path / "Guardian").exists()
+
+
+def test_first_run_seeds_the_station_profile_from_g1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh_seed_check: None
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    g1 = tmp_path / "Guardian"
+    g1.mkdir()
+    StationConfig(callsign="OK7PS", operator_name="Operator").save(g1 / "config.json")
+
+    seeded = StationConfig.load(config_dir() / "config.json")
+
+    assert seeded.callsign == "OK7PS"
+    assert seeded.operator_name == "Operator"
+    # Seeding copies; G1's own profile is left exactly as it was.
+    assert StationConfig.load(g1 / "config.json").callsign == "OK7PS"
+
+
+def test_seeding_happens_once_and_never_overwrites_g2_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh_seed_check: None
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    g1 = tmp_path / "Guardian"
+    g1.mkdir()
+    StationConfig(callsign="OLD").save(g1 / "config.json")
+
+    g2 = config_dir()
+    StationConfig(callsign="NEW").save(g2 / "config.json")
+    monkeypatch.setattr(config_module, "_seed_checked", False)
+
+    assert StationConfig.load(config_dir() / "config.json").callsign == "NEW"
+
+
+def test_without_a_g1_profile_nothing_is_seeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh_seed_check: None
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+
+    directory = config_dir()
+
+    assert not (directory / "config.json").exists()
+    assert StationConfig.load(directory / "config.json").callsign == "NOCALL"
+
+
+def test_the_non_windows_fallback_is_also_split_and_seeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh_seed_check: None
+) -> None:
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setattr(config_module.Path, "home", lambda: tmp_path)
+    legacy = tmp_path / ".guardian"
+    legacy.mkdir()
+    StationConfig(callsign="OK7PS").save(legacy / "config.json")
+
+    directory = config_dir()
+
+    assert directory == tmp_path / ".guardian-g2"
+    assert StationConfig.load(directory / "config.json").callsign == "OK7PS"

@@ -17,7 +17,7 @@ if (-not $python) {
     if ($pythonCommand) { $python = $pythonCommand.Source }
 }
 $script = Join-Path $root "installer\Guardian.iss"
-$application = Join-Path $root "dist\Guardian\Guardian.exe"
+$application = Join-Path $root "dist\Guardian-G2\Guardian-G2.exe"
 
 if (-not $python -or -not (Test-Path -LiteralPath $python)) {
     throw "Build Python not found. Run setup.ps1 or set GUARDIAN_BUILD_PYTHON."
@@ -59,7 +59,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Guardian installer build failed."
 }
 
-$installer = Join-Path $root "release\Guardian-$version-setup-win-x64.exe"
+$installer = Join-Path $root "release\Guardian-G2-$version-setup-win-x64.exe"
 if (-not (Test-Path -LiteralPath $installer)) {
     throw "Inno Setup completed without producing the expected installer."
 }
@@ -72,7 +72,7 @@ if ($ReleaseBaseUrl) {
     $base = $ReleaseBaseUrl.TrimEnd("/")
     $manifest = [ordered]@{
         version = $version
-        installer_url = "$base/Guardian-$version-setup-win-x64.exe"
+        installer_url = "$base/Guardian-G2-$version-setup-win-x64.exe"
         sha256 = $hash
         notes_url = "https://github.com/bubakbubak500/ARDOS-Guardian/releases/tag/v$version"
     }

@@ -22,22 +22,72 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+
+# The G2 line keeps its state apart from the public G1 line so both can be
+# installed on one machine. This is not tidiness: the two builds do not know
+# each other's settings, StationConfig.load() drops keys it does not recognise
+# and save() writes the whole dataclass back, so a single G1 launch against a
+# shared config.json would strip every G2-only setting for good.
+_G2_DIR_NAME = "Guardian-G2"
+_G1_DIR_NAME = "Guardian"
+_G2_DOTDIR_NAME = ".guardian-g2"
+_G1_DOTDIR_NAME = ".guardian"
+
+_seed_checked = False
+
+
+def _seed_from_g1(base: Path, legacy: Path) -> None:
+    """On first run, copy a G1 config.json into the empty G2 directory.
+
+    An operator moving to G2 should not have to type the station in again. It
+    happens once: as soon as G2 has a config.json of its own, the G1 file is
+    never read again, and G2 never writes back into the G1 directory.
+
+    `legacy` is always the sibling of `base` under the same root, so redirecting
+    APPDATA (as tests/conftest.py does at import time) isolates this completely
+    — the seed cannot reach into an operator's real profile from a test run.
+    """
+    global _seed_checked
+    if _seed_checked:
+        return
+    _seed_checked = True
+    try:
+        target = base / "config.json"
+        source = legacy / "config.json"
+        if target.exists() or not source.is_file():
+            return
+        shutil.copyfile(source, target)
+    except OSError:
+        # A missing or unreadable G1 profile is not a reason to fail to start.
+        pass
 
 
 def config_dir() -> Path:
     """Return the directory where Guardian keeps per-station state.
 
-    Uses %APPDATA%\\Guardian on Windows, falling back to ~/.guardian.
+    Uses %APPDATA%\\Guardian-G2 on Windows, falling back to ~/.guardian-g2.
     """
     appdata = os.environ.get("APPDATA")
-    base = Path(appdata) / "Guardian" if appdata else Path.home() / ".guardian"
+    if appdata:
+        base, legacy = Path(appdata) / _G2_DIR_NAME, Path(appdata) / _G1_DIR_NAME
+    else:
+        home = Path.home()
+        base, legacy = home / _G2_DOTDIR_NAME, home / _G1_DOTDIR_NAME
     base.mkdir(parents=True, exist_ok=True)
+    _seed_from_g1(base, legacy)
     return base
 
 
 DEFAULT_CONFIG_PATH = config_dir() / "config.json"
+
+# Transports that can move a message payload. Kept as literals here so
+# configuration stays importable from anywhere -- guardian.payload owns the
+# actual construction, and this module must not depend on it.
+PAYLOAD_BACKENDS = ("vara_p2p", "ofdm_vhf")
 
 # What a radio profile carries: exactly the fields the Radio page edits. The
 # keying delay belongs to the cable and the rig behind it, so it travels with
@@ -153,7 +203,19 @@ class StationConfig:
 
     # How the message payload is moved after the handshake. "winlink_manual"
     # was dropped in 0.6.26; a config still holding it is coerced on load.
-    payload_backend: str = "vara_p2p"  # "vara_p2p"
+    payload_backend: str = "vara_p2p"  # "vara_p2p" | "ofdm_vhf"
+
+    # Guardian OFDM VHF, experimental: a native payload modem that uses the
+    # soundcard and Guardian's own PTT instead of VARA. Only these knobs are an
+    # operator's business -- FFT size, cyclic prefix, carrier set and sample rate
+    # belong to the named profile in guardian/ofdm/config.py, because the
+    # occupied bandwidth a VHF radio actually passes is still to be measured and
+    # changing it must be a new profile entry rather than a settings dialog.
+    ofdm_profile: str = "BENCH"
+    ofdm_mcs: int = 1                  # MCS1 = QPSK, rate 1/2
+    ofdm_tx_lead_ms: int = 300         # after keying, before the waveform starts
+    ofdm_tx_tail_ms: int = 100         # after the waveform, before unkeying
+    ofdm_max_retries: int = 4          # retransmissions before a block is failed
 
     # Control-burst channel: "off" (idle) | "audio" (real RF via the radio).
     control_channel: str = "off"
@@ -192,7 +254,7 @@ class StationConfig:
     # themselves are enabled, which they are not by default.
     beacon_position: bool = True
     # Draw the raster background on the map. Tiles are fetched only for what
-    # is on screen and kept in %APPDATA%\Guardian\maps, so ground the operator
+    # is on screen and kept in %APPDATA%\Guardian-G2\maps, so ground the operator
     # has already looked at stays available with no network.
     map_background: bool = True
     # Optional operational overlays in the station map. Locator precision is
@@ -244,8 +306,11 @@ class StationConfig:
         known = {f for f in cls.__dataclass_fields__}
         clean = {k: v for k, v in data.items() if k in known}
         # The manual Winlink hand-off was removed in 0.6.26; a station whose
-        # config still selects it must not be left without a transport.
-        if clean.get("payload_backend") != "vara_p2p":
+        # config still selects it must not be left without a transport. An
+        # allowlist rather than a comparison against one name: a stored
+        # "winlink_manual", a typo or a hand edit all fall back to VARA, but a
+        # transport Guardian really has must survive a restart.
+        if clean.get("payload_backend") not in PAYLOAD_BACKENDS:
             clean["payload_backend"] = "vara_p2p"
         # A hand-edited or truncated file must not leave the profile picker
         # holding something that is not a profile.

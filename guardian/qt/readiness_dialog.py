@@ -122,6 +122,16 @@ class ReadinessDialog(QDialog):
     def _detail(self, status) -> str:
         if status.available:
             return status.detail
+        # Not every missing tool is a problem. Reporting the VARA archive as
+        # simply "not found" on a station that carries payloads with OFDM VHF
+        # sent the operator installing software the station never launches.
+        if not status.required:
+            return dual(
+                "Not needed by the selected payload workflow. Install it only "
+                "if you move this station back to that workflow.",
+                "Zvolený způsob přenosu jej nepotřebuje. Instalujte jej jen "
+                "tehdy, pokud se stanice k tomuto přenosu vrátí.",
+            )
         if status.kind == DependencyKind.HAMLIB:
             return dual(
                 "Not found. Guardian can install a verified portable build.",
@@ -149,14 +159,17 @@ class ReadinessDialog(QDialog):
             self.grid.addWidget(label, 0, column)
         for row, status in enumerate(statuses, start=1):
             self.grid.addWidget(QLabel(status.label), row, 0)
-            state = QLabel(
-                ("● " + tr("common.ready"))
-                if status.available
-                else ("◆ " + tr("common.missing"))
-            )
-            state.setProperty(
-                "statusRole", "success" if status.available else "warning"
-            )
+            if status.available:
+                state = QLabel("● " + tr("common.ready"))
+                state.setProperty("statusRole", "success")
+            elif not status.required:
+                # A warning colour here reads as "fix me"; this row is only
+                # informational for the workflow the station is running.
+                state = QLabel("· " + tr("readiness.not_required"))
+                state.setProperty("statusRole", "inactive")
+            else:
+                state = QLabel("◆ " + tr("common.missing"))
+                state.setProperty("statusRole", "warning")
             self.grid.addWidget(state, row, 1)
             detail = QLabel(self._detail(status))
             detail.setObjectName("Metadata")
@@ -220,13 +233,19 @@ class ReadinessDialog(QDialog):
             else DependencyKind.VARA_FM
         )
         by_kind = {item.kind: item for item in statuses}
+        # The verdict asks the row itself whether it is required rather than
+        # assuming VARA. Before that it read "not ready" forever on an OFDM
+        # VHF station, which needs no VARA executable at all.
+        payload_ready = (
+            not by_kind[selected].required or by_kind[selected].available
+        )
         station_ready = (
             cfg.callsign != "NOCALL"
             and (
                 cfg.radio_backend != "hamlib"
                 or by_kind[DependencyKind.HAMLIB].available
             )
-            and by_kind[selected].available
+            and payload_ready
         )
         self.summary.setProperty(
             "statusRole", "success" if station_ready else "warning"
@@ -240,10 +259,10 @@ class ReadinessDialog(QDialog):
             if station_ready
             else "◆ "
             + dual(
-                "Complete the station identity and selected VARA dependency "
-                "before normal operation.",
-                "Před běžným provozem doplňte identitu stanice a zvolenou "
-                "závislost VARA.",
+                "Complete the station identity and the components the selected "
+                "workflow needs before normal operation.",
+                "Před běžným provozem doplňte identitu stanice a součásti, "
+                "které zvolený způsob práce potřebuje.",
             )
         )
 

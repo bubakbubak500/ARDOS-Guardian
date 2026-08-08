@@ -97,6 +97,9 @@ class Flags(IntFlag):
     ENCRYPTED = 0x01
     COMPRESSED = 0x02
     ACK_REQUIRED = 0x04
+    # Bit 6: "I am configured for the Guardian OFDM VHF payload transport."
+    # See OFDM_PAYLOAD below. Bit 7 (0x80) remains free.
+    OFDM_PAYLOAD = 0x40
 
 
 # Bits 3-5 of the flags byte: a slow-keying request for the VARA FM payload
@@ -125,6 +128,42 @@ def encode_ptt_delay(flags: Flags | int, delay_ms: int) -> Flags:
 def decode_ptt_delay(flags: Flags | int) -> int:
     """The slow-keying request carried in `flags`, in milliseconds."""
     return ((int(flags) >> _PTT_DELAY_SHIFT) & _PTT_DELAY_BITS) * PTT_DELAY_STEP_MS
+
+
+# Bit 6 of the flags byte: this station is configured for the Guardian OFDM VHF
+# payload transport. The wire format is untouched -- it rides inside the existing
+# flags byte of HAVE_MSG/ACK_HAVE, exactly as the slow-keying field does.
+#
+# The point of it is safety rather than capability advertising. START_VARA keeps
+# its numeric identity and now means "begin the negotiated payload phase", which
+# is only sound if there is no way for one station to play OFDM at a peer that is
+# listening for VARA. Both stations therefore have to say so: the initiator sets
+# the bit in HAVE_MSG, and the responder sets it in ACK_HAVE only if it is
+# independently configured the same way. A release that predates this never sets
+# it, keeps unknown flag bits intact on decode (IntFlag KEEP) and simply echoes
+# them back -- so a mixed pair degrades to VARA before START_VARA is ever sent,
+# and the degradation happens on the control channel where both ends can see it.
+#
+# One bit is enough while there are exactly two transports. Negotiating several,
+# or their parameters, wants the WORKING_OFFER/WORKING_ACK token pattern instead;
+# docs/ofdm-vhf.md records that design.
+OFDM_PAYLOAD_BIT = Flags.OFDM_PAYLOAD
+
+
+def encode_ofdm_capable(flags: Flags | int, capable: bool) -> Flags:
+    """Set or clear the OFDM-capability bit in `flags`.
+
+    Overwriting rather than merging, for the same reason `encode_ptt_delay`
+    overwrites: a relay must announce its own configuration on the next leg, not
+    forward what the previous hop happened to be running.
+    """
+    cleared = int(flags) & ~int(Flags.OFDM_PAYLOAD)
+    return Flags(cleared | (int(Flags.OFDM_PAYLOAD) if capable else 0))
+
+
+def decode_ofdm_capable(flags: Flags | int) -> bool:
+    """Whether `flags` claims the Guardian OFDM VHF transport."""
+    return bool(int(flags) & int(Flags.OFDM_PAYLOAD))
 
 
 def crc16(data: bytes) -> int:

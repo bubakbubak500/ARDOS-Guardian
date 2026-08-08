@@ -40,8 +40,10 @@ from ..protocol import (
     Priority,
     alert_kind,
     crc16,
+    decode_ofdm_capable,
     decode_ptt_delay,
     encode_alert,
+    encode_ofdm_capable,
     encode_ptt_delay,
 )
 from ..routing import (
@@ -251,6 +253,10 @@ class Message:
     # Slow-keying PTT tail (ms) negotiated for the VARA payload phase: the
     # larger of what we and the peer asked for in HAVE_MSG/ACK_HAVE.
     ptt_delay_ms: int = 0
+    # Which transport the payload phase agreed on, for this hop only. Both
+    # stations must independently claim the experimental one or it stays VARA;
+    # see the OFDM_PAYLOAD notes in protocol/frames.py.
+    payload_transport: str = "vara_p2p"
     working_frequency_hz: int = 0
     working_mode: str = ""
     working_token: str = ""
@@ -332,6 +338,10 @@ class Orchestrator:
         # asked at call time so a mode change needs no rebuild. The owner sets
         # it only when it applies (VARA FM, operator configured a delay).
         self.ptt_delay_request: Callable[[], int] | None = None
+        # Whether this station is configured for the experimental OFDM payload
+        # transport, asked at call time so a settings change needs no rebuild.
+        # Left None by an owner that has no such transport, which reads as "no".
+        self.ofdm_payload_request: Callable[[], bool] | None = None
         # This station's Maidenhead locator for the beacon, or "" to keep the
         # position off the air. Asked at beacon time so a change in Settings
         # needs no rebuild.
@@ -395,7 +405,8 @@ class Orchestrator:
         msg = Message(
             msg_id=msg_id, source=self.callsign, final_dest=final_dest,
             next_hop="", priority=priority, ttl=ttl,
-            flags=encode_ptt_delay(flags, own_delay),
+            flags=encode_ofdm_capable(encode_ptt_delay(flags, own_delay),
+                                      self._own_ofdm_capable()),
             body=body, payload_bytes=payload_bytes, direction="out",
         )
         msg.ptt_delay_ms = own_delay
@@ -427,6 +438,15 @@ class Orchestrator:
             return max(0, int(self.ptt_delay_request()))
         except Exception:       # noqa: BLE001 - a config fault must not stop mail
             return 0
+
+    def _own_ofdm_capable(self) -> bool:
+        """Whether this station is configured for the OFDM payload transport."""
+        if self.ofdm_payload_request is None:
+            return False
+        try:
+            return bool(self.ofdm_payload_request())
+        except Exception:       # noqa: BLE001 - a config fault must not stop mail
+            return False
 
     def _resolve_next_hop(
         self,
@@ -651,8 +671,10 @@ class Orchestrator:
             final_dest=inbound.final_dest, next_hop="",
             priority=inbound.priority, ttl=inbound.ttl - 1,
             # The delay negotiated on the previous hop belongs to that pair of
-            # radios; the next leg starts over from our own request.
-            flags=encode_ptt_delay(inbound.flags, own_delay),
+            # radios, and so does the transport they settled on; the next leg
+            # starts over from our own configuration.
+            flags=encode_ofdm_capable(encode_ptt_delay(inbound.flags, own_delay),
+                                      self._own_ofdm_capable()),
             body=inbound.body,
             payload_bytes=inbound.payload_bytes, direction="out",
             previous_hop=inbound.source,
@@ -1002,13 +1024,20 @@ class Orchestrator:
         # two requests, and our ACK carries the result back so both stations
         # key with the same hold-off.
         negotiated = max(decode_ptt_delay(f.flags), self._own_ptt_delay())
+        # Transport negotiation is an AND, not a max: the experimental modem is
+        # used only if this station is configured for it *and* the peer said it is
+        # too. Either side alone leaves the pair on VARA, so a station can never
+        # be played OFDM while it is listening for VARA.
+        agreed_ofdm = decode_ofdm_capable(f.flags) and self._own_ofdm_capable()
         msg = Message(
             msg_id=f.message_id, source=f.source, final_dest=f.destination,
             next_hop=self.callsign, priority=f.priority, ttl=f.ttl,
-            flags=encode_ptt_delay(f.flags, negotiated),
+            flags=encode_ofdm_capable(encode_ptt_delay(f.flags, negotiated),
+                                      agreed_ofdm),
             direction="in",
         )
         msg.ptt_delay_ms = negotiated
+        msg.payload_transport = "ofdm_vhf" if agreed_ofdm else "vara_p2p"
         self.sessions[f.message_id] = msg
         self._enter(msg, SessionState.HEARD)
         if self.busy:
@@ -1025,6 +1054,18 @@ class Orchestrator:
             # The responder answered with the negotiated hold-off (the larger
             # of the two requests); adopt it for our own keying too.
             msg.ptt_delay_ms = max(msg.ptt_delay_ms, decode_ptt_delay(f.flags))
+            # The responder only echoes the OFDM bit back if it is configured
+            # that way itself, so seeing it here means both sides agreed. Our own
+            # configuration is checked again rather than assumed from the
+            # announcement: settings can have changed since it went out.
+            agreed_ofdm = decode_ofdm_capable(f.flags) and self._own_ofdm_capable()
+            msg.payload_transport = "ofdm_vhf" if agreed_ofdm else "vara_p2p"
+            if not agreed_ofdm and self._own_ofdm_capable():
+                self._emit(
+                    msg,
+                    f"{f.source} is not configured for Guardian OFDM VHF — "
+                    "falling back to VARA for this transfer",
+                )
             channel = None
             if self.working_channel_offer is not None:
                 try:

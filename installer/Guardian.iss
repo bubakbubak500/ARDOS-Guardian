@@ -1,12 +1,20 @@
-#define MyAppName "Guardian"
+; G2 installs alongside the public G1 Guardian: its own AppId, name, directory,
+; Start-menu group, AppUserModelID and %APPDATA% directory, so neither product
+; can overwrite the other's files, shortcuts or uninstall entry.
+#define MyAppName "Guardian G2"
+#define MyAppDirName "Guardian-G2"
 #ifndef MyAppVersion
 #define MyAppVersion "0.1.0"
 #endif
 #define MyAppPublisher "OK7PS"
-#define MyAppExeName "Guardian.exe"
+#define MyAppExeName "Guardian-G2.exe"
+#define MyAppIcoName "Guardian-G2.ico"
+#define MyAppUserModelID "OK7PS.ARDOSGuardian.G2"
 
 [Setup]
-AppId={{CF48D1B9-ABC0-4DC5-A97E-00334B9DF040}
+; Fresh GUID for the G2 line. Never reuse G1's ({CF48D1B9-ABC0-4DC5-A97E-00334B9DF040}),
+; or installing one product would upgrade and then uninstall the other.
+AppId={{D9090316-F68C-4DAE-AF02-B433658A8F15}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
@@ -14,7 +22,7 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL=https://github.com/bubakbubak500/ARDOS-Guardian
 AppSupportURL=https://github.com/bubakbubak500/ARDOS-Guardian/issues
 AppUpdatesURL=https://github.com/bubakbubak500/ARDOS-Guardian/releases
-DefaultDirName={localappdata}\Programs\{#MyAppName}
+DefaultDirName={localappdata}\Programs\{#MyAppDirName}
 DefaultGroupName={#MyAppName}
 UsePreviousAppDir=yes
 UsePreviousGroup=yes
@@ -25,12 +33,13 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\release
-OutputBaseFilename=Guardian-{#MyAppVersion}-setup-win-x64
+OutputBaseFilename=Guardian-G2-{#MyAppVersion}-setup-win-x64
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern dynamic
 SetupIconFile=..\guardian\assets\guardian.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallDisplayName={#MyAppName} {#MyAppVersion}
 CloseApplications=yes
 RestartApplications=no
 VersionInfoVersion={#MyAppVersion}.0
@@ -40,7 +49,8 @@ VersionInfoDescription={#MyAppName} Windows installer
 SignTool=guardiansign
 SignedUninstaller=yes
 #endif
-; Operator data lives in %APPDATA%\Guardian and is deliberately preserved.
+; Operator data lives in %APPDATA%\Guardian-G2 and is deliberately preserved.
+; G1 keeps its own %APPDATA%\Guardian; the two never share a config.json.
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -76,13 +86,13 @@ czech.UpgradeDetected=Byla nalezena verze %1. Instalátor ji aktualizuje na %2 a
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\dist\Guardian\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\guardian\assets\guardian.ico"; DestDir: "{app}"; DestName: "Guardian.ico"; Flags: ignoreversion
+Source: "..\dist\{#MyAppDirName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\guardian\assets\guardian.ico"; DestDir: "{app}"; DestName: "{#MyAppIcoName}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\Guardian.ico"; AppUserModelID: "OK7PS.ARDOSGuardian"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppIcoName}"; AppUserModelID: "{#MyAppUserModelID}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\Guardian.ico"; AppUserModelID: "OK7PS.ARDOSGuardian"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppIcoName}"; AppUserModelID: "{#MyAppUserModelID}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
@@ -131,6 +141,9 @@ begin
     FileExists(ExpandConstant('{pf}\Hamlib\bin\rigctld.exe')) or
     VersionedHamlibInstalled(ExpandConstant('{pf}')) or
     FileExists(ExpandConstant('{localappdata}\Programs\Hamlib\bin\rigctld.exe')) or
+    { Guardian's own per-station copy: G2's data directory first, then a G1 one. }
+    FileExists(ExpandConstant('{userappdata}\Guardian-G2\hamlib\bin\rigctld.exe')) or
+    VersionedHamlibInstalled(ExpandConstant('{userappdata}\Guardian-G2\hamlib')) or
     FileExists(ExpandConstant('{userappdata}\Guardian\hamlib\bin\rigctld.exe')) or
     VersionedHamlibInstalled(ExpandConstant('{userappdata}\Guardian\hamlib'));
 end;
@@ -166,7 +179,9 @@ function ExistingInstallationVersion(var Version: String): Boolean;
 var
   Key: String;
 begin
-  Key := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{CF48D1B9-ABC0-4DC5-A97E-00334B9DF040}_is1';
+  { The G2 AppId only. A G1 installation is a different product and must not be
+    reported here as "an existing version" that setup is about to update. }
+  Key := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{D9090316-F68C-4DAE-AF02-B433658A8F15}_is1';
   Result :=
     RegQueryStringValue(HKCU, Key, 'DisplayVersion', Version) or
     RegQueryStringValue(HKLM, Key, 'DisplayVersion', Version);

@@ -84,7 +84,9 @@ def find_executable(name: str, explicit: str = "") -> str | None:
     if found:
         return found
     # Common Windows install locations (Hamlib zip, WSJT-X bundle, etc.) plus
-    # Guardian's own per-station install dir (%APPDATA%\Guardian\hamlib\...).
+    # Guardian's own per-station install dir (%APPDATA%\Guardian-G2\hamlib\...).
+    # A G1 installation on the same machine keeps its copy under
+    # %APPDATA%\Guardian; rigctld is external software, so reusing it is fine.
     appdata = os.environ.get("APPDATA", "")
     patterns = [
         r"C:\Program Files\hamlib*\bin",
@@ -93,10 +95,11 @@ def find_executable(name: str, explicit: str = "") -> str | None:
         r"C:\hamlib*\bin",
     ]
     if appdata:
-        patterns += [
-            os.path.join(appdata, "Guardian", "hamlib", "bin"),
-            os.path.join(appdata, "Guardian", "hamlib", "*", "bin"),
-        ]
+        for station_dir in ("Guardian-G2", "Guardian"):
+            patterns += [
+                os.path.join(appdata, station_dir, "hamlib", "bin"),
+                os.path.join(appdata, station_dir, "hamlib", "*", "bin"),
+            ]
     exe = name if name.lower().endswith(".exe") else name + ".exe"
     for pat in patterns:
         for d in glob.glob(pat):

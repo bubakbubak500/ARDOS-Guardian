@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from time import monotonic
+
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QFontDatabase, QIcon
 from PySide6.QtWidgets import (
@@ -28,6 +30,8 @@ from PySide6.QtWidgets import (
 from .. import __app_name__, __version__
 from ..assets import get_ico_path
 from ..i18n import dual, tr
+from ..modem.audio import resolve_device
+from ..ofdm.config import profile_or_default
 from ..routing import read_csv, write_csv
 from ..routing.csv_io import TEMPLATE_ROWS
 from ..radio.presets import DUMMY_MODEL
@@ -49,6 +53,19 @@ from .spectrum_window import SpectrumWindow
 from .theme import ThemeController, ThemePreference
 from .transfer_progress import TransferPanel, transfer_state
 from .update_dialog import UpdateDialog
+
+
+# What the station header and the readiness table call each transport. The
+# fall-through used to be the literal "Winlink", left over from the hand-off
+# that 0.6.26 removed -- it would have labelled an OFDM station Winlink. An
+# unknown backend now shows its own name instead of somebody else's.
+PAYLOAD_LABELS = {
+    "vara_p2p": "VARA P2P",
+    "ofdm_vhf": "OFDM VHF (exp.)",
+}
+
+#: How long a device-resolution answer is trusted before PortAudio is asked again.
+_AUDIO_PROBE_SECONDS = 10.0
 
 
 def _repolish(widget: QWidget) -> None:
@@ -109,6 +126,11 @@ class GuardianMainWindow(QMainWindow):
         self.setWindowIcon(QIcon(str(get_ico_path())))
         self.setMinimumSize(1180, 720)
         self.resize(1366, 768)
+
+        # (name, kind) -> (when, available). The home table asks whether the
+        # audio devices resolve, and asking PortAudio that twice a second on the
+        # UI thread is not free.
+        self._audio_probe: dict[tuple[str, str], tuple[float, bool]] = {}
 
         self._build_menu()
         self._build_shell()
@@ -587,10 +609,8 @@ class GuardianMainWindow(QMainWindow):
         self.manual_frequency_row.setVisible(no_cat)
         if no_cat and not self.manual_frequency.hasFocus():
             self.manual_frequency.setValue(int(config.manual_frequency_hz or 0))
-        payload = (
-            "VARA P2P"
-            if config.payload_backend == "vara_p2p"
-            else "Winlink"
+        payload = PAYLOAD_LABELS.get(
+            config.payload_backend, config.payload_backend
         )
         self.context_value.setText(
             f"{config.callsign or 'NOCALL'}  ·  {config.vara_mode}  ·  {payload}"
@@ -727,22 +747,101 @@ class GuardianMainWindow(QMainWindow):
                 else tr("common.missing"),
                 dependency.hamlib_path or tr("ready.hamlib_guidance"),
             ),
-            (
-                f"VARA {config.vara_mode}",
-                tr("ready.endpoint"),
-                f"{config.vara_host}:{config.vara_cmd_port}",
-            ),
+        ]
+        # A VARA TCP endpoint says nothing about a station whose payload never
+        # goes near VARA, so each transport reports what it actually depends on.
+        if config.payload_backend == "ofdm_vhf":
+            rows.extend(self._ofdm_readiness_rows(config))
+        else:
+            rows.append(
+                (
+                    f"VARA {config.vara_mode}",
+                    tr("ready.endpoint"),
+                    f"{config.vara_host}:{config.vara_cmd_port}",
+                )
+            )
+        rows.append(
             (
                 tr("ready.payload"),
                 payload,
                 tr("ready.payload_detail"),
-            ),
-        ]
+            )
+        )
         self.readiness.clear()
         for component, state, detail in rows:
             self.readiness.addTopLevelItem(
                 QTreeWidgetItem([component, state, detail])
             )
+
+    def _audio_available(self, name: str, kind: str) -> bool:
+        """Does this device name resolve to an index, without asking every tick?
+
+        `resolve_device` enumerates the whole PortAudio device list; the home
+        table is rebuilt twice a second, so the answer is remembered. It expires
+        because an operator plugging the interface in mid-session must see the
+        row turn green without restarting Guardian.
+        """
+        key = (name, kind)
+        now = monotonic()
+        cached = self._audio_probe.get(key)
+        if cached is not None and now - cached[0] < _AUDIO_PROBE_SECONDS:
+            return cached[1]
+        available = isinstance(resolve_device(name, kind), int)
+        self._audio_probe[key] = (now, available)
+        return available
+
+    def _audio_readiness_row(self, component: str, name: str, kind: str):
+        """One audio row, judged by whether the name resolves to a device index.
+
+        `resolve_device` answers three different things: an int when the device
+        was found, the name back when it was not, and None when nothing is
+        selected. Only the int means Guardian can open the stream, and the two
+        failures need different advice -- treating them alike sent an operator
+        looking for a driver when no device had been picked at all.
+        """
+        if not name:
+            return (component, tr("common.not_configured"), tr("ready.no_audio_device"))
+        if self._audio_available(name, kind):
+            return (component, tr("common.available"), name)
+        return (
+            component,
+            tr("common.missing"),
+            tr("ready.audio_unresolved", name=name),
+        )
+
+    def _ofdm_readiness_rows(self, config) -> list[tuple[str, str, str]]:
+        """What Guardian OFDM VHF needs: two audio devices, keying, a waveform."""
+        if config.radio_backend == "hamlib":
+            keying = tr("ready.keying_cat", ptt=config.ptt_type)
+        elif config.radio_backend == "vox":
+            keying = tr("ready.keying_vox", line=config.ptt_line)
+        else:
+            keying = tr("ready.keying_missing")
+        waveform = profile_or_default(config.ofdm_profile)
+        return [
+            self._audio_readiness_row(
+                tr("ready.audio_rx"), config.audio_input, "input"
+            ),
+            self._audio_readiness_row(
+                tr("ready.audio_tx"), config.audio_output, "output"
+            ),
+            (
+                tr("ready.keying"),
+                tr("common.configured")
+                if config.radio_backend != "none"
+                else tr("common.not_configured"),
+                keying,
+            ),
+            (
+                tr("ready.ofdm_profile"),
+                tr("ready.experimental"),
+                tr(
+                    "ready.ofdm_profile_detail",
+                    profile=waveform.name,
+                    bandwidth=f"{waveform.occupied_bandwidth:.0f}",
+                ),
+            ),
+        ]
 
     def _show_settings(self) -> None:
         operations = self.runtime.operations

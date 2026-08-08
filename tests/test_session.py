@@ -752,3 +752,131 @@ def test_the_locator_fits_beside_even_the_longest_callsign() -> None:
         assert room % 2 == 0, callsign
         assert len(sent[0].encode()) <= MAX_CONTROL_FRAME_BYTES, callsign
         assert sent[0].destination == "JO70FB28MC"[:room], callsign
+
+
+# --- Guardian OFDM VHF transport negotiation ------------------------------- #
+#
+# START_VARA now means "begin the negotiated payload phase", which is only sound
+# if there is no way for one station to play OFDM at a peer listening for VARA.
+# These are the tests that hold that line.
+
+def _ofdm_pair(sender_capable: bool, receiver_capable: bool):
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("a"), auto_route=False)
+    receiver = Orchestrator(
+        "OK2IPW", bus.endpoint("b"), auto_complete=True, auto_route=False
+    )
+    sender.ofdm_payload_request = lambda: sender_capable
+    receiver.ofdm_payload_request = lambda: receiver_capable
+    return bus, sender, receiver
+
+
+def test_two_ofdm_stations_agree_on_the_experimental_transport() -> None:
+    bus, sender, receiver = _ofdm_pair(True, True)
+    message = sender.send_message("OK2IPW", "hi", msg_id=900, next_hop="OK2IPW")
+    _drain(bus, sender, receiver)
+
+    assert message.state is SessionState.DELIVERED
+    assert message.payload_transport == "ofdm_vhf"
+    assert receiver.sessions[900].payload_transport == "ofdm_vhf"
+
+
+@pytest.mark.parametrize("sender_capable,receiver_capable",
+                         [(True, False), (False, True), (False, False)])
+def test_a_mixed_pair_falls_back_to_vara_before_start_vara_is_sent(
+    sender_capable: bool, receiver_capable: bool
+) -> None:
+    # The safety property: one side alone is never enough. The fallback happens
+    # on the control channel, where both ends can see it, and before either has
+    # committed to a waveform.
+    bus, sender, receiver = _ofdm_pair(sender_capable, receiver_capable)
+    message = sender.send_message("OK2IPW", "hi", msg_id=901, next_hop="OK2IPW")
+    _drain(bus, sender, receiver)
+
+    assert message.state is SessionState.DELIVERED
+    assert message.payload_transport == "vara_p2p"
+    assert receiver.sessions[901].payload_transport == "vara_p2p"
+
+
+def test_a_station_with_no_ofdm_transport_at_all_behaves_exactly_as_before() -> None:
+    # `ofdm_payload_request` left unset is the shape of every release before this
+    # one, and of any station that never selected the experimental transport.
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("a"), auto_route=False)
+    receiver = Orchestrator(
+        "OK2IPW", bus.endpoint("b"), auto_complete=True, auto_route=False
+    )
+    assert sender.ofdm_payload_request is None
+
+    message = sender.send_message("OK2IPW", "hi", msg_id=902, next_hop="OK2IPW")
+    _drain(bus, sender, receiver)
+
+    assert message.payload_transport == "vara_p2p"
+    assert not Flags(message.flags) & Flags.OFDM_PAYLOAD
+
+
+def test_the_capability_bit_rides_the_existing_flags_byte() -> None:
+    from guardian.protocol import (decode_ofdm_capable, decode_ptt_delay,
+                                   encode_ofdm_capable, encode_ptt_delay)
+
+    # The wire format is untouched: the bit shares the flags byte with the
+    # slow-keying field and the ordinary flags, and none of them disturb another.
+    flags = encode_ofdm_capable(
+        encode_ptt_delay(Flags.ACK_REQUIRED | Flags.COMPRESSED, 300), True
+    )
+    frame = ControlFrame(
+        type=FrameType.HAVE_MSG, source="OK7PS", destination="OK2IPW",
+        next_hop="OK2IPW", message_id=903, flags=flags,
+    )
+    decoded = ControlFrame.decode(frame.encode())
+
+    assert decode_ofdm_capable(decoded.flags)
+    assert decode_ptt_delay(decoded.flags) == 300
+    assert decoded.flags & Flags.ACK_REQUIRED
+    assert decoded.flags & Flags.COMPRESSED
+    # Bit 7 stays free for whatever comes next.
+    assert not int(decoded.flags) & 0x80
+
+
+def test_an_old_build_echoes_the_unknown_bit_back_unchanged() -> None:
+    # IntFlag keeps bits it does not recognise, which is what makes the
+    # negotiation safe against a release that predates it: such a station cannot
+    # accidentally claim the transport, and cannot lose the bit either.
+    from guardian.protocol import decode_ofdm_capable
+
+    raw = ControlFrame(
+        type=FrameType.HAVE_MSG, source="OK7PS", destination="OK2IPW",
+        next_hop="OK2IPW", message_id=904, flags=Flags(0x40 | 0x04),
+    ).encode()
+    decoded = ControlFrame.decode(raw)
+
+    assert decode_ofdm_capable(decoded.flags)
+    assert ControlFrame.decode(decoded.encode()).flags == decoded.flags
+
+
+def test_a_relay_negotiates_its_own_transport_not_the_previous_hops() -> None:
+    # The hop A->B agreed on says nothing about B->C. B announces its own
+    # configuration on the next leg, exactly as it does for the keying delay.
+    from guardian.protocol import decode_ofdm_capable, encode_ofdm_capable
+
+    bus = LoopbackBus()
+    relay = Orchestrator("OK2IPW", bus.endpoint("b"), auto_route=False, relay=True)
+    relay.ofdm_payload_request = lambda: False
+    sent = _spy(relay)
+    relay.tick(0.0)
+    relay.heard.record("OK1AAA", 0.0)      # so the relay resolves the hop
+
+    relay._on_frame(ControlFrame(
+        type=FrameType.HAVE_MSG, source="OK7PS", destination="OK1AAA",
+        next_hop="OK2IPW", message_id=905,
+        flags=encode_ofdm_capable(Flags.NONE, True),   # A claims the transport
+    ))
+    # A said OFDM, but this station is on VARA, so the inbound hop is VARA too.
+    assert relay.sessions[905].payload_transport == "vara_p2p"
+
+    relay.sessions[905].payload_bytes = b"x" * 32
+    relay.notify_payload_delivered(905, ok=True)
+
+    onward = [frame for frame in sent if frame.type is FrameType.HAVE_MSG]
+    assert len(onward) == 1
+    assert not decode_ofdm_capable(onward[0].flags), "own configuration, not A's"

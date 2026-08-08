@@ -377,9 +377,21 @@ Once the required software and map data are present, the core messaging system o
 
 ---
 
+# Guardian OFDM VHF — a modem of Guardian's own
+
+Guardian **2.0.1** adds an experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
+
+Select it in *Settings → Payload* as **Guardian OFDM VHF (Experimental)**. VARA P2P stays the default, and an OFDM station and a VARA station can talk to each other: the two peers agree on a transport during the ordinary control handshake, and unless *both* are configured for OFDM the pair falls back to VARA before anything is transmitted.
+
+It is a real OFDM modem — BPSK through 64-QAM, forward error correction, interleaving, channel estimation, per-carrier equalisation, and stop-and-wait ARQ with retries and duplicate suppression. It reports what it measures: SNR, EVM, frequency offset, the channel response of every subcarrier.
+
+**It has not been on the air yet.** Everything measured so far was measured through a simulated channel on a PC, and the bandwidth a real VHF radio passes is still to be determined. `tools/ofdm_bench.py` runs the whole modem with no radio attached, and can write a burst to a WAV file or decode one back — which is how the first over-the-air measurements will be taken. [docs/ofdm-vhf.md](docs/ofdm-vhf.md) has the numbers, the limitations and the two-radio test procedure.
+
+---
+
 # Current status
 
-Guardian **1.0.0** is the first release where the interface and documentation have been consolidated around the radio functionality developed and tested throughout the 0.6 series.
+Guardian **1.0.0** was the first release where the interface and documentation were consolidated around the radio functionality developed and tested throughout the 0.6 series. **2.0.1** adds the OFDM transport above.
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |

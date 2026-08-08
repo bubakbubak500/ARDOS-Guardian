@@ -1,4 +1,8 @@
-"""Generate PyInstaller Windows version metadata from Guardian's one version."""
+"""Generate PyInstaller Windows version metadata from Guardian's one version.
+
+The G2 line names itself Guardian G2 / Guardian-G2.exe here so Task Manager and
+the file properties dialog tell it apart from a G1 install on the same machine.
+"""
 
 from __future__ import annotations
 
@@ -27,12 +31,12 @@ VSVersionInfo(
         '040904B0',
         [
           StringStruct('CompanyName', 'OK7PS'),
-          StringStruct('FileDescription', 'Guardian - ARDOS control and routing layer'),
+          StringStruct('FileDescription', 'Guardian G2 - ARDOS control and routing layer'),
           StringStruct('FileVersion', '{version}'),
-          StringStruct('InternalName', 'Guardian'),
+          StringStruct('InternalName', 'Guardian-G2'),
           StringStruct('LegalCopyright', 'Copyright (c) OK7PS'),
-          StringStruct('OriginalFilename', 'Guardian.exe'),
-          StringStruct('ProductName', 'Guardian'),
+          StringStruct('OriginalFilename', 'Guardian-G2.exe'),
+          StringStruct('ProductName', 'Guardian G2'),
           StringStruct('ProductVersion', '{version}')
         ]
       )

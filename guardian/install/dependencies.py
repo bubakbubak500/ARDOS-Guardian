@@ -30,6 +30,12 @@ class DependencyStatus:
     detail: str
     official_url: str | None = None
     can_install: bool = False
+    #: Whether *this* station cannot operate without the tool. Detection and
+    #: necessity are two different questions: a station carrying payloads with
+    #: Guardian OFDM VHF has no vendor modem to install, yet the row stays in
+    #: the report so the installer is still one click away if the operator
+    #: switches back to VARA P2P.
+    required: bool = True
 
 
 def _existing_file(value: str) -> str | None:
@@ -90,6 +96,11 @@ def inspect_dependencies(config: StationConfig) -> tuple[DependencyStatus, ...]:
     hamlib = hamlib_installer.existing_rigctld(config.rigctld_path)
     vara_fm = find_vara_fm(config.vara_fm_path)
     vara_hf = find_vara_hf(config.vara_hf_path)
+    # Hamlib stays required for every payload workflow: OFDM VHF keys the radio
+    # through Guardian itself, so it needs CAT/PTT just as much as VARA does.
+    # A missing VARA executable, on the other hand, cannot hold back a station
+    # that never launches VARA.
+    vara_required = config.payload_backend == "vara_p2p"
     return (
         DependencyStatus(
             DependencyKind.HAMLIB,
@@ -113,6 +124,7 @@ def inspect_dependencies(config: StationConfig) -> tuple[DependencyStatus, ...]:
             ),
             official_url=VARA_OFFICIAL_URL,
             can_install=True,
+            required=vara_required,
         ),
         DependencyStatus(
             DependencyKind.VARA_HF,
@@ -125,5 +137,6 @@ def inspect_dependencies(config: StationConfig) -> tuple[DependencyStatus, ...]:
             ),
             official_url=VARA_OFFICIAL_URL,
             can_install=True,
+            required=vara_required,
         ),
     )

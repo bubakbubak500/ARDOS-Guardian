@@ -16,6 +16,7 @@ from .message import Folder, MessageStore, Status
 from .modem import make_modem
 from .modem.audio import AudioControlTransport, resolve_device
 from .payload import make_backend
+from .payload.negotiated import NegotiatedPayload
 from .protocol import (
     MAX_CONTROL_FRAME_BYTES,
     MAX_PTT_DELAY_MS,
@@ -226,6 +227,7 @@ class Operations:
         net.on_discovery_event = self._on_discovery_event
         net.channel_frequency = self.current_frequency
         net.ptt_delay_request = self._vara_keying_delay_request
+        net.ofdm_payload_request = self._ofdm_payload_configured
         net.position = self.beacon_position
         net.working_channel_offer = self._working_channel_offer
         net.working_channel_accept = self._working_channel_accept
@@ -348,6 +350,14 @@ class Operations:
         if self.config.vara_mode.upper() != "FM":
             return 0
         return max(0, min(int(self.config.vara_ptt_delay_ms or 0), MAX_PTT_DELAY_MS))
+
+    def _ofdm_payload_configured(self) -> bool:
+        """Whether this station announces the experimental OFDM transport.
+
+        Read at call time rather than captured, so switching transports in
+        Settings takes effect on the next announcement without rebuilding the net.
+        """
+        return self.config.payload_backend == "ofdm_vhf"
 
     # ----- net-wide alerts ------------------------------------------------
 
@@ -924,8 +934,26 @@ class Operations:
         return (self.config.vara_hf_bandwidth,)
 
     def _make_payload_backend(self):
-        return make_backend(
-            self.config.payload_backend,
+        """Build the payload transport for the sessions that come next.
+
+        A VARA station gets exactly what it always got. A station that selected an
+        experimental transport gets it wrapped in `NegotiatedPayload`, because the
+        peer may not have it: the handshake settles that per hop, and each transfer
+        then goes to whichever backend that hop agreed on.
+        """
+        deps = self._payload_dependencies()
+        primary = make_backend(self.config.payload_backend, **deps)
+        if self.config.payload_backend == "vara_p2p":
+            return primary
+        return NegotiatedPayload(
+            default=make_backend("vara_p2p", **deps),
+            backends={primary.name: primary},
+            on_log=lambda value: self._log(value, source="payload"),
+        )
+
+    def _payload_dependencies(self) -> dict:
+        """Everything any transport might need. Each one takes what it uses."""
+        return dict(
             vara=self.vara,
             on_log=lambda value: self._log(value, source="payload"),
             on_qsy=self._payload_send_qsy,
@@ -944,6 +972,19 @@ class Operations:
             ),
             on_acquire=self._suspend_control,
             on_release=self._resume_control,
+            # What a soundcard transport needs and VARA does not: the codec
+            # endpoints, a way to key the radio, and its waveform settings. The
+            # VARA path ignores them, so make_backend("vara_p2p") behaves exactly
+            # as it did before this existed.
+            audio_input=self.config.audio_input,
+            audio_output=self.config.audio_output,
+            ptt=self._payload_ptt,
+            ptt_turnaround_ms=self._payload_ptt_delay_ms,
+            ofdm_profile=self.config.ofdm_profile,
+            ofdm_mcs=self.config.ofdm_mcs,
+            ofdm_tx_lead_ms=self.config.ofdm_tx_lead_ms,
+            ofdm_tx_tail_ms=self.config.ofdm_tx_tail_ms,
+            ofdm_max_retries=self.config.ofdm_max_retries,
         )
 
     def _open_radio(self) -> list[str]:
@@ -1798,6 +1839,19 @@ class Operations:
             time.sleep(self._payload_ptt_delay_ms / 1000.0)
         self._radio_ptt(enabled)
 
+    def _payload_ptt(self, enabled: bool) -> None:
+        """Key the radio for a payload transport that does its own keying.
+
+        The sibling of `_vara_ptt`, for a backend that generates its own audio
+        rather than handing it to VARA. Same negotiated slow-keying tail, for the
+        same reason -- the cable and the handheld do not care which modem produced
+        the burst. The transport adds its own lead and tail around this on top,
+        because it knows how long its waveform is.
+        """
+        if not enabled and self._payload_ptt_delay_ms > 0:
+            time.sleep(self._payload_ptt_delay_ms / 1000.0)
+        self._radio_ptt(enabled)
+
     def _warn_if_nothing_can_key_vara(self) -> bool:
         """Warn when VARA is about to transmit and nobody can key the radio.
 
@@ -1807,6 +1861,11 @@ class Operations:
         perfect (CONNECT, BITRATE, PTT ON, then DISCONNECTED) and not one
         watt reaches the antenna. Returns True when the warning applied.
         """
+        if self.config.payload_backend != "vara_p2p":
+            # A native transport keys the radio itself through Guardian's own
+            # driver, so the VARA host-PTT setting decides nothing here and the
+            # warning would send the operator to fix something that is not wrong.
+            return False
         if self.config.vara_host_ptt:
             return False
         if self.config.radio_backend != "hamlib" or not self.config.cat_port:

@@ -2,7 +2,7 @@
 
 Hamlib has no winget package, but it ships a portable 64-bit zip on its GitHub
 releases page. We fetch that (verifying SHA256 when published), unpack it into
-%APPDATA%\\Guardian\\hamlib, and return the path to rigctld.exe. No admin
+%APPDATA%\\Guardian-G2\\hamlib, and return the path to rigctld.exe. No admin
 rights, no system-wide install — everything stays per-station.
 
 Only stdlib is used so this also works inside the PyInstaller .exe.
