@@ -575,3 +575,244 @@ def test_a_recording_on_its_own_stream_survives_the_control_channel_stopping(
         assert operations.stop_recording().samples == 1200
     finally:
         workers.close()
+
+
+# -- transmitting a test burst into the radio -------------------------------- #
+#
+# The reason this exists: the alternative was telling an operator to "play the WAV
+# into the radio", which means a media player, the right output device, and keying
+# by hand at the right moment. Guardian owns the transmit device and the PTT line.
+
+class RecordingPtt:
+    """A PTT line that remembers every transition, in order."""
+
+    def __init__(self) -> None:
+        self.transitions: list[bool] = []
+
+    def __call__(self, enabled: bool) -> None:
+        self.transitions.append(bool(enabled))
+
+    @property
+    def keyed(self) -> bool:
+        return bool(self.transitions) and self.transitions[-1]
+
+
+class TransmitSounddevice:
+    """A fake output device that records the keying order around playback."""
+
+    def __init__(self, events, fail: Exception | None = None) -> None:
+        self.events = events
+        self.fail = fail
+        self.played: list[np.ndarray] = []
+        self.rates: list[int] = []
+        self.checked: list[dict] = []
+
+    def check_output_settings(self, **kwargs) -> None:
+        self.checked.append(kwargs)
+
+    def check_input_settings(self, **kwargs) -> None:
+        self.checked.append(kwargs)
+
+    def InputStream(self, **kwargs):  # noqa: N802 - mirrors sounddevice
+        return FakeStream(kwargs.get("callback"))
+
+    def play(self, samples, samplerate=None, device=None) -> None:  # noqa: ARG002
+        if self.fail is not None:
+            raise self.fail
+        self.events.append("play")
+        self.played.append(np.asarray(samples, dtype=np.float64))
+        self.rates.append(samplerate)
+
+    def wait(self) -> None:
+        pass
+
+
+def _transmit_rig(tmp_path, monkeypatch, *, fail=None, profile_name="BENCH"):
+    events: list[str] = []
+    sd = TransmitSounddevice(events, fail=fail)
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setattr("guardian.modem.audio._import_sounddevice", lambda: sd)
+    monkeypatch.setattr("guardian.operations._import_sounddevice", lambda: sd)
+    monkeypatch.setattr("guardian.operations.resolve_device", lambda name, kind: 7)
+    operations, workers = _operations(tmp_path, audio_output="Radio codec",
+                                     ofdm_profile=profile_name)
+    ptt = RecordingPtt()
+
+    def keying(enabled: bool) -> None:
+        events.append("key" if enabled else "unkey")
+        ptt(enabled)
+
+    monkeypatch.setattr(operations, "_radio_ptt", keying)
+    return operations, workers, sd, events, ptt
+
+
+def test_a_test_burst_is_keyed_played_and_unkeyed_in_that_order(tmp_path,
+                                                               monkeypatch) -> None:
+    operations, workers, sd, events, ptt = _transmit_rig(tmp_path, monkeypatch)
+    try:
+        aired = operations.transmit_test_burst(payload_bytes=64, repeats=2)
+
+        assert aired is not None and aired > 0.0
+        assert events == ["key", "play", "unkey"]
+        assert not ptt.keyed
+        assert sd.rates == [BENCH.sample_rate]
+        # A generated burst, no channel applied: the far end measures the radio.
+        assert len(sd.played[0]) / BENCH.sample_rate == pytest.approx(aired, abs=0.01)
+    finally:
+        workers.close()
+
+
+def test_the_transmitter_is_released_when_playback_fails(tmp_path,
+                                                         monkeypatch) -> None:
+    operations, workers, sd, events, ptt = _transmit_rig(
+        tmp_path, monkeypatch, fail=OSError("PortAudio fell over"))
+    try:
+        assert operations.transmit_test_burst(payload_bytes=64, repeats=1) is None
+        assert events == ["key", "unkey"]
+        assert not ptt.keyed
+    finally:
+        workers.close()
+
+
+def test_a_test_burst_uses_the_profiles_own_sample_rate(tmp_path,
+                                                       monkeypatch) -> None:
+    # A 96 kHz profile has to be transmitted at 96 kHz, or what goes on the air is
+    # not the waveform the receiver will try to decode.
+    operations, workers, sd, events, ptt = _transmit_rig(
+        tmp_path, monkeypatch, profile_name="WIDE_40K")
+    try:
+        assert operations.transmit_test_burst(payload_bytes=64, repeats=1)
+        assert sd.rates == [96000]
+        assert any(c.get("samplerate") == 96000 for c in sd.checked)
+    finally:
+        workers.close()
+
+
+def test_a_test_burst_refuses_without_a_usable_transmit_device(tmp_path,
+                                                              monkeypatch) -> None:
+    events: list[str] = []
+    sd = TransmitSounddevice(events)
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setattr("guardian.operations._import_sounddevice", lambda: sd)
+    # resolve_device hands back the name when it cannot find the device.
+    monkeypatch.setattr("guardian.operations.resolve_device",
+                        lambda name, kind: "No such speaker")
+    operations, workers = _operations(tmp_path, audio_output="No such speaker")
+    ptt = RecordingPtt()
+    monkeypatch.setattr(operations, "_radio_ptt", ptt)
+    try:
+        assert operations.transmit_test_burst(payload_bytes=64, repeats=1) is None
+        assert ptt.transitions == [], "nothing may be keyed"
+        assert sd.played == []
+    finally:
+        workers.close()
+
+
+def test_a_test_burst_refuses_while_a_transfer_owns_the_codec(tmp_path,
+                                                             monkeypatch) -> None:
+    operations, workers, sd, events, ptt = _transmit_rig(tmp_path, monkeypatch)
+    try:
+        operations._payload_active.set()
+        assert operations.transmit_test_burst(payload_bytes=64, repeats=1) is None
+        assert ptt.transitions == []
+        assert sd.played == []
+    finally:
+        workers.close()
+
+
+def test_a_test_burst_gives_the_control_codec_back_afterwards(tmp_path,
+                                                             monkeypatch) -> None:
+    # It goes through the same handoff a payload transfer uses rather than keying
+    # underneath the control modem, so the flag must be clear again at the end.
+    operations, workers, sd, events, ptt = _transmit_rig(tmp_path, monkeypatch)
+    try:
+        transport = AudioControlTransportStub()
+        operations.audio_transport = transport
+        assert operations.transmit_test_burst(payload_bytes=64, repeats=1)
+        assert transport.stopped is False, "control audio was not resumed"
+        assert not operations.payload_active()
+    finally:
+        workers.close()
+
+
+def test_a_test_burst_says_what_it_is_about_to_do(tmp_path, monkeypatch) -> None:
+    operations, workers, sd, events, ptt = _transmit_rig(tmp_path, monkeypatch)
+    lines: list[str] = []
+    try:
+        operations.transmit_test_burst(payload_bytes=64, repeats=3,
+                                      on_log=lines.append)
+        joined = "\n".join(lines)
+        assert "3 test burst" in joined
+        assert "BENCH" in joined
+        assert "aired" in joined
+    finally:
+        workers.close()
+
+
+# -- the one keying discipline all three transmit paths share ---------------- #
+
+def test_the_keying_primitive_brackets_playback_and_appends_a_guard() -> None:
+    from guardian.modem.audio import (PTT_LEAD_SECONDS, PTT_TAIL_SECONDS,
+                                      TX_GUARD_SECONDS, transmit_waveform)
+
+    events: list[str] = []
+    sd = TransmitSounddevice(events)
+    ptt = RecordingPtt()
+
+    def keying(enabled: bool) -> None:
+        events.append("key" if enabled else "unkey")
+        ptt(enabled)
+
+    aired = transmit_waveform(sd, np.ones(4800), device=3, sample_rate=48_000,
+                              ptt=keying, lead_seconds=0.0, tail_seconds=0.0,
+                              before_play=lambda: events.append("before"),
+                              after_release=lambda: events.append("after"))
+
+    assert events == ["before", "key", "play", "unkey", "after"]
+    assert not ptt.keyed
+    # The guard is silence appended to the samples, not a pause after them: a
+    # stopped output stream discards what the device still holds buffered, and
+    # what gets discarded has to be the silence rather than the last symbols.
+    expected = 4800 + int(TX_GUARD_SECONDS * 48_000)
+    assert len(sd.played[0]) == expected
+    assert aired == pytest.approx(expected / 48_000)
+    assert not sd.played[0][-10:].any()
+    assert PTT_LEAD_SECONDS > 0.0 and PTT_TAIL_SECONDS > 0.0
+
+
+def test_the_keying_primitive_releases_the_transmitter_when_playback_raises() -> None:
+    from guardian.modem.audio import transmit_waveform
+
+    events: list[str] = []
+    sd = TransmitSounddevice(events, fail=OSError("device went away"))
+    ptt = RecordingPtt()
+
+    with pytest.raises(OSError):
+        transmit_waveform(sd, np.ones(100), device=3, sample_rate=48_000,
+                          ptt=ptt, lead_seconds=0.0, tail_seconds=0.0,
+                          after_release=lambda: events.append("after"))
+
+    assert ptt.transitions == [True, False]
+    assert not ptt.keyed
+    # The caller's cleanup still runs, so a receive buffer is not left holding
+    # half of our own transmission.
+    assert events == ["after"]
+
+
+def test_every_transmit_path_goes_through_the_one_primitive() -> None:
+    # Three callers, one implementation. A fourth copy of "always unkey" is the
+    # kind of thing that gets it wrong and leaves a station keyed.
+    import pathlib
+    import re
+
+    calls = 0
+    for name in ("guardian/modem/audio.py", "guardian/payload/ofdm_vhf.py",
+                 "guardian/operations.py"):
+        source = pathlib.Path(name).read_text(encoding="utf-8")
+        calls += len(re.findall(r"(?<!def )transmit_waveform\(", source))
+        # Nobody else may key around a play() of their own.
+        body = re.sub(r"def transmit_waveform.*?\n(?=\S)", "", source, flags=re.S)
+        # Nobody keys around a play() of their own -- the primitive is the only
+        # code in Guardian that reaches the output device.
+        assert ".play(" not in body, f"{name} plays audio outside the primitive"
+    assert calls == 3

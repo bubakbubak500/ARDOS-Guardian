@@ -55,6 +55,53 @@ PTT_TAIL_SECONDS = 0.25
 TX_GUARD_SECONDS = 0.4
 
 
+def transmit_waveform(sd, samples, *, device, sample_rate: int,
+                      ptt: Callable[[bool], None],
+                      lead_seconds: float = PTT_LEAD_SECONDS,
+                      tail_seconds: float = PTT_TAIL_SECONDS,
+                      guard_seconds: float = TX_GUARD_SECONDS,
+                      before_play=None, after_release=None) -> float:
+    """Key the radio, play a waveform, unkey. Returns the seconds it aired.
+
+    The single place this discipline is written down. Three callers need it -- the
+    control transport below, the OFDM payload pipe, and the test burst the Modem
+    test workspace transmits -- and "the transmitter is always released" is not a
+    property to maintain in three copies, because the copy that gets it wrong
+    leaves a station keyed on a channel other people are using.
+
+    The order matters and each part of it was paid for:
+
+    * **Lead-in after keying.** A waveform that starts before the carrier does is
+      a burst the far end cannot synchronise to.
+    * **A tail of silence appended to the samples.** Stopping the output stream
+      discards whatever the host API and a USB device still hold buffered, which
+      on air cost a measured ~130 ms off the end of every control burst. With the
+      guard, what gets discarded is silence.
+    * **The tail sleep and the unkey in `finally`.** PortAudio returning means it
+      has finished filling the endpoint, not that the radio has finished sending;
+      and if `play` raised, dropping PTT still has to happen.
+
+    `before_play` and `after_release` are for a caller with buffers to clear on
+    either side of its own transmission.
+    """
+    rate = int(sample_rate)
+    guard = np.zeros(int(max(0.0, guard_seconds) * rate))
+    waveform = np.concatenate([np.asarray(samples, dtype=np.float64), guard])
+    try:
+        if before_play is not None:
+            before_play()
+        ptt(True)
+        time.sleep(max(0.0, lead_seconds))
+        sd.play(waveform.astype(np.float32), samplerate=rate, device=device)
+        sd.wait()
+    finally:
+        time.sleep(max(0.0, tail_seconds))
+        ptt(False)
+        if after_release is not None:
+            after_release()
+    return len(waveform) / rate
+
+
 def is_real_audio_device_name(name: str) -> bool:
     """Exclude PortAudio aliases that are not physical Windows endpoints."""
     normalized = " ".join(name.casefold().split())
@@ -655,26 +702,17 @@ class AudioControlTransport(ControlTransport):
         if self._sd is None:
             self.on_log("Audio TX skipped — control channel not started")
             return
-        samples = self.modem.modulate(frame.encode())
-        guard = np.zeros(int(TX_GUARD_SECONDS * self.fs), dtype=samples.dtype)
-        samples = np.concatenate([samples, guard])
         with self._tx_lock:
-            try:
+            transmit_waveform(
+                self._sd, self.modem.modulate(frame.encode()),
+                device=self.output_device,
+                sample_rate=self.fs,
+                ptt=self.ptt,
                 # Never splice samples from before and after our own half-duplex
                 # transmission into one artificial receive window.
-                self._rx_buf.clear()
-                self.ptt(True)
-                # brief lead-in so the rig is keyed before tones start
-                time.sleep(PTT_LEAD_SECONDS)
-                self._sd.play(samples, samplerate=self.fs, device=self.output_device)
-                self._sd.wait()
-            finally:
-                # PortAudio has finished filling the USB endpoint here, but a
-                # USB radio can still have audio buffered internally. Keep PTT
-                # asserted long enough for the final CRC and postamble to air.
-                time.sleep(PTT_TAIL_SECONDS)
-                self.ptt(False)
-                self._rx_buf.clear()
+                before_play=self._rx_buf.clear,
+                after_release=self._rx_buf.clear,
+            )
         self.on_log(f"TX {frame.summary()}")
 
     # ------------------------------------------------------------------ #

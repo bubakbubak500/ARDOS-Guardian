@@ -14,19 +14,24 @@ block delivered with the wrong bytes must be impossible to overlook.
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox
 
 from guardian.i18n import Language, TRANSLATIONS, set_language, tr
 from guardian.ofdm import MCS_TABLE
 from guardian.ofdm import bench
 from guardian.ofdm.config import PROFILE_LADDER, profile_or_default
 from guardian.ofdm.metrics import LinkMetrics
-from guardian.qt.modem_workspace import SWEEP_TASK, ModemWorkspace
+from guardian.qt.modem_workspace import (
+    SWEEP_TASK,
+    TRANSMIT_TASK,
+    ModemWorkspace,
+)
 from guardian.qt.runtime import ShellRuntime
 from guardian.qt.shell import GuardianMainWindow
 from guardian.qt.theme import ThemePreference
@@ -68,6 +73,47 @@ def _wait(workspace: ModemWorkspace, timeout: float = 300.0) -> None:
 
 def _unavailable() -> str:
     return TRANSLATIONS["record.unavailable"][0]
+
+
+def _answers(monkeypatch, button: QMessageBox.StandardButton) -> list[tuple]:
+    """Answer the transmit confirmation, and keep what it said.
+
+    Recorded as (title, text, default button): the wording matters as much as
+    the answer, because this is the dialog standing between a click and a keyed
+    transmitter.
+    """
+    asked: list[tuple] = []
+
+    def question(*args):
+        asked.append((args[1], args[2], args[-1]))
+        return button
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(question))
+    return asked
+
+
+def _stub_transmit(runtime: ShellRuntime, monkeypatch, aired: float | None = 4.0,
+                   hold: threading.Event | None = None) -> list[dict]:
+    """Stand in for `Operations.transmit_test_burst`.
+
+    The real one keys a PTT line and opens a sound device. What these tests are
+    about is the button, the confirmation and the report, so the transmission
+    itself is a recorded call -- `hold` lets one be caught mid-air.
+    """
+    calls: list[dict] = []
+
+    def transmit(*, profile_name=None, mcs_index=None, payload_bytes=512,
+                 repeats=3, on_log=None):
+        calls.append({
+            "profile_name": profile_name, "mcs_index": mcs_index,
+            "payload_bytes": payload_bytes, "repeats": repeats,
+        })
+        if hold is not None:
+            assert hold.wait(60.0), "the transmission was never released"
+        return aired
+
+    monkeypatch.setattr(runtime.operations, "transmit_test_burst", transmit)
+    return calls
 
 
 # -- picking a waveform ------------------------------------------------------ #
@@ -475,6 +521,219 @@ def test_a_wav_that_holds_a_burst_decodes_and_reports_its_frame(
         runtime.close()
 
 
+# -- putting it on the air --------------------------------------------------- #
+
+def test_cancelling_the_confirmation_puts_nothing_on_the_air(monkeypatch) -> None:
+    # The whole point of the dialog. If Cancel could still key a transmitter
+    # nothing else about this feature would matter.
+    runtime, workspace = _workspace()
+    asked = _answers(monkeypatch, QMessageBox.StandardButton.Cancel)
+    calls = _stub_transmit(runtime, monkeypatch)
+    try:
+        workspace.file_repeats.setValue(2)
+        workspace.file_payload.setValue(256)
+        workspace.start_transmit()
+        assert calls == []
+        assert workspace._running is None
+        assert workspace.transmit_button.isEnabled()
+
+        # And it asked properly: named the transmission, roughly how long, the
+        # waveform, where the radio is, which device -- and defaulted to Cancel.
+        assert len(asked) == 1
+        title, text, default = asked[0]
+        assert title == "Transmit into the radio"
+        assert default == QMessageBox.StandardButton.Cancel
+        assert "key the transmitter" in text
+        assert "BENCH" in text
+        assert "MCS1" in text
+        assert "2 burst(s) of 256 B" in text
+        assert "Frequency:" in text
+        assert "Transmit device:" in text
+        assert "Identify with your callsign" in text
+        assert "experimental waveform" in text
+        # The estimate is in the sentence about how long it will transmit for.
+        expected = workspace.transmit_seconds(256, 2)
+        assert expected > 2.0
+        assert f"about {expected:.0f} s" in text
+    finally:
+        runtime.close()
+
+
+def test_the_confirmation_names_the_frequency_and_device_guardian_knows(
+    monkeypatch
+) -> None:
+    runtime, workspace = _workspace()
+    # A no-CAT station: the frequency Guardian knows is the one the operator
+    # typed, and it is still worth quoting back before keying.
+    runtime.config.radio_backend = "hamlib"
+    runtime.config.rig_model = 1
+    runtime.config.manual_frequency_hz = 145_500_000
+    runtime.config.audio_output = "USB Audio CODEC"
+    asked = _answers(monkeypatch, QMessageBox.StandardButton.Cancel)
+    _stub_transmit(runtime, monkeypatch)
+    try:
+        workspace.start_transmit()
+        text = asked[0][1]
+        assert "145.5000 MHz" in text
+        assert "USB Audio CODEC" in text
+    finally:
+        runtime.close()
+
+
+def test_a_station_with_no_frequency_or_device_says_so_rather_than_zero(
+    monkeypatch
+) -> None:
+    runtime, workspace = _workspace()
+    runtime.config.audio_output = ""
+    monkeypatch.setattr(runtime.operations, "current_frequency", lambda: None)
+    asked = _answers(monkeypatch, QMessageBox.StandardButton.Cancel)
+    _stub_transmit(runtime, monkeypatch)
+    try:
+        workspace.start_transmit()
+        text = asked[0][1]
+        assert tr("modem.transmit_frequency_unknown") in text
+        assert tr("modem.transmit_device_unset") in text
+        assert "0.0000 MHz" not in text
+    finally:
+        runtime.close()
+
+
+def test_confirming_transmits_the_waveform_selected_here_not_the_saved_one(
+    monkeypatch
+) -> None:
+    # An operator measuring a rung has selected it in this workspace and has no
+    # reason to have saved it as the station's own profile.
+    runtime, workspace = _workspace()
+    _answers(monkeypatch, QMessageBox.StandardButton.Ok)
+    calls = _stub_transmit(runtime, monkeypatch, aired=6.25)
+    try:
+        workspace.profile_picker.setCurrentIndex(
+            workspace.profile_picker.findData("WIDE_10K")
+        )
+        workspace.mcs_picker.setCurrentIndex(workspace.mcs_picker.findData(3))
+        workspace.file_repeats.setValue(2)
+        workspace.file_payload.setValue(256)
+        workspace.start_transmit()
+        assert workspace._running == TRANSMIT_TASK
+        _wait(workspace)
+
+        assert runtime.config.ofdm_profile == "BENCH"
+        assert runtime.config.ofdm_mcs == 1
+        assert calls == [{
+            "profile_name": "WIDE_10K", "mcs_index": 3,
+            "payload_bytes": 256, "repeats": 2,
+        }]
+        assert workspace.transmit_status.property("statusRole") == "success"
+        assert "6.2 s aired" in workspace.transmit_status.text()
+    finally:
+        runtime.close()
+
+
+def test_the_page_says_the_radio_is_live_while_it_transmits(monkeypatch) -> None:
+    # The one action where the useful thing is not a number at the end.
+    runtime, workspace = _workspace()
+    _answers(monkeypatch, QMessageBox.StandardButton.Ok)
+    release = threading.Event()
+    _stub_transmit(runtime, monkeypatch, aired=3.5, hold=release)
+    try:
+        workspace.file_repeats.setValue(1)
+        workspace.file_payload.setValue(256)
+        workspace.start_transmit()
+        assert workspace.transmit_status.property("statusRole") == "danger"
+        live = workspace.transmit_status.text()
+        assert "ON THE AIR" in live
+        assert "keyed" in live
+        expected = workspace.transmit_seconds(256, 1)
+        assert f"about {expected:.0f} s" in live
+
+        # And the elapsed figure moves with the ordinary shell poll.
+        time.sleep(0.2)
+        _pump(workspace)
+        assert workspace.transmit_status.text() != live
+
+        release.set()
+        _wait(workspace)
+        assert "3.5 s aired" in workspace.transmit_status.text()
+        assert "ON THE AIR" not in workspace.transmit_status.text()
+    finally:
+        release.set()
+        runtime.close()
+
+
+def test_a_transmission_that_never_happened_is_never_reported_as_success(
+    monkeypatch
+) -> None:
+    # `transmit_test_burst` returns None for a payload transfer holding the
+    # codec, an unresolved TX device or a PortAudio refusal, and has already
+    # logged which. The one unacceptable outcome is a page claiming airtime.
+    runtime, workspace = _workspace()
+    _answers(monkeypatch, QMessageBox.StandardButton.Ok)
+    calls = _stub_transmit(runtime, monkeypatch, aired=None)
+    try:
+        workspace.start_transmit()
+        _wait(workspace)
+        assert len(calls) == 1
+        text = workspace.transmit_status.text()
+        assert workspace.transmit_status.property("statusRole") == "warning"
+        assert "Nothing was transmitted" in text
+        # Pointed at the Log, where the backend put the real reason.
+        assert "Log" in text
+        assert "aired" not in text
+        # No invented reason: the backend logged the real one.
+        assert "device" not in text
+        assert workspace.transmit_button.isEnabled()
+    finally:
+        runtime.close()
+
+
+def test_a_second_transmission_is_refused_without_asking_again(monkeypatch) -> None:
+    runtime, workspace = _workspace()
+    asked = _answers(monkeypatch, QMessageBox.StandardButton.Ok)
+    release = threading.Event()
+    calls = _stub_transmit(runtime, monkeypatch, aired=2.0, hold=release)
+    try:
+        workspace.start_transmit()
+        assert workspace._running == TRANSMIT_TASK
+        assert not workspace.transmit_button.isEnabled()
+        # Reached past the disabled button, the second click neither transmits
+        # nor puts up a dialog authorising something that cannot start.
+        workspace.start_transmit()
+        assert len(calls) == 1
+        assert len(asked) == 1
+        assert workspace.transmit_status.text() == tr("modem.busy")
+        assert workspace.transmit_status.property("statusRole") == "warning"
+        release.set()
+        _wait(workspace)
+        assert len(calls) == 1
+    finally:
+        release.set()
+        runtime.close()
+
+
+def test_a_transmission_that_raises_is_reported_and_stops_counting(
+    monkeypatch
+) -> None:
+    runtime, workspace = _workspace()
+    _answers(monkeypatch, QMessageBox.StandardButton.Ok)
+
+    def explode(**kwargs):
+        raise OSError("PortAudio would not open the device")
+
+    monkeypatch.setattr(runtime.operations, "transmit_test_burst", explode)
+    try:
+        workspace.start_transmit()
+        _wait(workspace)
+        assert workspace.transmit_status.property("statusRole") == "warning"
+        assert "PortAudio" in workspace.transmit_status.text()
+        # Nothing left claiming to be on the air.
+        assert workspace._transmit_started is None
+        workspace.refresh()
+        assert "ON THE AIR" not in workspace.transmit_status.text()
+        assert workspace.transmit_button.isEnabled()
+    finally:
+        runtime.close()
+
+
 # -- one at a time ----------------------------------------------------------- #
 
 def test_only_one_measurement_runs_at_a_time_and_the_buttons_say_so() -> None:
@@ -486,7 +745,7 @@ def test_only_one_measurement_runs_at_a_time_and_the_buttons_say_so() -> None:
         assert runtime.operations.workers.is_active(SWEEP_TASK)
         for button in (workspace.burst_button, workspace.transfer_button,
                        workspace.sweep_button, workspace.save_button,
-                       workspace.open_button):
+                       workspace.transmit_button, workspace.open_button):
             assert not button.isEnabled()
         # Even reached past the buttons, a second measurement is refused rather
         # than queued behind the first.
@@ -497,7 +756,7 @@ def test_only_one_measurement_runs_at_a_time_and_the_buttons_say_so() -> None:
         _wait(workspace)
         for button in (workspace.burst_button, workspace.transfer_button,
                        workspace.sweep_button, workspace.save_button,
-                       workspace.open_button):
+                       workspace.transmit_button, workspace.open_button):
             assert button.isEnabled()
         assert not workspace.sweep_cancel.isEnabled()
     finally:
@@ -581,6 +840,15 @@ def test_the_workspace_is_bilingual() -> None:
         "modem.wrong_bytes_none",
         "modem.save_tx",
         "modem.open_wav",
+        "modem.transmit",
+        "modem.transmit_hint",
+        "modem.transmit_title",
+        "modem.transmit_confirm",
+        "modem.transmit_live",
+        "modem.transmit_done",
+        "modem.transmit_none",
+        "modem.transmit_frequency_unknown",
+        "modem.transmit_device_unset",
     ):
         assert key in keys, key
     for key in keys + ["menu.modem"]:
@@ -597,6 +865,7 @@ def test_the_workspace_is_bilingual() -> None:
         assert workspace.sweep_button.text() == "Spustit rozmítání"
         assert workspace.sweep_cancel.text() == "Přerušit"
         assert workspace.save_button.text() == "Uložit soubor pro vysílání…"
+        assert workspace.transmit_button.text() == "Vyslat do rádia…"
         assert "nezkoušený" in workspace.profile_picker.currentText()
         assert "to není šířka pásma" in (
             workspace.facts_fields["sample_rate"].text()
@@ -604,6 +873,53 @@ def test_the_workspace_is_bilingual() -> None:
         assert "datových" in workspace.facts_fields["carriers"].text()
         assert "pilotních" in workspace.facts_fields["carriers"].text()
         assert workspace.tabs.tabText(2) == "Úspěšnost podle odstupu"
+    finally:
+        runtime.close()
+        set_language(Language.ENGLISH)
+
+
+def test_the_transmit_confirmation_and_report_read_in_czech(monkeypatch) -> None:
+    # This feature exists because a Czech-speaking operator asked how he was
+    # supposed to play the file into the radio. The dialog that keys his
+    # transmitter has to read as well in Czech as in English.
+    _application()
+    set_language(Language.CZECH)
+    runtime = ShellRuntime()
+    runtime.config.ofdm_profile = "BENCH"
+    runtime.config.ofdm_mcs = 1
+    runtime.config.audio_output = "USB Audio CODEC"
+    workspace = ModemWorkspace(runtime)
+    asked = _answers(monkeypatch, QMessageBox.StandardButton.Cancel)
+    calls = _stub_transmit(runtime, monkeypatch, aired=7.0)
+    try:
+        workspace.file_repeats.setValue(3)
+        workspace.file_payload.setValue(512)
+        workspace.start_transmit()
+        assert calls == []
+        title, text, default = asked[0]
+        assert title == "Vyslat do rádia"
+        assert default == QMessageBox.StandardButton.Cancel
+        assert "sepne vysílač" in text
+        assert "dávek: 3 po 512 B" in text
+        assert "Kmitočet:" in text
+        assert "Vysílací zařízení: USB Audio CODEC" in text
+        assert "volací značkou" in text
+        assert "experimentální vlnový průběh" in text
+
+        # And the reports, both outcomes, driven directly.
+        workspace._transmit_started = time.monotonic()
+        workspace._transmit_expected = 12.0
+        workspace._show_transmit_progress()
+        assert "VYSÍLÁ SE" in workspace.transmit_status.text()
+        assert "Vysílač je sepnutý" in workspace.transmit_status.text()
+
+        workspace._render_transmitted(7.0)
+        assert "Odvysíláno: 7.0 s" in workspace.transmit_status.text()
+        assert workspace.transmit_status.property("statusRole") == "success"
+
+        workspace._render_transmitted(None)
+        assert "Nic nebylo vysláno" in workspace.transmit_status.text()
+        assert workspace.transmit_status.property("statusRole") == "warning"
     finally:
         runtime.close()
         set_language(Language.ENGLISH)

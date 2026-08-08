@@ -28,7 +28,8 @@ from typing import Callable
 import numpy as np
 
 from ..modem.audio import (PTT_LEAD_SECONDS, PTT_TAIL_SECONDS,
-                           _import_sounddevice, resolve_device)
+                           _import_sounddevice, resolve_device,
+                           transmit_waveform)
 from ..ofdm import OfdmLink, OfdmStatus, PhyHeader, profile_or_default
 from ..ofdm.framing import OfdmFrameType, burst_samples
 from .base import DoneCb, PayloadBackend
@@ -273,32 +274,33 @@ class RadioAudioPipe:
     # -- transmit -----------------------------------------------------------
 
     def send(self, samples: np.ndarray) -> None:
-        """Key the radio, play the burst, unkey. PTT is released on every path."""
+        """Key the radio, play the burst, unkey. PTT is released on every path.
+
+        The keying itself is `modem.audio.transmit_waveform`, which is also what
+        the Modem test workspace transmits through -- one implementation of
+        "always release the transmitter" rather than one per caller.
+        """
         if self._sd is None:
             raise RuntimeError("OFDM VHF: audio pipe was not started")
-        guard = np.zeros(int(TX_GUARD_SECONDS * self.profile.sample_rate))
-        waveform = np.concatenate([np.asarray(samples, dtype=np.float64), guard])
-        with self._tx_lock:
+
+        def clear_receive_buffer() -> None:
+            # Never splice audio from before and after our own transmission into
+            # one receive window.
             with self._buffer_lock:
                 self._buffer = []
-            try:
-                self.ptt(True)
-                # Lead-in so the transmitter is up before the preamble starts. A
-                # preamble that begins before the carrier does is a burst the
-                # peer cannot synchronise to.
-                time.sleep(max(self.tx_lead, PTT_LEAD_SECONDS))
-                self._sd.play(waveform.astype(np.float32),
-                              samplerate=self.profile.sample_rate,
-                              device=self.output_device)
-                self._sd.wait()
-            finally:
-                # PortAudio has finished filling the endpoint here, but a USB
-                # radio can still hold audio internally. Hold PTT until the tail
-                # has actually left, then drop it -- whatever went wrong above.
-                time.sleep(max(self.tx_tail, PTT_TAIL_SECONDS))
-                self.ptt(False)
-                with self._buffer_lock:
-                    self._buffer = []
+
+        with self._tx_lock:
+            transmit_waveform(
+                self._sd, samples,
+                device=self.output_device,
+                sample_rate=self.profile.sample_rate,
+                ptt=self.ptt,
+                lead_seconds=max(self.tx_lead, PTT_LEAD_SECONDS),
+                tail_seconds=max(self.tx_tail, PTT_TAIL_SECONDS),
+                guard_seconds=TX_GUARD_SECONDS,
+                before_play=clear_receive_buffer,
+                after_release=clear_receive_buffer,
+            )
 
 
 class OfdmVhfBackend(PayloadBackend):

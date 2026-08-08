@@ -14,8 +14,10 @@ from .install.dependencies import find_vara_fm, find_vara_hf
 from .i18n import dual
 from .message import Folder, MessageStore, Status
 from .modem import make_modem
-from .modem.audio import (DEFAULT_SAMPLE_RATE, AudioControlTransport,
-                          resolve_device)
+from .modem.audio import (DEFAULT_SAMPLE_RATE, PTT_LEAD_SECONDS,
+                          PTT_TAIL_SECONDS, AudioControlTransport,
+                          _import_sounddevice, resolve_device,
+                          transmit_waveform)
 from .modem.recorder import AudioCapture, WavRecorder, capture_path
 from .ofdm import profile_or_default
 from .payload import make_backend
@@ -715,6 +717,100 @@ class Operations:
             source="audio",
         )
         return recorder.path
+
+    # ----- transmitting a test burst ---------------------------------------
+
+    def transmit_test_burst(self, *, profile_name: str | None = None,
+                            mcs_index: int | None = None,
+                            payload_bytes: int = 512, repeats: int = 3,
+                            on_log=None):
+        """Put a generated OFDM test burst on the air. Returns seconds aired, or None.
+
+        This exists because the alternative was telling an operator to "play the
+        WAV into the radio", which means finding a media player, pointing it at
+        the right output device, and keying by hand at the right moment. Guardian
+        already owns the transmit device and the PTT line, so it does it itself.
+
+        The transmission carries no message: it is the modem's own waveform with
+        no channel applied, several bursts with gaps, which is exactly what a
+        receiving station needs in order to measure what its radio passed. Nothing
+        listens for a reply -- the far end records instead.
+
+        The caller is responsible for having asked the operator first. This keys a
+        transmitter.
+        """
+        from .ofdm import bench
+
+        report = on_log or (lambda value: self._log(value, source="payload"))
+        if self.payload_active():
+            report(dual(
+                "Cannot transmit a test burst while a payload transfer owns the "
+                "audio device.",
+                "Nelze vyslat testovací dávku, když zvukové zařízení používá "
+                "přenos zprávy.",
+            ))
+            return None
+
+        waveform_profile = profile_or_default(profile_name
+                                              or self.config.ofdm_profile)
+        index = self.config.ofdm_mcs if mcs_index is None else int(mcs_index)
+        samples, _ = bench.make_test_burst(
+            waveform_profile, index, payload_bytes=payload_bytes,
+            repeats=repeats,
+        )
+
+        output = resolve_device(self.config.audio_output, "output")
+        if not isinstance(output, int):
+            report(dual(
+                "Select an available TX output in Station settings first.",
+                "Nejprve vyberte dostupný výstup TX v nastavení stanice.",
+            ))
+            return None
+
+        # The control modem shares this sound card, and a test burst is a
+        # transmission like any other -- so it goes through the same handoff a
+        # payload transfer uses rather than keying underneath it.
+        acquired = False
+        aired = None
+        try:
+            self._suspend_control()
+            acquired = True
+            sd = _import_sounddevice()
+            sd.check_output_settings(device=output,
+                                     samplerate=waveform_profile.sample_rate,
+                                     channels=1)
+            report(dual(
+                f"Transmitting {repeats} test burst(s) on profile "
+                f"{waveform_profile.name}, MCS{index}: "
+                f"{len(samples) / waveform_profile.sample_rate:.1f} s of audio.",
+                f"Vysílám {repeats} testovacích dávek na profilu "
+                f"{waveform_profile.name}, MCS{index}: "
+                f"{len(samples) / waveform_profile.sample_rate:.1f} s zvuku.",
+            ))
+            aired = transmit_waveform(
+                sd, samples,
+                device=output,
+                sample_rate=waveform_profile.sample_rate,
+                ptt=self._payload_ptt,
+                lead_seconds=max(self.config.ofdm_tx_lead_ms / 1000.0,
+                                 PTT_LEAD_SECONDS),
+                tail_seconds=max(self.config.ofdm_tx_tail_ms / 1000.0,
+                                 PTT_TAIL_SECONDS),
+            )
+            report(dual(
+                f"Test burst finished: {aired:.1f} s aired.",
+                f"Testovací dávka odvysílána: {aired:.1f} s.",
+            ))
+        except Exception as exc:  # noqa: BLE001 - report it, never crash the UI
+            report(dual(
+                f"Test burst failed: {exc}",
+                f"Testovací dávka selhala: {exc}",
+            ))
+            aired = None
+        finally:
+            if acquired:
+                self._resume_control()
+        return aired
 
     def _close_recording_losing_its_source(self, reason: str) -> None:
         """End a tapped recording whose audio source is about to disappear.

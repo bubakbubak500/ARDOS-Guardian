@@ -26,12 +26,20 @@ thread. Nothing in this module computes a measurement itself: every number comes
 from `guardian.ofdm.bench`, which is also what `tools/ofdm_bench.py` calls, so the
 figure an operator reads here and the figure a developer reads at a console are
 the same figure by construction.
+
+One action here leaves the simulator: Transmit into the radio hands the burst to
+`Operations.transmit_test_burst`, which keys the PTT and plays it out. It exists
+because saving a WAV and being told to "play it into the radio" left the operator
+hunting for a media player and keying by hand -- the same manual step outside the
+application that the workspace was built to remove. It is the only action that
+transmits, so it is the only one behind a modal confirmation.
 """
 
 from __future__ import annotations
 
 import queue
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -44,6 +52,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
@@ -71,6 +80,12 @@ TRANSFER_TASK = "modem-transfer"
 SWEEP_TASK = "modem-sweep"
 FILE_TASK = "modem-test-file"
 DECODE_TASK = "modem-decode"
+TRANSMIT_TASK = "modem-transmit"
+
+#: The gap `Operations.transmit_test_burst` leaves between bursts, and before the
+#: first one. It does not pass `gap_seconds`, so it gets `make_test_burst`'s own
+#: default -- and the estimate shown to the operator has to agree with that.
+TRANSMIT_GAP_SECONDS = 1.0
 
 #: A shorter ladder than `bench.SWEEP_POINTS`, for the common case of asking
 #: "roughly where does this profile give up" without spending minutes on it.
@@ -92,6 +107,11 @@ class ModemWorkspace(QWidget):
         self._running: str | None = None
         self._sweep_cancel = threading.Event()
         self._sweep_expected = 0
+        # Only the on-air transmission is timed on screen. It is the one action
+        # where what matters is not a number at the end but that the radio is
+        # keyed right now.
+        self._transmit_started: float | None = None
+        self._transmit_expected = 0.0
         # Worker threads never touch a widget. They put a line or a finished
         # sweep point here and the UI thread drains it, which is the same
         # arrangement `WorkerPool` itself uses for completions.
@@ -689,13 +709,17 @@ class ModemWorkspace(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(6, 8, 6, 6)
 
-        make_heading = QLabel(dual("A file to transmit", "Soubor k vysílání"))
+        make_heading = QLabel(dual("A burst to transmit", "Dávka k vysílání"))
         make_heading.setObjectName("SectionLabel")
         layout.addWidget(make_heading)
         make_hint = QLabel(tr("modem.make_hint"))
         make_hint.setObjectName("Metadata")
         make_hint.setWordWrap(True)
         layout.addWidget(make_hint)
+        transmit_hint = QLabel(tr("modem.transmit_hint"))
+        transmit_hint.setObjectName("Metadata")
+        transmit_hint.setWordWrap(True)
+        layout.addWidget(transmit_hint)
 
         make_row = QHBoxLayout()
         self.file_repeats = QSpinBox()
@@ -717,6 +741,13 @@ class ModemWorkspace(QWidget):
         self.save_button.setObjectName("primaryAction")
         self.save_button.clicked.connect(self.save_test_file)
         make_row.addWidget(self.save_button)
+        # Beside the file, not instead of it: a file is still what goes to
+        # another tool or into the archive. This is the same waveform, keyed and
+        # played by Guardian, which is the step that used to be manual.
+        self.transmit_button = QPushButton(tr("modem.transmit"))
+        self.transmit_button.setObjectName("primaryAction")
+        self.transmit_button.clicked.connect(self.start_transmit)
+        make_row.addWidget(self.transmit_button)
         make_row.addStretch()
         layout.addLayout(make_row)
 
@@ -726,6 +757,12 @@ class ModemWorkspace(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         layout.addWidget(self.file_status)
+
+        # A line of its own: a finished save and a live transmission are two
+        # different facts, and neither may overwrite the other.
+        self.transmit_status = QLabel(tr("modem.idle"))
+        self.transmit_status.setWordWrap(True)
+        layout.addWidget(self.transmit_status)
 
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
@@ -801,14 +838,141 @@ class ModemWorkspace(QWidget):
         seconds = len(samples) / rate if rate else 0.0
         self.file_status.setText(dual(
             f"Wrote {path} — {seconds:.1f} s at {rate} Hz, "
-            f"{self.file_repeats.value()} burst(s). Play it into the radio at a "
-            "level that does not clip, and record the far end.",
+            f"{self.file_repeats.value()} burst(s). Guardian can put this on the "
+            "air itself with Transmit into the radio; the file is for another "
+            "tool or for the archive.",
             f"Zapsáno {path} — {seconds:.1f} s při {rate} Hz, "
-            f"počet vysílání: {self.file_repeats.value()}. Přehrajte je do rádia "
-            "na úrovni, která nepřebuzuje, a nahrajte druhou stranu.",
+            f"počet dávek: {self.file_repeats.value()}. Guardian to umí vyslat "
+            "sám tlačítkem Vyslat do rádia; soubor je pro jiný nástroj nebo do "
+            "archivu.",
         ))
         self.file_status.setProperty("statusRole", "success")
         repolish(self.file_status)
+
+    # -- putting it on the air ----------------------------------------------- #
+
+    def transmit_seconds(self, payload_bytes: int, repeats: int) -> float:
+        """About how long the transmitter will be keyed for.
+
+        An estimate, and it only has to be good enough to tell an operator
+        whether this is three seconds or fifteen. The engine's own figure is
+        `full_block_seconds`, which is one *full* block, so a smaller payload
+        keeps the fixed header cost and scales only the data part. On top of
+        that come the lead-in and one gap after each burst, both of which
+        `Operations.transmit_test_burst` leaves at their default.
+
+        The seconds actually aired come back from the transmission itself; this
+        never stands in for that.
+        """
+        facts = self.facts
+        if facts is None:
+            facts = bench.describe(self.selected_profile(), self.selected_mcs())
+        repeats = max(1, int(repeats))
+        share = min(1.0, max(1, int(payload_bytes)) / max(1, facts.block_size))
+        fixed = facts.header_symbols * facts.symbol_ms / 1000.0
+        data = max(0.0, facts.full_block_seconds - fixed)
+        burst = fixed + data * share
+        return TRANSMIT_GAP_SECONDS * (repeats + 1) + burst * repeats
+
+    def _transmit_frequency(self) -> str:
+        """Where the radio is, if Guardian has any way of knowing."""
+        frequency = self.runtime.operations.current_frequency()
+        if not frequency:
+            return tr("modem.transmit_frequency_unknown")
+        return f"{int(frequency) / 1_000_000:.4f} MHz"
+
+    def confirm_transmit(self, seconds: float, repeats: int,
+                         payload_bytes: int) -> bool:
+        """Ask before keying. Nothing else in this workspace touches the PTT.
+
+        Ok/Cancel with Cancel as the default button, the same shape as the
+        shell's manual-QSY confirmation: an operator who presses Enter without
+        reading transmits nothing.
+        """
+        answer = QMessageBox.question(
+            self,
+            tr("modem.transmit_title"),
+            tr(
+                "modem.transmit_confirm",
+                seconds=f"{seconds:.0f}",
+                profile=self.selected_profile().name,
+                mcs=self.selected_mcs(),
+                repeats=repeats,
+                payload=payload_bytes,
+                frequency=self._transmit_frequency(),
+                device=(self.runtime.config.audio_output
+                        or tr("modem.transmit_device_unset")),
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Ok
+
+    def start_transmit(self) -> None:
+        """Key the radio and play the test burst through it, off the UI thread.
+
+        `Operations.transmit_test_burst` blocks for the whole transmission --
+        seconds on a wide profile, a quarter of a minute on a narrow one -- so
+        it goes on the worker pool like every other slow thing here.
+        """
+        # Refused before the confirmation, not after: asking an operator to
+        # authorise a transmission that cannot start would be a lie.
+        if self._running is not None:
+            self._refuse(self.transmit_status)
+            return
+        entry = self.selected_profile()
+        index = self.selected_mcs()
+        repeats = int(self.file_repeats.value())
+        payload = int(self.file_payload.value())
+        expected = self.transmit_seconds(payload, repeats)
+        if not self.confirm_transmit(expected, repeats, payload):
+            return
+        operations = self.runtime.operations
+        # The pickers, not the saved config: an operator measuring a rung has
+        # selected it here and has no reason to have saved it as the station's.
+        if self._submit(
+            TRANSMIT_TASK,
+            lambda: operations.transmit_test_burst(
+                profile_name=entry.name, mcs_index=index,
+                payload_bytes=payload, repeats=repeats,
+            ),
+            self.transmit_status,
+            self._render_transmitted,
+        ):
+            self._transmit_started = time.monotonic()
+            self._transmit_expected = expected
+            self._show_transmit_progress()
+
+    def _show_transmit_progress(self) -> None:
+        """Say on the page that the radio is live, and for how long so far."""
+        if self._transmit_started is None:
+            return
+        elapsed = max(0.0, time.monotonic() - self._transmit_started)
+        self.transmit_status.setText(tr(
+            "modem.transmit_live",
+            elapsed=f"{elapsed:.1f}",
+            expected=f"{self._transmit_expected:.0f}",
+        ))
+        self.transmit_status.setProperty("statusRole", "danger")
+        repolish(self.transmit_status)
+
+    def _render_transmitted(self, aired: float | None) -> None:
+        """Report the seconds aired, or that nothing went out.
+
+        `None` means the transmission was refused or failed, and the backend has
+        already logged the real reason. Guessing at one here would be worse than
+        pointing at the log.
+        """
+        self._transmit_started = None
+        if aired is None:
+            self.transmit_status.setText(tr("modem.transmit_none"))
+            self.transmit_status.setProperty("statusRole", "warning")
+        else:
+            self.transmit_status.setText(
+                tr("modem.transmit_done", seconds=f"{aired:.1f}")
+            )
+            self.transmit_status.setProperty("statusRole", "success")
+        repolish(self.transmit_status)
 
     def open_capture(self) -> None:
         """Decode any WAV file, whatever wrote it."""
@@ -927,9 +1091,14 @@ class ModemWorkspace(QWidget):
         self._running = task
         idle = task is None
         for button in (self.burst_button, self.transfer_button,
-                       self.sweep_button, self.save_button, self.open_button):
+                       self.sweep_button, self.save_button,
+                       self.transmit_button, self.open_button):
             button.setEnabled(idle)
         self.sweep_cancel.setEnabled(task == SWEEP_TASK)
+        if task != TRANSMIT_TASK:
+            # Nothing is on the air, so nothing may still be counting -- even if
+            # the transmission ended by failing rather than by finishing.
+            self._transmit_started = None
 
     def _drain_pending(self) -> None:
         """Move whatever the worker thread produced into the widgets."""
@@ -953,6 +1122,8 @@ class ModemWorkspace(QWidget):
         Only the filling-in as it happens depends on being looked at.
         """
         self._drain_pending()
+        if self._running == TRANSMIT_TASK:
+            self._show_transmit_progress()
 
     # -- small shared widget shapes -----------------------------------------
 

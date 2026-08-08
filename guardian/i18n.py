@@ -489,6 +489,74 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "nikoli simulátor. Několik vysílání s mezerami dá z jednoho přenosu "
         "několik nezávislých měření.",
     ),
+    # Guardian keys the radio and plays the burst itself. The operator's
+    # question about the saved file was "how am I supposed to play this into the
+    # radio?" -- so the answer is a button here, not an instruction to go and
+    # find a media player and a hand on the PTT.
+    "modem.transmit": (
+        "Transmit into the radio…",
+        "Vyslat do rádia…",
+    ),
+    "modem.transmit_hint": (
+        "The same waveform, but Guardian keys the radio and plays it out itself "
+        "— no media player, no hand on the PTT. Ask the far end to record while "
+        "it transmits. Saving a file is still worth it for another tool or for "
+        "the archive.",
+        "Tentýž vlnový průběh, ale Guardian sepne rádio a přehraje jej sám — "
+        "žádný přehrávač a žádná ruka na PTT. Požádejte druhou stranu, aby "
+        "během vysílání nahrávala. Uložení souboru má i tak smysl pro jiný "
+        "nástroj nebo do archivu.",
+    ),
+    "modem.transmit_title": (
+        "Transmit into the radio",
+        "Vyslat do rádia",
+    ),
+    "modem.transmit_confirm": (
+        "Guardian will key the transmitter and put a test burst on the air for "
+        "about {seconds} s. Nothing else can use the sound card while it does.\n"
+        "\n"
+        "Waveform: {profile}, MCS{mcs} — {repeats} burst(s) of {payload} B\n"
+        "Frequency: {frequency}\n"
+        "Transmit device: {device}\n"
+        "\n"
+        "Identify with your callsign before and after. This is an experimental "
+        "waveform: no other station will recognise it as anything but noise. "
+        "Cancel keys nothing.",
+        "Guardian sepne vysílač a odvysílá testovací dávku; zabere přibližně "
+        "{seconds} s. Zvukovou kartu mezitím nemůže používat nic jiného.\n"
+        "\n"
+        "Vlnový průběh: {profile}, MCS{mcs} — dávek: {repeats} po {payload} B\n"
+        "Kmitočet: {frequency}\n"
+        "Vysílací zařízení: {device}\n"
+        "\n"
+        "Před vysíláním i po něm se ohlaste svou volací značkou. Jde o "
+        "experimentální vlnový průběh: žádná jiná stanice jej nerozpozná jinak "
+        "než jako šum. Zrušit nesepne nic.",
+    ),
+    "modem.transmit_frequency_unknown": (
+        "Guardian does not know it",
+        "Guardian jej nezná",
+    ),
+    "modem.transmit_device_unset": (
+        "none selected in Station settings",
+        "žádné, není zvoleno v nastavení stanice",
+    ),
+    "modem.transmit_live": (
+        "ON THE AIR: {elapsed} s of about {expected} s. The transmitter is "
+        "keyed.",
+        "VYSÍLÁ SE: {elapsed} s z přibližně {expected} s. Vysílač je sepnutý.",
+    ),
+    "modem.transmit_done": (
+        "Transmitted: {seconds} s aired. The transmitter is released. Ask the "
+        "far end for its recording and decode it below.",
+        "Odvysíláno: {seconds} s. Vysílač je rozepnutý. Vyžádejte si nahrávku "
+        "od druhé strany a dekódujte ji níže.",
+    ),
+    "modem.transmit_none": (
+        "Nothing was transmitted. Guardian did not key the radio; the reason is "
+        "in the Log.",
+        "Nic nebylo vysláno. Guardian rádio nesepnul; důvod je v Provozním logu.",
+    ),
     "modem.open_wav": (
         "Open and decode a WAV…",
         "Otevřít a dekódovat WAV…",

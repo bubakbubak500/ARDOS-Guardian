@@ -18,7 +18,7 @@ the fault is the radio, the audio path, or the software.
 
 - A VHF simplex channel you are licensed to use and that is quiet. Not a
   repeater, not a calling channel, not APRS.
-- G2 2.0.3 installed on both stations.
+- G2 2.0.4 installed on both stations.
 - **Identify by voice before each session.** This is an experimental data
   waveform; anyone who hears it will not recognise it. Say what you are doing.
 - Keep transmissions short while you are finding the levels.
@@ -27,7 +27,7 @@ Everything lives in two places:
 
 | | |
 |---|---|
-| **Tools ▸ Modem test** | profiles, bench runs, the file to transmit, decoding any capture |
+| **Tools ▸ Modem test** | profiles, bench runs, transmitting a test burst, decoding any capture |
 | **Home ▸ Record received audio** (or Ctrl+R) | capturing what the radio heard |
 
 Captures and generated files go to `%APPDATA%\Guardian-G2\captures\`.
@@ -73,7 +73,7 @@ Establishes that anything you see later is the radio, not the installation.
    modem can produce.
 
 Then **save a transmit test file** and **decode it straight back**. That proves
-the file-based path you are about to use over the air.
+the generate-and-decode path end to end, on one PC, before a radio is involved.
 
 If any of this fails, the problem is not your radio.
 
@@ -92,11 +92,16 @@ radio.
 ### Do this
 
 **Station A:**
-1. Tools ▸ Modem test → profile `BENCH`, MCS1 → **Save transmit file** with 3
-   repeats. Three bursts from one transmission is three independent
-   measurements.
-2. Play that WAV through the radio, on the test channel, at your normal data
-   deviation. Note the level setting.
+1. Set the radio to the test channel, at your normal data deviation. Note the
+   level setting. Identify by voice.
+2. Tools ▸ Modem test → profile `BENCH`, MCS1 → **Transmit into the radio**,
+   3 repeats. Guardian keys the radio and plays the burst through the configured
+   TX device itself; it will tell you how long it is about to transmit for and
+   ask you to confirm first. Three bursts from one transmission is three
+   independent measurements.
+
+   (*Save transmit file* is still there if you want the WAV for something else,
+   but you do not need it for this.)
 
 **Station B:**
 3. Ctrl+R to start recording *before* A transmits. Stop after.

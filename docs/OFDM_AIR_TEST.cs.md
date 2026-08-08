@@ -18,7 +18,7 @@ nebudete vědět, zda je chyba v rádiu, ve zvukové cestě, nebo v softwaru.
 
 - Simplexní kanál VHF, na kterém smíte vysílat a který je volný. Ne převaděč, ne
   volací kanál, ne APRS.
-- G2 2.0.3 nainstalovaný na obou stanicích.
+- G2 2.0.4 nainstalovaný na obou stanicích.
 - **Před každou relací se ohlaste hlasem.** Jde o experimentální datový signál;
   kdo ho zaslechne, nepozná ho. Řekněte, co děláte.
 - Dokud hledáte správné úrovně, vysílejte krátce.
@@ -27,7 +27,7 @@ Všechno je na dvou místech:
 
 | | |
 |---|---|
-| **Nástroje ▸ Test modemu** | profily, měření, soubor k vysílání, dekódování jakéhokoli záznamu |
+| **Nástroje ▸ Test modemu** | profily, měření, vysílání testovací dávky, dekódování jakéhokoli záznamu |
 | **Domů ▸ Nahrávat přijímaný zvuk** (nebo Ctrl+R) | záznam toho, co rádio slyšelo |
 
 Záznamy i vygenerované soubory se ukládají do
@@ -76,8 +76,9 @@ Zajistí, že cokoli uvidíte později, bude vlastnost rádia, a ne instalace.
    Pokud tam kdykoli bude jiné číslo než nula, přestaňte a napište mi — je to
    nejzávažnější výsledek, jaký tento modem může vyprodukovat.
 
-Potom **uložte testovací soubor k vysílání** a hned ho **dekódujte zpět**. Tím je
-ověřená celá cesta přes soubor, kterou budete používat na pásmu.
+Potom **uložte testovací soubor k vysílání** a hned ho **dekódujte zpět**. Tím na
+jednom počítači ověříte celou cestu od vygenerování k dekódování, ještě než do ní
+vstoupí rádio.
 
 Pokud cokoli z toho neprojde, problém není ve vašem rádiu.
 
@@ -96,10 +97,15 @@ odebíráte.
 ### Postup
 
 **Stanice A:**
-1. Nástroje ▸ Test modemu → profil `BENCH`, MCS1 → **Uložit soubor k vysílání**
-   se 3 opakováními. Tři bursty z jednoho vysílání znamenají tři nezávislá měření.
-2. Přehrajte tento WAV do rádia na testovacím kanálu se svým běžným datovým
-   zdvihem. Zapište si nastavení úrovně.
+1. Nalaďte rádio na testovací kanál se svým běžným datovým zdvihem. Zapište si
+   nastavení úrovně. Ohlaste se hlasem.
+2. Nástroje ▸ Test modemu → profil `BENCH`, MCS1 → **Vysílat do rádia**,
+   3 opakování. Guardian sám naklíčuje rádio a přehraje dávku do nastaveného
+   výstupu TX; předem vám řekne, jak dlouho bude vysílat, a vyžádá si potvrzení.
+   Tři dávky z jednoho vysílání znamenají tři nezávislá měření.
+
+   (*Uložit soubor k vysílání* tam zůstává, pokud ten WAV potřebujete k něčemu
+   jinému, ale pro tento test ho nepotřebujete.)
 
 **Stanice B:**
 3. Ctrl+R — spusťte nahrávání **dřív**, než stanice A začne vysílat. Po vysílání
