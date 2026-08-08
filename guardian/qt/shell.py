@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from math import log10
 from time import monotonic
 
 from PySide6.QtCore import QSettings, Qt, QTimer
@@ -31,6 +32,7 @@ from .. import __app_name__, __version__
 from ..assets import get_ico_path
 from ..i18n import dual, tr
 from ..modem.audio import resolve_device
+from ..modem.recorder import CLIP_THRESHOLD
 from ..ofdm.config import profile_or_default
 from ..routing import read_csv, write_csv
 from ..routing.csv_io import TEMPLATE_ROWS
@@ -39,6 +41,7 @@ from ..services import ApplicationSnapshot
 from ..services import LogLevel
 from .alerts import AlertBanner
 from .notifications import EmergencyDialog, NotificationCenter, SoundPlayer
+from .capture_dialog import CaptureResultDialog
 from .diagnostics_dialog import DiagnosticsDialog
 from .help_dialog import HelpDialog
 from .inputs import FrequencySpinBox
@@ -66,6 +69,11 @@ PAYLOAD_LABELS = {
 
 #: How long a device-resolution answer is trusted before PortAudio is asked again.
 _AUDIO_PROBE_SECONDS = 10.0
+
+#: Below this peak a capture is silent rather than quiet -- the same figure
+#: `RecordingSummary.silent` uses, restated here because the live indicator has
+#: to make the call before there is a summary to ask.
+_SILENT_LEVEL = 1e-3
 
 
 def _repolish(widget: QWidget) -> None:
@@ -205,6 +213,13 @@ class GuardianMainWindow(QMainWindow):
         control_channel = QAction(tr("menu.control_toggle"), self)
         control_channel.triggered.connect(self._toggle_control)
         tools_menu.addAction(control_channel)
+        # Recording never keys the radio, so unlike the three above it needs no
+        # confirmation and can have a shortcut: it is started with one hand at
+        # the radio, at the moment the other station comes up.
+        self.record_action = QAction(tr("record.start"), self)
+        self.record_action.setShortcut("Ctrl+R")
+        self.record_action.triggered.connect(self._toggle_recording)
+        tools_menu.addAction(self.record_action)
         tools_menu.addSeparator()
         readiness = QAction(tr("menu.readiness"), self)
         readiness.triggered.connect(self._show_readiness)
@@ -407,6 +422,7 @@ class GuardianMainWindow(QMainWindow):
         description.setObjectName("Metadata")
         layout.addWidget(heading)
         layout.addWidget(description)
+        layout.addWidget(self._build_capture_row())
 
         self.readiness = QTreeWidget()
         self.readiness.setColumnCount(3)
@@ -430,6 +446,28 @@ class GuardianMainWindow(QMainWindow):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         return panel
+
+    def _build_capture_row(self) -> QWidget:
+        """Start/stop recording, and what the capture looks like so far.
+
+        On the home page rather than only in the menu: this is reached at the
+        radio, with one hand, in the seconds before the other station starts
+        transmitting -- and the level it reports is the reason the operator does
+        not have to ask for the session to be repeated.
+        """
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.record_button = QPushButton(tr("record.start"))
+        self.record_button.clicked.connect(self._toggle_recording)
+        # Plain QLabel: a statusRole is an attribute selector, and an objectName
+        # rule such as #Metadata would out-specify it and swallow the colour.
+        self.recording_indicator = QLabel()
+        self.recording_indicator.setWordWrap(True)
+        layout.addWidget(self.record_button)
+        layout.addWidget(self.recording_indicator, 1)
+        return row
 
     def _build_activity(self) -> QFrame:
         panel = QFrame()
@@ -654,6 +692,7 @@ class GuardianMainWindow(QMainWindow):
         self.transfer_panel.apply(
             transfer_state(snapshot, self.runtime.operations.payload_active())
         )
+        self._update_recording_indicator()
 
         values = {
             "inbox": mailbox.inbox,
@@ -772,6 +811,87 @@ class GuardianMainWindow(QMainWindow):
             self.readiness.addTopLevelItem(
                 QTreeWidgetItem([component, state, detail])
             )
+
+    # ------------------------------ recording ------------------------------- #
+
+    def _toggle_recording(self) -> None:
+        """Start a capture, or stop one and show what it caught."""
+        operations = self.runtime.operations
+        if operations.recording_active():
+            summary = operations.stop_recording()
+            self._update_recording_indicator()
+            if summary is not None:
+                self._show_capture_result(summary)
+            return
+        started = operations.start_recording()
+        # Every refusal is already logged with its reason by `start_recording`;
+        # the status bar only has to say that nothing is running, because the one
+        # dangerous outcome is an indicator claiming a capture that does not exist.
+        self._update_recording_indicator()
+        if started is None:
+            self.statusBar().showMessage(tr("record.start_failed"), 10_000)
+        else:
+            self.statusBar().showMessage(
+                dual(
+                    f"Recording to {started.name}.",
+                    f"Nahrávám do {started.name}.",
+                ),
+                10_000,
+            )
+
+    def _update_recording_indicator(self) -> None:
+        """Reflect the recorder's own state -- never a local idea of it.
+
+        Driven by `_apply_snapshot`, i.e. by the one existing UI poll. Everything
+        shown is read back from `Operations`, so a capture that failed to start,
+        or one stopped from the menu while the button was last drawn as "Stop",
+        cannot leave the shell claiming to be recording.
+        """
+        operations = self.runtime.operations
+        active = operations.recording_active()
+        label = tr("record.stop") if active else tr("record.start")
+        self.record_button.setText(label)
+        self.record_action.setText(label)
+        if not active:
+            self.recording_indicator.setText(tr("record.idle"))
+            self.recording_indicator.setProperty("statusRole", "inactive")
+            _repolish(self.recording_indicator)
+            return
+        level = float(operations.recording_level())
+        text = tr(
+            "record.live",
+            seconds=f"{operations.recording_seconds():.1f}",
+            peak=(
+                f"{20.0 * log10(level):.0f} dBFS"
+                if level > 0.0
+                # No sample has arrived yet, so there is no level to report. A
+                # "0" here would read as a measurement of silence.
+                else tr("record.unavailable")
+            ),
+        )
+        if level >= CLIP_THRESHOLD:
+            role, note = "danger", tr("record.live_clipping")
+        elif level < _SILENT_LEVEL:
+            role, note = "warning", tr("record.live_silent")
+        else:
+            role, note = "success", ""
+        self.recording_indicator.setText(
+            f"{text}  ·  {note}" if note else text
+        )
+        self.recording_indicator.setProperty("statusRole", role)
+        _repolish(self.recording_indicator)
+
+    def _show_capture_result(self, summary) -> None:
+        """Report a finished capture without blocking the station.
+
+        Not modal, and closing it loses nothing: the WAV file is closed and on
+        disk before this is built, so the dialog is a reading of the file rather
+        than the only chance to act on it.
+        """
+        dialog = CaptureResultDialog(self.runtime, summary, self)
+        self.capture_dialog = dialog
+        dialog.show()
+        dialog.raise_()
 
     def _audio_available(self, name: str, kind: str) -> bool:
         """Does this device name resolve to an index, without asking every tick?
@@ -1153,6 +1273,10 @@ class GuardianMainWindow(QMainWindow):
         emergency = getattr(self, "emergency_dialog", None)
         if emergency is not None:
             emergency.close()
+        # A WAV file's header is only correct once the recorder has closed it, so
+        # a capture left running through shutdown would be a file no tool opens.
+        if self.runtime.operations.recording_active():
+            self.runtime.operations.stop_recording()
         self.spectrum_window.shutdown()
         map_window = getattr(self, "map_window", None)
         if map_window is not None:

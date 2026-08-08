@@ -267,6 +267,48 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "{profile}, zabírá asi {bandwidth} Hz — laboratorní profil, dosud "
         "neměřený na pásmu",
     ),
+    # Recording received audio. The capture is written for offline analysis, so
+    # what the operator has to see at the radio is the level: a silent or a
+    # clipped capture is one to take again while the other station is still on
+    # the air, and that is a judgement that cannot wait until the file is opened
+    # on another computer.
+    "record.start": ("Record received audio", "Nahrávat přijímaný zvuk"),
+    "record.stop": ("Stop recording", "Ukončit nahrávání"),
+    "record.idle": (
+        "Writes received audio to a WAV file that can be decoded again later.",
+        "Zapisuje přijímaný zvuk do souboru WAV, který lze dekódovat později.",
+    ),
+    "record.live": (
+        "Recording {seconds} s  ·  peak {peak}",
+        "Nahrávám {seconds} s  ·  špička {peak}",
+    ),
+    "record.live_clipping": (
+        "clipping — reduce the receive level",
+        "přebuzeno — snižte úroveň příjmu",
+    ),
+    "record.live_silent": (
+        "silent — nothing is reaching the input",
+        "ticho — na vstup nic nepřichází",
+    ),
+    "record.start_failed": (
+        "Recording could not start; the activity log says why.",
+        "Nahrávání se nepodařilo spustit; důvod je v provozním logu.",
+    ),
+    "record.result_title": ("Recorded capture", "Zaznamenaný záznam"),
+    "record.open_folder": ("Open containing folder", "Otevřít umístění souboru"),
+    "record.analyse": ("Analyse this capture", "Analyzovat záznam"),
+    "record.analyse_hint": (
+        "Decoding reads the whole file and takes a moment; the capture is "
+        "already saved and is not changed by it.",
+        "Dekódování přečte celý soubor a chvíli trvá; záznam je již uložen a "
+        "nijak se tím nemění.",
+    ),
+    "record.analysing": ("Decoding the capture…", "Dekóduji záznam…"),
+    "record.analyse_busy": (
+        "Another capture is being decoded; try again in a moment.",
+        "Právě se dekóduje jiný záznam; zkuste to za chvíli.",
+    ),
+    "record.unavailable": ("unavailable", "nedostupné"),
     # Mail
     "mail.title": ("Mail", "Pošta"),
     "mail.compose": ("Compose", "Nová zpráva"),

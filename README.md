@@ -385,7 +385,13 @@ Select it in *Settings → Payload* as **Guardian OFDM VHF (Experimental)**. VAR
 
 It is a real OFDM modem — BPSK through 64-QAM, forward error correction, interleaving, channel estimation, per-carrier equalisation, and stop-and-wait ARQ with retries and duplicate suppression. It reports what it measures: SNR, EVM, frequency offset, the channel response of every subcarrier.
 
-**It has not been on the air yet.** Everything measured so far was measured through a simulated channel on a PC, and the bandwidth a real VHF radio passes is still to be determined. `tools/ofdm_bench.py` runs the whole modem with no radio attached, and can write a burst to a WAV file or decode one back — which is how the first over-the-air measurements will be taken. [docs/ofdm-vhf.md](docs/ofdm-vhf.md) has the numbers, the limitations and the two-radio test procedure.
+**It has not been on the air yet.** Everything measured so far was measured through a simulated channel on a PC, and the bandwidth a real VHF radio passes is still to be determined. `tools/ofdm_bench.py` runs the whole modem with no radio attached, and can write a burst to a WAV file or decode one back. [docs/ofdm-vhf.md](docs/ofdm-vhf.md) has the numbers and the limitations; [docs/OFDM_AIR_TEST.md](docs/OFDM_AIR_TEST.md) is the first on-air session as a field sheet.
+
+### Recording what the radio heard
+
+Guardian records received audio to a WAV file, in exactly the format its own offline tools read, so an on-air test needs nothing but Guardian and a radio. While it runs you can see the elapsed time and the peak level; when you stop, it says whether the capture was silent, clipping or usable, and can decode it on the spot to report sync confidence, SNR, EVM and frequency offset. Captures land in `%APPDATA%\Guardian-G2\captures\`.
+
+This is how the modem gets tuned: a capture lets the whole receiver be re-run over precisely what a radio produced, long after the radios are away.
 
 ---
 

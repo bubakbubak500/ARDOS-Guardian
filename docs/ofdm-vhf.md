@@ -655,7 +655,19 @@ python tools\ofdm_bench.py --help
 bandwidth, data carriers, modulation, coded and information bits per symbol,
 waveform duration, crest factor, measured SNR, EVM, CFO, pilot phase slope,
 channel-response spread, the uncoded theory curve for comparison, retries, and
-whether the payload came back identical. `--write-wav` and `--read-wav` are what
-make it useful once there are radios: record what a receiver actually hears, hand
-the file to `--read-wav`, and every measurement describes the real channel instead
-of a simulated one.
+whether the payload came back identical.
+
+`--write-wav` and `--read-wav` are what make it useful once there are radios:
+record what a receiver actually hears, hand the file to `--read-wav`, and every
+measurement describes the real channel instead of a simulated one.
+
+**Guardian records those files itself** (`guardian/modem/recorder.py`), so an
+on-air session needs nothing but Guardian and a radio. Captures land in
+`config_dir()/captures/` as mono 16-bit PCM at the audio path's own rate, which is
+exactly what `--read-wav` expects — there is no export or resample step in which a
+good capture can be turned into a misleading one. When the control channel is open
+its receive stream is tapped, so the capture is exactly the audio the modem is
+working from; when it is closed, a stream of its own is opened. Nothing is
+normalised, trimmed or filtered on the way out, because the silence around a burst
+is the noise floor a squelch is measured against and the absolute level is how a
+clipping radio is told apart from a quiet one.

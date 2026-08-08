@@ -32,7 +32,7 @@ RTS/DTR VOX fallback — no per-radio CAT reverse-engineering.
 | 4 | Smart routing / heard-stations | ✅ done |
 | 5 | Multi-channel scanning / mesh | ✅ done |
 | 6 | Mail layer: store-and-forward + attachments | ✅ done |
-| 7 | Guardian OFDM VHF — a native payload modem, no VARA (G2 line) | 🧪 PHY, ARQ and integration done; never on air |
+| 7 | Guardian OFDM VHF — a native payload modem, no VARA (G2 line) | 🧪 PHY, ARQ, integration and a WAV recorder done; never on air |
 
 **Phase 7 (G2 2.0.1)** adds a payload transport Guardian owns end to end:
 `guardian/ofdm/` is a pure-numpy OFDM physical layer (BPSK–64-QAM, soft-decision
@@ -42,8 +42,12 @@ estimation, per-carrier equalisation, stop-and-wait ARQ) with
 transmitter. VARA P2P stays the default; a mixed pair falls back to VARA during
 the control handshake, before anything is transmitted. Every figure so far is from
 a simulated channel — the occupied RF bandwidth is still to be measured, and the
-first two-radio test is the next milestone's opening task. See
-[docs/ofdm-vhf.md](docs/ofdm-vhf.md).
+first two-radio test is the next milestone's opening task. 2.0.2 adds a WAV
+recorder (`guardian/modem/recorder.py`) so that test needs nothing but Guardian
+and a radio: a capture is what lets the whole receiver be re-run over exactly what
+a radio produced, which is how everything still to be tuned gets tuned. See
+[docs/ofdm-vhf.md](docs/ofdm-vhf.md) and
+[docs/OFDM_AIR_TEST.md](docs/OFDM_AIR_TEST.md).
 
 **Phases 4 and 5 are done.** The
 heard-stations registry, ROUTE_QUERY/ROUTE_OFFER discovery, learned paths and

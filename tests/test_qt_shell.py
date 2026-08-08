@@ -5,7 +5,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from guardian.i18n import Language, set_language
+from guardian.modem.recorder import RecordingSummary
 from guardian.ofdm.config import profile_or_default
+from guardian.qt.capture_dialog import CaptureResultDialog
 from guardian.qt.runtime import ShellRuntime
 from guardian.services import MailboxSnapshot
 from guardian.qt.shell import GuardianMainWindow
@@ -314,6 +317,199 @@ def test_home_readiness_rows_report_what_the_transport_depends_on(
         assert rows()[3][1] == "Not configured"
     finally:
         window.close()
+        runtime.close()
+
+
+def _fake_recorder(runtime, monkeypatch, summary=None):
+    """Drive the shell's recording controls without touching PortAudio.
+
+    Everything the shell shows is read back from `Operations`, so replacing those
+    six methods is enough to exercise the whole control -- and it is the only way
+    to test the failed-start path, which on real hardware needs a missing device.
+    """
+    state = {"active": False, "started": 0, "stopped": 0,
+             "seconds": 0.0, "level": 0.0, "path": summary.path if summary else None}
+
+    def start():
+        state["started"] += 1
+        state["active"] = summary is not None
+        return summary.path if summary is not None else None
+
+    def stop():
+        state["stopped"] += 1
+        state["active"] = False
+        return summary
+
+    monkeypatch.setattr(runtime.operations, "recording_active",
+                        lambda: state["active"])
+    monkeypatch.setattr(runtime.operations, "start_recording", start)
+    monkeypatch.setattr(runtime.operations, "stop_recording", stop)
+    monkeypatch.setattr(runtime.operations, "recording_seconds",
+                        lambda: state["seconds"])
+    monkeypatch.setattr(runtime.operations, "recording_level",
+                        lambda: state["level"])
+    monkeypatch.setattr(runtime.operations, "recording_path",
+                        lambda: state["path"])
+    return state
+
+
+def test_the_recording_control_toggles_from_the_home_page_and_the_menu(
+    tmp_path, monkeypatch
+) -> None:
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-record.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    window = GuardianMainWindow(runtime, settings)
+    summary = RecordingSummary(
+        path=tmp_path / "captures" / "capture-20260808-101500.wav",
+        sample_rate=48_000,
+        samples=48_000,
+        rms=0.05,
+        peak=0.4,
+        clipped_samples=0,
+    )
+    state = _fake_recorder(runtime, monkeypatch, summary)
+    try:
+        assert window.record_button.text() == "Record received audio"
+        assert window.record_action.text() == "Record received audio"
+        # Started from the button, which is the one reached at the radio.
+        window.record_button.click()
+        assert state["started"] == 1
+        assert window.record_button.text() == "Stop recording"
+        assert window.record_action.text() == "Stop recording"
+        # Stopped from the menu: the two are one state, not two.
+        window.record_action.trigger()
+        assert state["stopped"] == 1
+        assert window.record_button.text() == "Record received audio"
+        assert window.record_action.text() == "Record received audio"
+        dialog = window.capture_dialog
+        assert isinstance(dialog, CaptureResultDialog)
+        assert str(summary.path) in dialog.path_label.text()
+        # The file is already closed on disk, so the report never blocks the
+        # station and closing it cannot lose the capture.
+        assert not dialog.isModal()
+        dialog.close()
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_a_recording_that_will_not_start_never_claims_to_be_running(
+    tmp_path, monkeypatch
+) -> None:
+    # `start_recording` returns None for a missing RX device, a payload transfer
+    # holding the codec, or a PortAudio refusal -- and has already logged which.
+    # The one unacceptable outcome is a shell that says it is recording anyway.
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-record-failed.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    window = GuardianMainWindow(runtime, settings)
+    state = _fake_recorder(runtime, monkeypatch, summary=None)
+    try:
+        window.record_button.click()
+        assert state["started"] == 1
+        assert not state["active"]
+        assert window.record_button.text() == "Record received audio"
+        assert window.record_action.text() == "Record received audio"
+        assert window.recording_indicator.property("statusRole") == "inactive"
+        assert "could not start" in window.statusBar().currentMessage()
+        assert getattr(window, "capture_dialog", None) is None
+        # The poll must not talk it back into a recording state either.
+        window._apply_snapshot(runtime.snapshots.read())
+        assert window.record_button.text() == "Record received audio"
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_the_live_indicator_shows_elapsed_time_and_the_peak_level_so_far(
+    tmp_path, monkeypatch
+) -> None:
+    # The level is the point of the indicator: an operator who sees a silent or
+    # clipped capture at the radio does not have to ask for the session again.
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-record-live.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    window = GuardianMainWindow(runtime, settings)
+    summary = RecordingSummary(
+        path=tmp_path / "capture.wav",
+        sample_rate=48_000,
+        samples=1,
+        rms=0.1,
+        peak=0.1,
+        clipped_samples=0,
+    )
+    state = _fake_recorder(runtime, monkeypatch, summary)
+    try:
+        window.record_button.click()
+        state["seconds"], state["level"] = 12.5, 0.35
+        window._apply_snapshot(runtime.snapshots.read())
+        text = window.recording_indicator.text()
+        assert "12.5 s" in text
+        assert "-9 dBFS" in text
+        assert window.recording_indicator.property("statusRole") == "success"
+
+        # At full scale the peaks are being flattened; say so, in danger colour.
+        state["seconds"], state["level"] = 20.0, 1.0
+        window._apply_snapshot(runtime.snapshots.read())
+        text = window.recording_indicator.text()
+        assert "20.0 s" in text
+        assert "clipping" in text
+        assert window.recording_indicator.property("statusRole") == "danger"
+
+        # Below -60 dBFS nothing is connected, whatever the elapsed time says.
+        state["level"] = 0.0005
+        window._apply_snapshot(runtime.snapshots.read())
+        assert "silent" in window.recording_indicator.text()
+        assert window.recording_indicator.property("statusRole") == "warning"
+
+        # No sample at all is not a measurement of zero.
+        state["level"] = 0.0
+        window._apply_snapshot(runtime.snapshots.read())
+        assert "unavailable" in window.recording_indicator.text()
+        assert "0 dBFS" not in window.recording_indicator.text()
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_closing_the_shell_closes_an_open_capture_file(
+    tmp_path, monkeypatch
+) -> None:
+    # A WAV header is only written when the recorder is stopped, so a capture
+    # left running through shutdown would be a file no tool can open.
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-record-close.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    window = GuardianMainWindow(runtime, settings)
+    summary = RecordingSummary(
+        path=tmp_path / "capture.wav",
+        sample_rate=48_000,
+        samples=48_000,
+        rms=0.05,
+        peak=0.4,
+        clipped_samples=0,
+    )
+    state = _fake_recorder(runtime, monkeypatch, summary)
+    try:
+        window.record_button.click()
+        assert state["active"]
+        window.close()
+        assert state["stopped"] == 1
+        assert not state["active"]
+    finally:
         runtime.close()
 
 

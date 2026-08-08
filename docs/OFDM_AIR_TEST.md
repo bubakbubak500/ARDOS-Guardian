@@ -15,12 +15,36 @@ is the radio, the audio path or the software, and steps 1–2 tell you which.
 
 ## What you need
 
-- Two stations, or one station and any audio recorder (a phone against the
-  speaker is enough for step 1).
+- Two stations. (Strictly, one station and any recorder will do for step 1, but
+  G2 records for you now — see below.)
 - A VHF simplex channel you are licensed to use and that is quiet. Do not do
   this on a repeater, a calling channel, or an APRS frequency.
-- G2 installed: `Guardian-G2-2.0.1-setup-win-x64.exe`.
-- Somewhere to save WAV files.
+- G2 2.0.2 or later installed. **The recorder is built in**: no Audacity, no
+  phone against the speaker, and nothing to get wrong about the file format.
+
+## The built-in recorder
+
+Guardian records the audio it receives straight to a file the offline tools can
+read. It writes mono 16-bit PCM at the audio path's own rate, which is exactly
+what `tools\ofdm_bench.py --read-wav` expects, so there is no resampling or
+exporting step where a good capture can be turned into a misleading one.
+
+Captures land in:
+
+```
+%APPDATA%\Guardian-G2\captures\capture-YYYYmmdd-HHMMSS.wav
+```
+
+Start and stop it from the shell. While it runs you can see the elapsed time and
+the peak level, and **watch that level** — it is the difference between a session
+you can use and one you have to repeat. When you stop, Guardian tells you
+straight away whether the capture was silent, clipping, or usable, and can decode
+it there and then to show the sync confidence, SNR, EVM and frequency offset.
+
+It does not need the control channel to be running. A station brought up purely
+to record what the other end transmits is exactly step 1, and that is the case it
+is built for. It will refuse to record while a payload transfer owns the sound
+card, and say so.
 
 Before transmitting, identify. This is an experimental data waveform; a station
 hearing it will not recognise it, so send a voice or CW ID first and say what you
@@ -71,21 +95,22 @@ software problem at the far end.
 
 **Station B (receive):**
 
-6. Record the received audio to a WAV file. **Mono, 48000 Hz, 16-bit.** Any
-   recorder — Audacity, a phone, the sound card's own loopback. Start recording
-   before A transmits and stop after.
-7. Decode it:
+6. Start recording in Guardian *before* A transmits, and stop after. Read the
+   verdict it gives you: if it says silent or clipping, fix that and repeat
+   before doing anything else.
+7. Decode it — either with the Analyse button on the dialog Guardian shows, or
+   from the command line, which prints more:
 
 ```powershell
-python tools\ofdm_bench.py --read-wav capture-01.wav
+python tools\ofdm_bench.py --read-wav %APPDATA%\Guardian-G2\captures\capture-....wav
 ```
 
 **Write down, for every capture:** sync confidence, measured SNR, EVM, CFO
 estimate, and whether the result was PASS.
 
-If the file is not 48000 Hz the tool will say so and stop; resample it or record
-again at the right rate. Do not resample by ear — a wrong rate looks exactly like
-a broken modem.
+Guardian's own captures are always at the right rate. If you record with
+something else and the rate is wrong the tool will say so and stop — record again
+rather than resampling, because a wrong rate looks exactly like a broken modem.
 
 ### What the numbers mean
 
@@ -106,8 +131,10 @@ follows; the printed numbers are a summary of them, not a substitute.
 
 ## Step 2 — Find the real bandwidth (the point of the exercise)
 
-Repeat step 1 while changing one thing at a time. Keep every WAV, and name them
-so you can tell them apart later — `capture-mcs0-dev3k.wav`, not `test5.wav`.
+Repeat step 1 while changing one thing at a time. Guardian names each capture by
+timestamp, so keep a note as you go — timestamp, then what you changed. Renaming
+the files afterwards works too; what must not happen is ending up with a folder
+of captures and no record of the conditions.
 
 Vary, in this order:
 
@@ -182,9 +209,9 @@ everything else combined.
 
 ## 1. The WAV captures — the most valuable thing by far
 
-Every recording from steps 1 and 2, with the reference file from step 0.
-Mono, 48000 Hz, 16-bit. Named so the conditions are recoverable, and a note
-saying what each one was.
+Everything in `%APPDATA%\Guardian-G2\captures\` from steps 1 and 2, plus the
+reference file from step 0. Guardian names them by timestamp, so send a note
+saying what each timestamp was — level, MCS, where the audio came from.
 
 Why they matter more than any log: a capture lets me run the *entire receiver*
 over exactly what your radio produced, as many times as I like, with changes.
@@ -195,6 +222,8 @@ against a capture without you touching the radio again.
 Do not trim, normalise, denoise, or convert them to MP3. The silence before and
 after the burst is data: the noise floor is what the squelch is measured against,
 and lossy compression destroys the phase relationships the modem depends on.
+Guardian deliberately does none of those things on the way out, so a file it
+wrote is already in the state I want it in — just send it as it is.
 
 ## 2. The Guardian log
 

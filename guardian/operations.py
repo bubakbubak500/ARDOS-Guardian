@@ -14,7 +14,9 @@ from .install.dependencies import find_vara_fm, find_vara_hf
 from .i18n import dual
 from .message import Folder, MessageStore, Status
 from .modem import make_modem
-from .modem.audio import AudioControlTransport, resolve_device
+from .modem.audio import (DEFAULT_SAMPLE_RATE, AudioControlTransport,
+                          resolve_device)
+from .modem.recorder import AudioCapture, WavRecorder, capture_path
 from .payload import make_backend
 from .payload.negotiated import NegotiatedPayload
 from .protocol import (
@@ -142,6 +144,9 @@ class Operations:
         self.audio_transport: AudioControlTransport | None = None
         self._radio_lock = threading.RLock()
         self._payload_active = threading.Event()
+        # Set while the operator is capturing received audio to a file.
+        self._recorder: WavRecorder | None = None
+        self._recorder_capture: AudioCapture | None = None
         self._last_radio_poll = 0.0
         self._stored_inbound: set[int] = set()
         self._qsy_previous: int | None = None
@@ -612,6 +617,140 @@ class Operations:
     def payload_active(self) -> bool:
         """True while VARA owns the shared audio; the UI keeps quiet then."""
         return self._payload_active.is_set()
+
+    # ----- recording received audio ---------------------------------------
+
+    def recording_active(self) -> bool:
+        return self._recorder is not None and self._recorder.active
+
+    def recording_seconds(self) -> float:
+        return self._recorder.seconds if self._recorder is not None else 0.0
+
+    def recording_level(self) -> float:
+        """Loudest sample of the capture so far, in full-scale units."""
+        return self._recorder.level() if self._recorder is not None else 0.0
+
+    def recording_path(self) -> Path | None:
+        return self._recorder.path if self._recorder is not None else None
+
+    def start_recording(self) -> Path | None:
+        """Start writing received audio to a WAV file. Returns the path, or None.
+
+        Two ways in, and the choice is not arbitrary. When the control channel is
+        open its receive stream is tapped, so there is only ever one handle on the
+        device and the capture is exactly the audio the modem is working from.
+        When it is not, a stream of its own is opened -- which is the normal case
+        for the first step of an on-air test, where a station is brought up purely
+        to record what the other end transmits.
+        """
+        if self.recording_active():
+            return self._recorder.path
+        if self.payload_active():
+            self._log(
+                dual(
+                    "Cannot record while a payload transfer owns the audio device.",
+                    "Nelze nahrávat, když zvukové zařízení používá přenos zprávy.",
+                ),
+                LogLevel.WARNING,
+                source="audio",
+            )
+            return None
+
+        sample_rate = (self.audio_transport.fs if self.audio_transport is not None
+                       else DEFAULT_SAMPLE_RATE)
+        recorder = WavRecorder(
+            capture_path(config_dir() / "captures"),
+            sample_rate=sample_rate,
+            on_log=lambda value: self._log(value, source="audio"),
+        )
+        capture = None
+        try:
+            recorder.start()
+            if self.audio_transport is not None:
+                self.audio_transport.on_audio = recorder.write
+                source = self.audio_transport.actual_input_device_name or "control RX"
+            else:
+                device = (resolve_device(self.config.audio_input, "input")
+                          if self.config.audio_input else None)
+                if not isinstance(device, int):
+                    raise RuntimeError(
+                        dual(
+                            "Select an available RX input in Station settings first.",
+                            "Nejprve vyberte dostupný vstup RX v nastavení stanice.",
+                        )
+                    )
+                capture = AudioCapture(recorder, device=device,
+                                       sample_rate=sample_rate)
+                capture.start()
+                source = str(self.config.audio_input)
+        except Exception as exc:  # noqa: BLE001 - report it, do not crash the UI
+            if capture is not None:
+                capture.stop()
+            recorder.stop()
+            try:
+                recorder.path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._log(f"Recording could not start: {exc}", LogLevel.ERROR,
+                      source="audio")
+            return None
+
+        self._recorder = recorder
+        self._recorder_capture = capture
+        self._log(
+            dual(
+                f"Recording received audio from {source} to {recorder.path.name} "
+                f"({sample_rate} Hz mono).",
+                f"Nahrávám přijímaný zvuk z {source} do {recorder.path.name} "
+                f"({sample_rate} Hz mono).",
+            ),
+            source="audio",
+        )
+        return recorder.path
+
+    def _close_recording_losing_its_source(self, reason: str) -> None:
+        """End a tapped recording whose audio source is about to disappear.
+
+        A capture that taps the control stream stops receiving the moment that
+        stream closes, but nothing about it would look wrong: the file stays open,
+        the UI still says "recording", and the elapsed time simply stops advancing.
+        Closing it here gives the operator a complete, valid file and a line saying
+        why it ended. A capture on a stream of its own is unaffected, so it is
+        left alone.
+        """
+        if self._recorder is None or self._recorder_capture is not None:
+            return
+        self._log(
+            dual(f"Recording stopped: {reason}.",
+                 f"Nahrávání ukončeno: {reason}."),
+            source="audio",
+        )
+        try:
+            self.stop_recording()
+        except Exception as exc:  # noqa: BLE001 - never block the codec handoff
+            self._log(f"Recording could not be closed cleanly: {exc}",
+                      LogLevel.ERROR, source="audio")
+
+    def stop_recording(self):
+        """Close the capture and return its `RecordingSummary`, or None."""
+        recorder, self._recorder = self._recorder, None
+        capture, self._recorder_capture = self._recorder_capture, None
+        if recorder is None:
+            return None
+        if self.audio_transport is not None and self.audio_transport.on_audio is not None:
+            self.audio_transport.on_audio = None
+        if capture is not None:
+            capture.stop()
+        summary = recorder.stop()
+        self._log(
+            dual(
+                f"Recording stopped: {summary.verdict()}",
+                f"Nahrávání ukončeno: {summary.verdict()}",
+            ),
+            LogLevel.WARNING if not summary.usable else LogLevel.INFO,
+            source="audio",
+        )
+        return summary
 
     def is_no_cat_radio(self) -> bool:
         return (
@@ -1427,6 +1566,7 @@ class Operations:
 
     def stop_control_channel(self) -> None:
         self.stop_scanner(restore=True)
+        self._close_recording_losing_its_source("the control channel was stopped")
         if self.audio_transport is not None:
             self.audio_transport.stop()
         self.audio_transport = None
@@ -1888,6 +2028,8 @@ class Operations:
 
     def _suspend_control(self) -> None:
         self._warn_if_nothing_can_key_vara()
+        self._close_recording_losing_its_source(
+            "a payload transfer needs the audio device")
         self._payload_active.set()
         try:
             # Wait for a radio poll already in progress before VARA begins.

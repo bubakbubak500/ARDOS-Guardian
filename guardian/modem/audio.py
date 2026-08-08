@@ -38,6 +38,11 @@ _PSEUDO_DEVICE_PREFIXES = (
     "primary sound driver",
 )
 
+#: What every audio path here runs at. It was a bare default on
+#: AudioControlTransport until a second caller needed the same figure; a named
+#: constant is better than two copies that can drift apart.
+DEFAULT_SAMPLE_RATE = 48000
+
 PTT_LEAD_SECONDS = 0.15
 PTT_TAIL_SECONDS = 0.25
 # Silence appended after every transmitted frame. Stopping the output stream
@@ -490,7 +495,7 @@ class AudioControlTransport(ControlTransport):
         self,
         modem: AFSKModem | None = None,
         ptt: Callable[[bool], None] | None = None,
-        sample_rate: int = 48000,
+        sample_rate: int = DEFAULT_SAMPLE_RATE,
         input_device=None,
         output_device=None,
         diagnostic_audio_path: Path | str | None = None,
@@ -506,6 +511,9 @@ class AudioControlTransport(ControlTransport):
         )
         self.on_log = on_log or (lambda m: None)
         self.on_frame = None
+        #: Optional sink handed every received block, for recording the audio to
+        #: a file. Set by `Operations.start_recording`; None the rest of the time.
+        self.on_audio = None
 
         self._sd = None
         self._stream = None
@@ -676,6 +684,15 @@ class AudioControlTransport(ControlTransport):
         if self._tx_lock.locked():
             return  # half-duplex: ignore our own transmission
         block = indata[:, 0]
+        if self.on_audio is not None:
+            # A recorder taps the stream here rather than opening a second handle
+            # on the same device, so a capture is exactly the audio the modem is
+            # working from. Wrapped because this runs on the PortAudio thread: an
+            # exception escaping it would take the whole receive path down.
+            try:
+                self.on_audio(block)
+            except Exception:  # noqa: BLE001 - a sink must never stop reception
+                pass
         self._rx_buf.extend(block.copy())
         # Update level meters: smoothed RMS, peak, and a slow noise floor.
         rms = float(np.sqrt(np.mean(block.astype(np.float64) ** 2))) if len(block) else 0.0
