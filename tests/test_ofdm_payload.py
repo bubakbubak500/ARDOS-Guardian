@@ -679,3 +679,46 @@ def test_a_stream_that_stops_mid_burst_ends_it_rather_than_waiting_for_ever(
     window = pipe.receive(timeout=10.0)
     assert window is not None
     assert len(window) > 0
+
+
+def test_a_loud_first_block_does_not_leave_the_squelch_deaf(monkeypatch) -> None:
+    """The failure mode this asymmetry was found by, stated as a test.
+
+    A station only ever listens for a payload answer straight after it has
+    transmitted, and the first audio back is the receiver's AGC recovering and
+    whatever the radio makes of the carrier dropping -- far louder than the real
+    noise. Seed the floor from that and the trigger sits three times higher
+    again, so the acknowledgement that follows never opens the squelch and the
+    station retransmits into a channel it has made itself deaf to.
+    """
+    sd = FakeSounddevice()
+    pipe = _pipe(sd, RecordingPtt(), monkeypatch)
+    pipe.start()
+    stream = sd.streams[0]
+
+    block = int(BENCH.sample_rate * 0.05)
+    rng = np.random.default_rng(11)
+    stream.feed(rng.normal(0.0, 0.2, block))          # the thump after unkeying
+    for _ in range(8):
+        stream.feed(rng.normal(0.0, 1e-3, block))     # the real noise floor
+
+    assert pipe.receive(timeout=0.3) is None
+    # Settled onto the quiet part, not stuck up at the thump.
+    assert pipe._floor < 0.01, f"floor stuck at {pipe._floor}"
+    assert pipe._trigger_level() < 0.03
+
+
+def test_the_squelch_can_say_what_it_is_doing(monkeypatch) -> None:
+    # The sender logs this when a reply window comes up empty, so "nothing was
+    # heard" can be told apart from "the squelch never opened".
+    sd = FakeSounddevice()
+    pipe = _pipe(sd, RecordingPtt(), monkeypatch)
+    pipe.start()
+    stream = sd.streams[0]
+    block = int(BENCH.sample_rate * 0.05)
+    for _ in range(4):
+        stream.feed(np.random.default_rng(5).normal(0.0, 1e-3, block))
+    pipe.receive(timeout=0.2)
+
+    note = pipe.describe_squelch()
+    assert "dBFS" in note and "opens at" in note

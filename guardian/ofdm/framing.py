@@ -179,6 +179,46 @@ def decode_section(symbols, noise_var, byte_count: int, modulation: str) -> byte
     return np.packbits(bits[: byte_count * 8].astype(np.uint8)).tobytes()
 
 
+def reference_evm(profile: OfdmProfile, symbols, data: bytes,
+                  modulation: str) -> float | None:
+    """RMS error against the symbols the sender must have transmitted.
+
+    Once a section has decoded and passed its CRC, the bytes are known, and
+    re-encoding them reproduces the exact constellation points that went into
+    the transmitter. Comparing those with what came out of the equaliser gives
+    the true error vector -- which is a different quantity from the
+    decision-directed one, and the only one worth acting on.
+
+    The difference is not a nicety. A decision-directed measurement slices every
+    symbol to its nearest point, so as a link degrades the measured error stops
+    growing and starts *shrinking*: the symbols are landing near the wrong
+    points, and the wrong point is close by. That is why the failing 64-QAM
+    bursts in the 2026-08-09 tests reported a better EVM than the QPSK bursts
+    that decoded perfectly. Against the reference they report 30%, and the
+    ordering comes back the right way round.
+
+    None when there is nothing to compare -- an empty section, or a reference
+    that came out shorter than the symbols handed in.
+    """
+    reference = encode_section(profile, data, modulation).reshape(-1)
+    symbols = np.asarray(symbols, dtype=np.complex128).reshape(-1)
+    count = min(len(reference), len(symbols))
+    if count < 1:
+        return None
+    power = float(np.mean(np.abs(reference[:count]) ** 2))
+    if power <= 0.0:
+        return None
+    error = symbols[:count] - reference[:count]
+    return float(np.sqrt(float(np.mean(np.abs(error) ** 2)) / power))
+
+
+def evm_to_snr_db(evm_rms: float | None) -> float | None:
+    """Turn an error-vector magnitude into the SNR it implies, in dB."""
+    if evm_rms is None or not np.isfinite(evm_rms) or evm_rms <= 0.0:
+        return None
+    return float(-20.0 * np.log10(evm_rms))
+
+
 # -- whole bursts ----------------------------------------------------------- #
 
 def build_burst(profile: OfdmProfile, header: PhyHeader,
@@ -256,13 +296,23 @@ def decode_burst(profile: OfdmProfile, samples) -> DecodedBurst:
     if not found:
         return DecodedBurst(metrics=LinkMetrics(error="no burst detected"))
 
-    attempts = [_decode_at(profile, sync) for sync in found]
-    for attempt in attempts:
+    # One candidate at a time, stopping at the first readable header. Decoding
+    # them all first and then picking cost a Viterbi pass per surplus candidate
+    # -- around 200 ms each on a 512-byte block -- inside the window the far end
+    # is holding its transmitter off waiting for an answer.
+    fallback: DecodedBurst | None = None
+    for sync in found:
+        attempt = _decode_at(profile, sync)
         if attempt.header is not None:
             return attempt
-    # Nothing had a readable header. Report the candidate that got furthest,
-    # which is the one whose error message is worth logging.
-    return max(attempts, key=lambda attempt: attempt.metrics.snr_db is not None)
+        # Nothing had a readable header yet. Keep the candidate that got
+        # furthest, which is the one whose error message is worth logging.
+        if fallback is None or (attempt.metrics.snr_db is not None
+                                and fallback.metrics.snr_db is None):
+            fallback = attempt
+    return fallback if fallback is not None else DecodedBurst(
+        metrics=LinkMetrics(error="no burst detected")
+    )
 
 
 def _decode_at(profile: OfdmProfile, sync) -> DecodedBurst:
@@ -288,19 +338,23 @@ def _decode_at(profile: OfdmProfile, sync) -> DecodedBurst:
         return DecodedBurst(metrics=metrics)
 
     head_symbols, head_var, _ = receiver.data_symbols(0, head_count)
+    head_bytes = decode_section(head_symbols, head_var, HEADER_BYTES,
+                                HEADER_MCS.modulation)
     try:
-        header = PhyHeader.decode(
-            decode_section(head_symbols, head_var, HEADER_BYTES, HEADER_MCS.modulation)
-        )
+        header = PhyHeader.decode(head_bytes)
     except OfdmFrameError as exc:
         metrics.error = f"header rejected: {exc}"
         return DecodedBurst(metrics=metrics)
 
+    # The header passed its own CRC, so its bytes are known and the burst can be
+    # measured honestly from here on -- including when the data section is about
+    # to fail, which is precisely when the operator needs the number.
+    _set_evm(metrics, reference_evm(profile, head_symbols, head_bytes,
+                                    HEADER_MCS.modulation), "reference_header")
+
     metrics.mcs = header.mcs
     if header.frame_type is not OfdmFrameType.DATA:
         metrics.frame_ok = True
-        metrics.evm_rms = evm(head_symbols, HEADER_MCS.modulation)
-        metrics.evm_source = "decision_directed_header"
         return DecodedBurst(header=header, payload=b"", metrics=metrics)
 
     modulation = mcs(header.mcs).modulation
@@ -315,17 +369,34 @@ def _decode_at(profile: OfdmProfile, sync) -> DecodedBurst:
 
     data_symbols, data_var, slope = receiver.data_symbols(head_count, data_count)
     metrics.phase_slope = slope
-    metrics.evm_rms = evm(data_symbols, modulation)
-    metrics.evm_source = "decision_directed"
     framed = decode_section(data_symbols, data_var, framed_bytes, modulation)
     payload, given = framed[: header.payload_len], framed[header.payload_len:]
     want = _CRC.pack(crc16(payload))
     if given != want:
+        # The data bytes are not trustworthy, so they cannot serve as a
+        # reference. The header measurement already on `metrics` was taken at
+        # MCS0 over the same channel moments earlier and is the better estimate;
+        # keep it, and fall back to decision-directed only if it is missing.
+        if metrics.evm_rms is None:
+            _set_evm(metrics, evm(data_symbols, modulation), "decision_directed")
         metrics.error = f"payload CRC failed on block {header.block_seq}"
         return DecodedBurst(header=header, metrics=metrics)
 
+    # The whole data section is known now: far more symbols than the header, and
+    # at the constellation actually in use, so it supersedes the header figure.
+    _set_evm(metrics, reference_evm(profile, data_symbols, framed, modulation),
+             "reference")
     metrics.frame_ok = True
     return DecodedBurst(header=header, payload=payload, metrics=metrics)
+
+
+def _set_evm(metrics: LinkMetrics, value: float | None, source: str) -> None:
+    """Record an error-vector measurement and the SNR it implies."""
+    if value is None:
+        return
+    metrics.evm_rms = value
+    metrics.evm_source = source
+    metrics.residual_snr_db = evm_to_snr_db(value)
 
 
 def split_blocks(payload: bytes, block_size: int) -> list[bytes]:

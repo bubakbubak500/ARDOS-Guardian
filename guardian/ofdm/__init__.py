@@ -28,8 +28,9 @@ BENCH burst about 2.4 kHz wide.
 """
 
 from .config import (BENCH, DEFAULT_MCS_INDEX, DEFAULT_PROFILE_NAME, HEADER_MCS,
-                     MCS_TABLE, Mcs, OfdmConfigError, OfdmProfile, PROFILES, mcs,
-                     profile, profile_names, profile_or_default)
+                     MCS_TABLE, Mcs, OfdmConfigError, OfdmProfile, PROFILES,
+                     best_mcs_for, mcs, profile, profile_names,
+                     profile_or_default)
 from .framing import (DecodedBurst, HEADER_BYTES, OfdmFrameError, OfdmFrameType,
                       PhyHeader, build_burst, burst_duration, decode_burst,
                       split_blocks)
@@ -60,6 +61,7 @@ __all__ = [
     "PROFILES",
     "PhyHeader",
     "SimulatedDuplexPipe",
+    "best_mcs_for",
     "build_burst",
     "burst_duration",
     "decode_burst",

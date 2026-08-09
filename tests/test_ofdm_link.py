@@ -401,3 +401,66 @@ def test_the_log_narrates_the_transfer() -> None:
     assert "complete" in joined
     # Log lines reach a Windows console through tools/ofdm_bench.py.
     assert joined.isascii()
+
+
+# -- the last acknowledgement ----------------------------------------------- #
+#
+# The final ACK is the one frame in the exchange that nothing else protects.
+# Before the receiver learned to linger, losing it turned a message that had
+# arrived intact into a failure at the sender -- which is exactly what OK7PS
+# saw for #270532609 on 2026-08-09 while OK2IPW logged the same message
+# delivered.
+
+def _drop_nth_reply(nth: int):
+    """Damage hook for the receiver's pipe: silence its `nth` transmission."""
+    def damage(count: int, samples: np.ndarray) -> np.ndarray:
+        return np.zeros_like(samples) if count == nth else samples
+    return damage
+
+
+def _exchange_losing_reply(nth: int, payload: bytes, *, msg_id: int = 42):
+    """Run a transfer with one of the receiver's answers lost on the way back."""
+    spec = ChannelSpec(snr_db=15.0, delay=500, trailing=1500)
+    near, far = simulated_pair(BENCH, spec, seed=SEED)
+    far.damage = _drop_nth_reply(nth)
+    sender = OfdmLink(BENCH, near, mcs_index=1, max_retries=4,
+                      ptt_turnaround=TURNAROUND, timeout_margin=MARGIN)
+    receiver = OfdmLink(BENCH, far, mcs_index=1, max_retries=4,
+                        ptt_turnaround=TURNAROUND, timeout_margin=MARGIN)
+    got: dict[str, bytes | None] = {}
+    listener = threading.Thread(
+        target=lambda: got.__setitem__("data", receiver.receive_message(msg_id=msg_id)),
+        daemon=True,
+    )
+    listener.start()
+    ok = sender.send_message(msg_id, payload)
+    listener.join(timeout=180)
+    assert not listener.is_alive(), "the receiver never finished"
+    return sender, receiver, got.get("data"), ok
+
+
+def test_a_lost_final_acknowledgement_does_not_fail_a_delivered_message() -> None:
+    payload = _payload(300)                      # one block, so the first ACK is the last
+    sender, receiver, received, ok = _exchange_losing_reply(1, payload)
+
+    assert received == payload, "the receiver had the message all along"
+    assert ok, "and the sender must be told so, not left to time out"
+    assert sender.status.retries >= 1
+    assert receiver.adaptation.duplicates >= 1
+
+
+def test_the_receiver_re_acknowledges_the_block_it_already_holds() -> None:
+    # The duplicate is dropped, not appended: a message re-assembled from a
+    # block counted twice would be silently wrong, which is worse than failing.
+    payload = _payload(300)
+    _, receiver, received, _ = _exchange_losing_reply(1, payload)
+    assert received == payload
+    assert receiver.adaptation.blocks_received == 1
+
+
+def test_lingering_ends_by_itself_when_the_acknowledgement_was_heard() -> None:
+    # The cost of the hold is bounded and paid only once, so a healthy transfer
+    # is not made slower by more than the one reply window it waits out.
+    sender, receiver, received, ok = _exchange(_payload(300))
+    assert ok and received == _payload(300)
+    assert receiver.adaptation.duplicates == 0

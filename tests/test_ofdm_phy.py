@@ -419,3 +419,74 @@ def test_silence_is_reported_as_no_burst() -> None:
 
 def test_a_buffer_shorter_than_one_symbol_does_not_raise() -> None:
     assert decode_burst(BENCH, np.zeros(10)).header is None
+
+
+# -- what the reported SNR is actually measuring ---------------------------- #
+#
+# The whole 2026-08-09 air test turned on this distinction. The training-symbol
+# estimate read 18-20 dB while the link was delivering 9-12 dB, because the two
+# training symbols are identical and every deterministic distortion in a radio
+# path cancels between them. These pin the behaviour so the honest figure cannot
+# quietly go back to being the flattering one.
+
+def _distorted(waveform: np.ndarray, strength: float) -> np.ndarray:
+    """A memoryless nonlinearity: deterministic, and invisible to a noise estimate."""
+    return np.tanh(waveform * strength) / strength
+
+
+def test_distortion_leaves_the_noise_only_snr_untouched() -> None:
+    header = PhyHeader(OfdmFrameType.DATA, 5, mcs=1, payload_len=256)
+    clean = build_burst(BENCH, header, _payload(256))
+    pad = np.zeros(BENCH.symbol_samples)
+
+    honest = decode_burst(BENCH, np.concatenate([pad, clean, pad]))
+    hurt = decode_burst(BENCH, np.concatenate([pad, _distorted(clean, 12.0), pad]))
+
+    # Both still decode; the point is not that distortion breaks the link.
+    assert honest.ok and hurt.ok
+    # The training symbols cannot see it -- that is the trap, stated as a test.
+    assert hurt.metrics.snr_db > 30.0
+    # The post-equalisation figure can, and drops by a lot.
+    assert hurt.metrics.residual_snr_db < honest.metrics.residual_snr_db - 6.0
+
+
+def test_the_error_vector_is_measured_against_the_reference_not_the_decision() -> None:
+    # 64-QAM is where a decision-directed measurement flatters hardest: the
+    # points are close together, so a symbol that has landed on the wrong one is
+    # reported as barely wrong at all.
+    header = PhyHeader(OfdmFrameType.DATA, 5, mcs=3, payload_len=256)
+    burst = build_burst(BENCH, header, _payload(256))
+    pad = np.zeros(BENCH.symbol_samples)
+    decoded = decode_burst(BENCH, np.concatenate([pad, burst, pad]))
+
+    assert decoded.ok
+    assert decoded.metrics.evm_source == "reference"
+    assert decoded.metrics.residual_snr_db is not None
+
+
+def test_a_failed_payload_still_reports_an_honest_snr_from_its_header() -> None:
+    # The case that matters most: the burst that will not decode is exactly the
+    # one whose SNR the operator needs, and the header carries a known-good
+    # reference even when the payload does not.
+    from guardian.ofdm.channel import Channel, ChannelSpec
+
+    header = PhyHeader(OfdmFrameType.DATA, 5, mcs=3, payload_len=256)
+    burst = build_burst(BENCH, header, _payload(256))
+    pad = np.zeros(BENCH.symbol_samples)
+    # 11 dB in band: comfortably above what the MCS0 header needs and well below
+    # the 15.5 dB the MCS3 payload does, which is the gap the whole row exists for.
+    aired = Channel(BENCH, ChannelSpec(snr_db=11.0), seed=SEED)(burst)
+    decoded = decode_burst(BENCH, np.concatenate([pad, aired, pad]))
+
+    assert decoded.header is not None and not decoded.ok
+    assert decoded.metrics.evm_source == "reference_header"
+    assert decoded.metrics.residual_snr_db is not None
+
+
+def test_the_mcs_table_carries_measured_thresholds_in_ascending_order() -> None:
+    thresholds = [entry.min_snr_db for entry in MCS_TABLE]
+    assert thresholds == sorted(thresholds)
+    # MCS0 and MCS1 carried 512-byte blocks at the bottom of the swept range;
+    # the two dense constellations are the ones with a real floor under them.
+    assert mcs(2).min_snr_db > mcs(1).min_snr_db
+    assert mcs(3).min_snr_db > mcs(2).min_snr_db

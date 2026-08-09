@@ -12,11 +12,14 @@ gone back to the control modem. That is not tidiness: `done()` may immediately
 key the radio to send a RECEIVED frame over AFSK, and if the payload transport
 still owned the soundcard, that frame would never go out.
 
-**Status of over-the-air ARQ.** The state machine in `guardian.ofdm.link` is
-fully exercised against a simulated duplex channel, and `RadioAudioPipe` is
-unit-tested against a fake sounddevice for its keying and codec ordering. The
-first two-radio exchange has not happened yet -- that is the next milestone's
-opening task, and it is isolated to this file.
+**Status of over-the-air ARQ.** The first two-radio exchange happened on
+2026-08-09 (two IC-705s, OK7PS and OK2IPW) and messages moved. It also found two
+faults that a simulated pipe structurally cannot: the receive squelch could be
+deafened by the station's own transmission, because only a real radio produces
+the AGC recovery and carrier drop that seeded its noise floor; and a lost final
+acknowledgement turned a delivered message into a reported failure, because the
+simulated pipe never lost one. Both are fixed here and in `guardian.ofdm.link`,
+and both now have tests. `docs/OFDM_AIR_RESULTS_2026-08-09.md` has the analysis.
 """
 
 from __future__ import annotations
@@ -253,16 +256,38 @@ class RadioAudioPipe:
         return self._floor_seen >= FLOOR_SETTLE_SECONDS
 
     def _track_floor(self, level: float, seconds: float) -> None:
-        """Follow the idle noise level, slowly.
+        """Follow the idle noise level: quick to come down, slow to go up.
 
-        Slowly on purpose: track it fast and a burst drags the floor up to its own
-        level, after which nothing triggers again.
+        Slow to go up on purpose: track a rise fast and a burst drags the floor
+        to its own level, after which nothing triggers again.
+
+        Quick to come down for the opposite reason, and it is the one that bit us
+        on air. Every payload transmission is followed immediately by listening
+        for the answer, and the first audio after the transmitter unkeys is the
+        receiver's AGC recovering and whatever the radio makes of the carrier
+        dropping. Seeding the floor from that -- which taking the first block, or
+        a symmetric filter, both do -- sets it tens of dB above the real noise,
+        and since the trigger is three times the floor, the acknowledgement that
+        follows never rises above it. The station then retransmits into a channel
+        it has made itself deaf to. A floor that falls with a 100 ms time constant
+        and rises with a 10 s one converges on the quiet part regardless of what
+        it was seeded with.
         """
         if self._floor_seen <= 0.0:
             self._floor = level
+        elif level < self._floor:
+            self._floor += (level - self._floor) * min(1.0, seconds / 0.1)
         else:
             self._floor += (level - self._floor) * min(0.1, seconds)
         self._floor_seen += seconds
+
+    def describe_squelch(self) -> str:
+        """The squelch state in dBFS, for the log when a reply window came up empty."""
+        def dbfs(value: float) -> str:
+            return f"{20.0 * np.log10(value):.0f} dBFS" if value > 0 else "silent"
+
+        return (f"squelch floor {dbfs(self._floor)}, "
+                f"opens at {dbfs(self._trigger_level())}")
 
     def longest_burst_samples(self) -> int:
         """The longest burst this profile can produce, at the most robust MCS."""

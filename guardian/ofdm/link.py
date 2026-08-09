@@ -108,6 +108,10 @@ class OfdmLink:
     adaptation: AdaptationState = field(default_factory=AdaptationState)
     #: Measurements from the most recently decoded burst, for diagnostics.
     last_metrics: LinkMetrics | None = None
+    #: Why the last wait for an acknowledgement ended empty. "nothing was heard"
+    #: and "something arrived and would not decode" are different faults with
+    #: different fixes, and a bare "no answer" in the log distinguishes neither.
+    last_reply_reason: str = ""
     #: Seconds the channel has been occupied by this transfer -- airtime in both
     #: directions plus a turnaround per change of direction.
     channel_seconds: float = 0.0
@@ -224,31 +228,67 @@ class OfdmLink:
                 self.adaptation.blocks_nacked += 1
                 self._log(f"OFDM: block {seq} nacked, resending")
             else:
-                self._log(f"OFDM: no answer to block {seq}, resending")
+                last = attempt == self.max_retries
+                self._log(f"OFDM: no answer to block {seq} "
+                          f"({self.last_reply_reason})"
+                          f"{'' if last else ', resending'}")
         return False
 
     def _await_reply(self, msg_id: int, seq: int) -> OfdmFrameType | None:
-        """Wait for this block's ACK or NACK, ignoring anything else."""
+        """Wait for this block's ACK or NACK, ignoring anything else.
+
+        Records on `last_reply_reason` what the silence was made of, because the
+        two ways this returns None want opposite responses from the operator:
+        nothing ever rising above the squelch is a receive-level or a keying
+        problem, while bursts arriving and failing to decode is a modem or a
+        signal-quality problem.
+        """
         deadline = time.monotonic() + self.reply_timeout()
+        heard = 0
+        why = ""
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
-                return None
+                break
             samples = self.pipe.receive(remaining)
             if samples is None:
-                return None
+                break
+            heard += 1
             decoded = decode_burst(self.profile, samples)
             self._record(decoded)
             header = decoded.header
             if header is None or not decoded.ok:
+                why = decoded.metrics.error or "burst did not decode"
                 continue
             if header.frame_type is OfdmFrameType.DATA:
+                why = "the far end was still sending data"
                 continue
             # A re-sent acknowledgement of an earlier block proves nothing about
             # this one, so keep listening rather than treating it as progress.
             if header.msg_id != msg_id or header.block_seq != seq:
+                why = f"heard an answer for block {header.block_seq}, not {seq}"
                 continue
+            self.last_reply_reason = ""
             return header.frame_type
+        if heard:
+            self.last_reply_reason = f"{heard} burst(s) heard, none usable: {why}"
+        else:
+            self.last_reply_reason = f"nothing heard{self._squelch_note()}"
+        return None
+
+    def _squelch_note(self) -> str:
+        """What the pipe's squelch was doing, when the pipe can say.
+
+        Duck-typed on purpose: the simulated pipe has no squelch and should not
+        be made to grow one just so this can call it.
+        """
+        describe = getattr(self.pipe, "describe_squelch", None)
+        if describe is None:
+            return ""
+        try:
+            return f" ({describe()})"
+        except Exception:  # noqa: BLE001 - a diagnostic must not fail a transfer
+            return ""
 
     # -- receiving ----------------------------------------------------------
 
@@ -327,7 +367,54 @@ class OfdmLink:
                     f"OFDM: #{header.msg_id} received -- {len(message)} B in "
                     f"{expected} block(s), {self.adaptation.summary()}"
                 )
+                self._linger(header.msg_id, set(blocks))
                 return message
+
+    def _linger(self, msg_id: int, held: set[int]) -> None:
+        """Keep answering after the message is complete, in case the last ACK was lost.
+
+        Without this, the final acknowledgement is the one frame in the exchange
+        that nothing protects. The receiver has the whole message, returns, hands
+        the soundcard back to the control modem and stops listening -- so if that
+        one burst is missed, the sender retransmits into a station that is no
+        longer there, exhausts its retries and reports a failure for a message
+        that arrived perfectly. That is not a theoretical hole: it is what
+        happened to OK7PS #270532609 on 2026-08-09, where OK2IPW logged the
+        message delivered while OK7PS logged it failed.
+
+        The wait is one reply timeout, which is how long the sender gives an
+        answer before it starts resending, so a station that heard us goes quiet
+        within it and this costs that much and no more. A station that did not
+        hear us gets its retransmission acknowledged instead.
+        """
+        rounds = max(1, self.max_retries)
+        self._log(f"OFDM: #{msg_id} complete, holding "
+                  f"{self.reply_timeout():.1f} s in case the sender missed the "
+                  f"acknowledgement")
+        for _ in range(rounds):
+            samples = self.pipe.receive(self.reply_timeout())
+            if samples is None:
+                return
+            decoded = decode_burst(self.profile, samples)
+            self._record(decoded)
+            header = decoded.header
+            if header is None:
+                # Possibly our sender's retransmission arriving broken, which is
+                # the case this hold exists for. Keep waiting.
+                continue
+            if (header.frame_type is not OfdmFrameType.DATA
+                    or header.msg_id != msg_id or header.block_seq not in held):
+                # Something readable that is not the sender asking us again. It
+                # has moved on, so the hold has done its job and holding the
+                # soundcard any longer only delays our own receipt.
+                return
+            # The block is one already held and verified, so it is acknowledged
+            # whether or not this copy of it decoded -- the sender is asking
+            # "did you get it", and the answer is yes.
+            self.adaptation.duplicates += 1
+            self._log(f"OFDM: the sender missed the acknowledgement of block "
+                      f"{header.block_seq}, sending it again")
+            self._answer(OfdmFrameType.ACK, header)
 
     def _answer(self, kind: OfdmFrameType, header: PhyHeader) -> None:
         """Send an ACK or NACK for a received block, at the most robust MCS."""

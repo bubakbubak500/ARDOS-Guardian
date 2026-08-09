@@ -42,6 +42,18 @@ class Mcs:
     modulation: str
     bits_per_symbol: int
     code_rate: Fraction
+    #: Post-equalisation SNR, in dB, at which 512-byte blocks decode reliably.
+    #:
+    #: Measured, not derived: a sweep of `guardian.ofdm.channel` at 1 dB steps,
+    #: eight 512-byte blocks per point, reading the same `residual_snr_db` the
+    #: receiver reports on air. The figure is the first step where all eight
+    #: decoded; the step below is where it starts to be luck. See
+    #: docs/OFDM_AIR_TEST.md.
+    #:
+    #: It is deliberately expressed against the *post-equalisation* SNR and not
+    #: the training-symbol one, because those two differed by 8 dB on the first
+    #: real radios and only the first predicted what actually happened.
+    min_snr_db: float = 0.0
 
     @property
     def label(self) -> str:
@@ -52,13 +64,18 @@ class Mcs:
 
 # MCS0 is the bootstrap mode: the PHY header and every ACK/NACK ride on it, so
 # a receiver never has to know the payload modulation in advance. MCS1 is the
-# default for data. MCS2/MCS3 are implemented and tested in simulation but are
-# not defaults -- no on-air measurement justifies them yet.
+# default for data, and the first two-radio tests found it has margin to spare
+# -- both it and MCS0 carried 512-byte blocks at the bottom of the swept range.
+#
+# MCS2 and MCS3 are where the measurement bites. The 2026-08-09 IC-705 pair
+# delivered 9.7-12.0 dB post-equalisation, which puts MCS2 exactly on its
+# threshold and MCS3 more than 5 dB out of reach. They stay in the table because
+# a cleaner path will reach them; they are not defaults because this one did not.
 MCS_TABLE: tuple[Mcs, ...] = (
-    Mcs(0, "bpsk", 1, Fraction(1, 2)),
-    Mcs(1, "qpsk", 2, Fraction(1, 2)),
-    Mcs(2, "qam16", 4, Fraction(1, 2)),
-    Mcs(3, "qam64", 6, Fraction(1, 2)),
+    Mcs(0, "bpsk", 1, Fraction(1, 2), min_snr_db=3.0),
+    Mcs(1, "qpsk", 2, Fraction(1, 2), min_snr_db=3.0),
+    Mcs(2, "qam16", 4, Fraction(1, 2), min_snr_db=10.5),
+    Mcs(3, "qam64", 6, Fraction(1, 2), min_snr_db=15.5),
 )
 
 #: The mode used for the PHY header and for ACK/NACK bursts.
@@ -74,6 +91,18 @@ def mcs(index: int) -> Mcs:
         if entry.index == int(index):
             return entry
     raise OfdmConfigError(f"unknown MCS index {index}")
+
+
+def best_mcs_for(snr_db: float | None) -> Mcs | None:
+    """The fastest MCS a link of this post-equalisation SNR carries reliably.
+
+    None when there is no measurement to judge by, which is not the same as
+    "use the slowest" -- an unmeasured link has not been shown to be bad.
+    """
+    if snr_db is None:
+        return None
+    usable = [entry for entry in MCS_TABLE if snr_db >= entry.min_snr_db]
+    return max(usable, key=lambda entry: entry.index) if usable else None
 
 
 @dataclass(frozen=True)

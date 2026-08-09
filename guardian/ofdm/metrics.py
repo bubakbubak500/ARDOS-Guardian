@@ -26,13 +26,35 @@ class LinkMetrics:
     sync_confidence: float | None = None
     #: Carrier frequency offset in Hz, as estimated from the preamble.
     cfo_hz: float | None = None
-    #: Per-carrier SNR in dB, from the known training symbols. Honest: it
-    #: compares against symbols the receiver knew in advance.
+    #: Per-carrier SNR in dB from the two known training symbols.
+    #:
+    #: This is the *random noise* SNR and nothing else. The training symbols are
+    #: identical, so the estimate comes from their difference -- and any
+    #: impairment that is the same in both, which is every deterministic
+    #: distortion a radio path adds, cancels exactly and is not counted. On the
+    #: 2026-08-09 IC-705 tests it read 18-20 dB while the link was really
+    #: delivering 9-12 dB. Believe `residual_snr_db` over this one.
     snr_db: float | None = None
-    #: RMS error-vector magnitude as a fraction, decision-directed on the data
-    #: section unless `evm_source` says otherwise.
+    #: RMS error-vector magnitude as a fraction. Measured against the symbols
+    #: the sender must have transmitted whenever the section decoded
+    #: (`evm_source == "reference"`), and decision-directed only as a fallback.
+    #:
+    #: The distinction matters most exactly where it is least obvious: a
+    #: decision-directed figure snaps every symbol to its nearest constellation
+    #: point, so a dense constellation that is decoding *badly* reports a
+    #: flattering EVM. 64-QAM measured 18.8% decision-directed and 30.5% against
+    #: the reference on the same failing burst.
     evm_rms: float | None = None
     evm_source: str | None = None
+    #: Post-equalisation SNR in dB, derived from `evm_rms`.
+    #:
+    #: The honest figure, and the one an MCS decision belongs on: it counts
+    #: every impairment between the sender's constellation and the receiver's
+    #: equalised symbols -- noise, distortion, channel-estimate error and the
+    #: equaliser's own losses. About 3 dB below `snr_db` on a clean simulated
+    #: channel, which is the receiver's implementation loss; anything wider than
+    #: that on air is distortion the training symbols cannot see.
+    residual_snr_db: float | None = None
     #: Complex channel response, one entry per active carrier, in carrier order.
     channel_response: np.ndarray | None = None
     #: RMS of the received audio over the burst, in 0..1 full scale.
@@ -55,8 +77,10 @@ class LinkMetrics:
     def summary(self) -> str:
         """One line for the operator log."""
         parts = []
+        if self.residual_snr_db is not None:
+            parts.append(f"SNR {self.residual_snr_db:.1f} dB")
         if self.snr_db is not None:
-            parts.append(f"SNR {self.snr_db:.1f} dB")
+            parts.append(f"noise-only {self.snr_db:.1f} dB")
         if self.evm_rms is not None:
             parts.append(f"EVM {self.evm_rms * 100:.1f} %")
         if self.cfo_hz is not None:
@@ -115,6 +139,9 @@ class AdaptationState:
     duplicates: int = 0
     retransmissions: int = 0
     snr_history: list[float] = field(default_factory=list)
+    #: Post-equalisation SNR per burst -- the honest one, and what an adaptation
+    #: controller should fit its thresholds to.
+    residual_history: list[float] = field(default_factory=list)
     evm_history: list[float] = field(default_factory=list)
     #: Mean |H|^2 per active carrier, accumulated over every decoded burst. This
     #: is the input a per-subcarrier bit-loading map would be computed from.
@@ -125,6 +152,8 @@ class AdaptationState:
         """Fold one received burst's measurements into the history."""
         if metrics.snr_db is not None:
             self.snr_history.append(float(metrics.snr_db))
+        if metrics.residual_snr_db is not None:
+            self.residual_history.append(float(metrics.residual_snr_db))
         if metrics.evm_rms is not None:
             self.evm_history.append(float(metrics.evm_rms))
         if metrics.channel_response is not None:
@@ -158,7 +187,14 @@ class AdaptationState:
 
     @property
     def mean_snr_db(self) -> float | None:
+        """Mean noise-only SNR. See `LinkMetrics.snr_db` for why that is not much."""
         return float(np.mean(self.snr_history)) if self.snr_history else None
+
+    @property
+    def mean_residual_snr_db(self) -> float | None:
+        """Mean post-equalisation SNR -- the figure that predicts what an MCS does."""
+        return (float(np.mean(self.residual_history))
+                if self.residual_history else None)
 
     @property
     def worst_carriers(self) -> np.ndarray | None:
@@ -184,7 +220,15 @@ class AdaptationState:
             parts.append(f"{self.duplicates} duplicates dropped")
         if self.blocks_nacked:
             parts.append(f"{self.blocks_nacked} nacked")
+        # The post-equalisation figure leads, because it is the one that says
+        # whether the MCS in use was the right choice. The noise-only figure
+        # follows it when both exist, so the gap between them -- which is the
+        # distortion in the path -- is visible in the log without arithmetic.
+        residual = self.mean_residual_snr_db
+        if residual is not None:
+            parts.append(f"mean SNR {residual:.1f} dB")
         snr = self.mean_snr_db
         if snr is not None:
-            parts.append(f"mean SNR {snr:.1f} dB")
+            parts.append(f"noise-only {snr:.1f} dB" if residual is not None
+                         else f"mean SNR {snr:.1f} dB")
         return ", ".join(parts)

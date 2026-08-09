@@ -69,7 +69,7 @@ from ..ofdm import bench
 from ..ofdm.config import PROFILE_LADDER, profile_or_default
 from ..services import TaskResult
 from .inputs import RowTable
-from .measurements import measurement, repolish
+from .measurements import mcs_verdict, measurement, repolish
 from .ofdm_labels import profile_rung_label
 from .runtime import ShellRuntime
 
@@ -330,7 +330,9 @@ class ModemWorkspace(QWidget):
             ("channel", dual("Channel applied", "Použitý kanál")),
             ("payload", dual("Payload in the block", "Data v bloku")),
             ("applied", dual("SNR asked for", "Požadovaný odstup")),
-            ("measured", dual("SNR measured", "Měřený odstup")),
+            ("real", dual("Link SNR (what the modem got)",
+                          "Odstup linky (co modem dostal)")),
+            ("measured", dual("Noise-only SNR", "Odstup jen vůči šumu")),
             ("evm", dual("EVM", "Chyba vektoru (EVM)")),
             ("cfo", dual("Frequency offset", "Kmitočtová odchylka")),
             ("sync", dual("Sync confidence", "Spolehlivost synchronizace")),
@@ -374,6 +376,9 @@ class ModemWorkspace(QWidget):
             f"{result.applied_snr_db + result.wideband_offset_db:.1f} dB v celém "
             "zvukovém pásmu",
         ))
+        fields["real"].setText(
+            measurement(metrics.residual_snr_db, "{value:.1f} dB")
+        )
         fields["measured"].setText(measurement(metrics.snr_db, "{value:.1f} dB"))
         fields["evm"].setText(measurement(
             metrics.evm_rms * 100.0 if metrics.evm_rms is not None else None,
@@ -793,10 +798,13 @@ class ModemWorkspace(QWidget):
             ("length", dual("Length", "Délka")),
             ("levels", dual("Levels", "Úrovně")),
             ("sync", dual("Sync confidence", "Spolehlivost synchronizace")),
-            ("snr", dual("SNR measured", "Měřený odstup")),
+            ("real", dual("Link SNR (what the modem got)",
+                          "Odstup linky (co modem dostal)")),
+            ("snr", dual("Noise-only SNR", "Odstup jen vůči šumu")),
             ("evm", dual("EVM", "Chyba vektoru (EVM)")),
             ("cfo", dual("Frequency offset", "Kmitočtová odchylka")),
             ("frame", dual("Frame", "Rámec")),
+            ("verdict", dual("What this SNR carries", "Co tento odstup unese")),
         ))
         layout.addStretch(1)
         return page
@@ -1013,12 +1021,16 @@ class ModemWorkspace(QWidget):
             f"špička {measurement(result.audio_peak or None, '{value:.4f}')}",
         ))
         fields["sync"].setText(measurement(metrics.sync_confidence, "{value:.2f}"))
+        fields["real"].setText(
+            measurement(metrics.residual_snr_db, "{value:.1f} dB")
+        )
         fields["snr"].setText(measurement(metrics.snr_db, "{value:.1f} dB"))
         fields["evm"].setText(measurement(
             metrics.evm_rms * 100.0 if metrics.evm_rms is not None else None,
             "{value:.1f} %",
         ))
         fields["cfo"].setText(measurement(metrics.cfo_hz, "{value:+.1f} Hz"))
+        fields["verdict"].setText(mcs_verdict(metrics))
         if result.header is not None:
             fields["frame"].setText(result.header.summary())
         else:

@@ -36,7 +36,8 @@ from ..ofdm import DecodedBurst, decode_burst
 from ..ofdm.bench import read_wav as _read_wav
 from ..ofdm.config import profile_or_default
 from ..services import TaskResult
-from .measurements import measurement as _measurement, repolish as _repolish
+from .measurements import (mcs_verdict as _mcs_verdict,
+                           measurement as _measurement, repolish as _repolish)
 
 #: The worker-pool task name, so two clicks cannot start two decodes.
 ANALYSIS_TASK = "capture-analysis"
@@ -217,10 +218,13 @@ class CaptureResultDialog(QDialog):
         analysis_rows = (
             ("burst", dual("Burst", "Vysílání")),
             ("sync", dual("Sync confidence", "Spolehlivost synchronizace")),
-            ("snr", dual("Measured SNR", "Měřený odstup signál/šum")),
+            ("real", dual("Link SNR (what the modem got)",
+                          "Odstup linky (co modem dostal)")),
+            ("snr", dual("Noise-only SNR", "Odstup jen vůči šumu")),
             ("evm", dual("EVM", "Chyba vektoru (EVM)")),
             ("cfo", dual("Frequency offset", "Kmitočtová odchylka")),
             ("header", dual("Frame", "Rámec")),
+            ("verdict", dual("What this SNR carries", "Co tento odstup unese")),
         )
         self.analysis_captions: dict[str, QLabel] = {}
         for key, caption in analysis_rows:
@@ -308,9 +312,13 @@ class CaptureResultDialog(QDialog):
         self.analysis_fields["sync"].setText(
             _measurement(metrics.sync_confidence, "{value:.2f}")
         )
+        self.analysis_fields["real"].setText(
+            _measurement(metrics.residual_snr_db, "{value:.1f} dB")
+        )
         self.analysis_fields["snr"].setText(
             _measurement(metrics.snr_db, "{value:.1f} dB")
         )
+        self.analysis_fields["verdict"].setText(_mcs_verdict(metrics))
         self.analysis_fields["evm"].setText(
             _measurement(
                 metrics.evm_rms * 100.0 if metrics.evm_rms is not None else None,

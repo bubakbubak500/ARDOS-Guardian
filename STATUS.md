@@ -1,6 +1,6 @@
 # Guardian (ARDOS) — Project Status & Plan
 
-_Last updated: 2026-08-07_
+_Last updated: 2026-08-09_
 
 A resumable snapshot: what Guardian is, what's built, what's verified, the key
 decisions and why, and what comes next. Read this first when picking the project
@@ -32,7 +32,7 @@ RTS/DTR VOX fallback — no per-radio CAT reverse-engineering.
 | 4 | Smart routing / heard-stations | ✅ done |
 | 5 | Multi-channel scanning / mesh | ✅ done |
 | 6 | Mail layer: store-and-forward + attachments | ✅ done |
-| 7 | Guardian OFDM VHF — a native payload modem, no VARA (G2 line) | 🧪 PHY, ARQ, integration and a WAV recorder done; never on air |
+| 7 | Guardian OFDM VHF — a native payload modem, no VARA (G2 line) | 🧪 first two-radio tests flown 2026-08-09; messages moved on BENCH/MCS1 |
 
 **Phase 7 (G2 2.0.1)** adds a payload transport Guardian owns end to end:
 `guardian/ofdm/` is a pure-numpy OFDM physical layer (BPSK–64-QAM, soft-decision
@@ -40,12 +40,31 @@ FEC reusing the existing K=7 code, interleaving, Schmidl–Cox acquisition, chan
 estimation, per-carrier equalisation, stop-and-wait ARQ) with
 `guardian/payload/ofdm_vhf.py` as the only class that touches a soundcard or a
 transmitter. VARA P2P stays the default; a mixed pair falls back to VARA during
-the control handshake, before anything is transmitted. Every figure so far is from
-a simulated channel — the occupied RF bandwidth is still to be measured, and the
-first two-radio test is the next milestone's opening task. 2.0.2 adds a WAV
-recorder (`guardian/modem/recorder.py`) so that test needs nothing but Guardian
-and a radio: a capture is what lets the whole receiver be re-run over exactly what
-a radio produced, which is how everything still to be tuned gets tuned. See
+the control handshake, before anything is transmitted. 2.0.2 adds a WAV recorder
+(`guardian/modem/recorder.py`) so an on-air test needs nothing but Guardian and a
+radio — and that recorder is what made 2.0.5 possible, because every figure below
+was re-derived offline from the captures rather than read off a screen.
+
+**Flown 2026-08-09**, OK7PS and OK2IPW, two IC-705s on 145.2375 FM. Messages
+moved. Three findings, in order of consequence:
+
+- **The reported SNR was 8 dB optimistic.** It came from two *identical* training
+  symbols, so it measured random noise and cancelled every deterministic
+  distortion. Reported 17.6–20.6 dB; actually delivering 9.7–12.0 dB. 2.0.5
+  measures the real one by re-encoding what decoded and comparing, and shows both
+  — the gap between them is the distortion in the path.
+- **The radios pass about 3 kHz**, falling 14 dB in one carrier spacing at
+  3.1 kHz. `BENCH` (539–2977 Hz) is therefore the profile; `WIDE_5K` and above
+  cannot work on that radio and no new profile is needed.
+- **MCS3 is out of reach and MCS2 is on its threshold** at that SNR. Measured
+  thresholds now live in `MCS_TABLE` and the UI names the fastest usable mode.
+
+Two ARQ faults that only a real radio could have found are fixed: a receive
+squelch that the station's own transmission could deafen, and a lost final
+acknowledgement turning a delivered message into a reported failure. Still open:
+the 8 dB distortion gap itself — the deviation sweep that would localise it was
+the one step skipped. See
+[docs/OFDM_AIR_RESULTS_2026-08-09.md](docs/OFDM_AIR_RESULTS_2026-08-09.md),
 [docs/ofdm-vhf.md](docs/ofdm-vhf.md) and
 [docs/OFDM_AIR_TEST.md](docs/OFDM_AIR_TEST.md).
 

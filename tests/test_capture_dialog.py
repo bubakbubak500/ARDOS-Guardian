@@ -323,7 +323,9 @@ def test_the_dialog_is_bilingual(tmp_path) -> None:
         captions = {
             label.text() for label in dialog.analysis_captions.values()
         }
-        assert "Měřený odstup signál/šum" in captions
+        assert "Odstup linky (co modem dostal)" in captions
+        assert "Odstup jen vůči šumu" in captions
+        assert "Co tento odstup unese" in captions
         assert "Kmitočtová odchylka" in captions
         dialog_fields = {
             label.text()

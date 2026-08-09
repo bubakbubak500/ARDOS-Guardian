@@ -5,12 +5,23 @@ everything is in the application.
 
 *Česká verze: [OFDM_AIR_TEST.cs.md](OFDM_AIR_TEST.cs.md)*
 
-The modem has never transmitted. Every number measured so far came from a
-simulated channel, and the bandwidth a real radio passes is unknown. **Test 2 is
-the one that answers that**, and it is worth more than the other three together.
+**The modem has now transmitted.** OK7PS and OK2IPW ran tests 1–4 on
+2026-08-09 with a pair of IC-705s, and what came back changed three of the
+numbers in this document and one of its assumptions. The results are in
+[OFDM_AIR_RESULTS_2026-08-09.md](OFDM_AIR_RESULTS_2026-08-09.md); the short
+version is:
 
-Do them in order. If test 4 fails and you skipped 1–3, you will not know whether
-the fault is the radio, the audio path, or the software.
+- The audio path passes to about **3 kHz** and falls off a cliff there —
+  14 dB in one carrier spacing. `BENCH` fits inside it; `WIDE_5K` does not, and
+  no amount of level will change that.
+- The link delivered **9.7–12.0 dB** after equalisation while Guardian was
+  reporting 18–20 dB. The old figure could not see distortion. It can now, and
+  the dialogs show both.
+- **MCS3 cannot work on that path** and MCS2 sits on its threshold. That is
+  arithmetic, not a fault.
+
+Do the tests in order anyway. If test 4 fails and you skipped 1–3, you will not
+know whether the fault is the radio, the audio path, or the software.
 
 ---
 
@@ -112,22 +123,74 @@ radio.
 ### Then climb the ladder
 
 Repeat with `WIDE_5K`, `WIDE_10K`, `WIDE_20K` (and `WIDE_40K` if your card does
-96 kHz). Note where it stops decoding. Then go back one rung and repeat that one
-at three deviation settings — normal, clearly lower, clearly higher.
+96 kHz). Note where it stops decoding.
+
+On the IC-705 pair it stopped immediately: `WIDE_5K` showed 42–53 dB of channel
+spread, because everything it puts above 3.2 kHz lands 20–45 dB down. If your
+radio does the same, the ladder is over and `BENCH` is your profile — it occupies
+539–2977 Hz, which is very nearly exactly what that path passes.
+
+**Then the deviation sweep, which is the part that got skipped and matters
+most.** Go back to `BENCH` MCS1 and repeat it at three drive settings — normal,
+clearly lower, clearly higher — and write down the **gap between the two SNRs**
+each time. That gap is the distortion, it is the 8 dB standing between this link
+and MCS2, and drive level is the most likely thing controlling it. Nothing else
+in this document will buy as much.
 
 ### Write down, per capture
 
-Profile · deviation · sync confidence · measured SNR · EVM · CFO · channel
-response spread · PASS/FAIL.
+Profile · deviation · sync confidence · **link SNR** · noise-only SNR · EVM ·
+CFO · channel response spread · PASS/FAIL.
+
+### The two SNRs, and why the dialog now shows both
+
+This is the single most important thing the first air tests taught, so read it
+before reading the table.
+
+**Link SNR (what the modem got)** is measured by re-encoding what the burst
+decoded to and comparing it with what came out of the equaliser. It counts
+everything between the far station's constellation and yours: noise, distortion,
+channel-estimate error, the equaliser's own losses. **This is the number that
+predicts whether a mode will work.**
+
+**Noise-only SNR** comes from the two training symbols at the front of the
+burst. They are identical, so subtracting one from the other leaves the random
+noise — and cancels, exactly, every impairment that is the same in both. Every
+deterministic distortion a radio adds is the same in both. On 2026-08-09 it read
+18–20 dB on a link that was really delivering 9.7–12.0 dB.
+
+Neither is wrong. They measure different things, and the gap between them *is*
+the distortion in your path. A gap near 3 dB is the receiver's own
+implementation loss and is as good as it gets. **A gap of 8 dB, which is what
+those radios showed, means most of what is hurting the link is not noise** — and
+turning the power up will not move it.
 
 | Reading | Healthy | If it is not |
 |---|---|---|
 | no burst detected | — | Not in the file, too quiet, or wrong rate. Check the level first. |
 | sync confidence | > 0.7 | Burst is close to the noise. More level, or a narrower profile. |
-| measured SNR | > 10 dB | Under 7 dB MCS1 starts failing. Try MCS0 or step down a rung. |
-| EVM | < 40 % | High EVM with good SNR is distortion, not noise — usually clipping. |
+| **link SNR** | see the mode table below | This is the one to act on. |
+| gap to noise-only SNR | ~3 dB | 8 dB means distortion, not noise. Change the drive level, not the power. |
+| EVM | < 25 % | Above that only MCS0/MCS1 are safe. |
 | CFO | near 0 on FM | A large offset on FM is unexpected; tell me. On SSB it is the dial difference and normal. |
-| channel spread | < 10 dB | **This is the finding.** A large spread is the radio's audio filter — the edge of what it passes. |
+| channel spread | < 10 dB | **This is the finding.** A large spread is the radio's audio filter — the edge of what it passes. `WIDE_5K` showed 42–53 dB on an IC-705, which is the filter, not the link. |
+
+### What each mode needs
+
+Measured by sweeping the channel simulator in 1 dB steps, eight 512-byte blocks
+per step, reading the same **link SNR** the receiver reports on air. The figure
+is the first step where all eight decoded.
+
+| Mode | | Link SNR needed | On the 2026-08-09 IC-705 path (9.7–12.0 dB) |
+|---|---|---|---|
+| MCS0 | BPSK r=1/2 | ≤ 3 dB | comfortable |
+| MCS1 | QPSK r=1/2 | ≤ 3 dB | comfortable — **the one to use** |
+| MCS2 | 16-QAM r=1/2 | 10.5 dB | on the threshold; decodes, will not be reliable |
+| MCS3 | 64-QAM r=1/2 | 15.5 dB | 5 dB short — never decoded, and could not have |
+
+Guardian now says this for you: analyse any capture and the **What this SNR
+carries** row names the fastest mode the link will hold, and — when the burst
+failed — says how far short of the mode in use it was.
 
 The channel response spread is what a real air profile gets derived from. Send me
 the captures and I will do that with you; the carrier set should come from the
@@ -151,8 +214,25 @@ same settings page:
 |---|---|---|
 | Nothing decodes at all; peer never answers | Keying lead before transmit | Up — the transmitter is not up before the preamble starts |
 | Bursts decode but the last block of a message fails | Keying tail after transmit | Up — the tail is being cut off |
-| Blocks fail consistently at a good SNR | OFDM modulation (MCS) | Down to MCS0 |
+| Blocks fail consistently at a good link SNR | OFDM modulation (MCS) | Down — check the mode table above first |
 | Answers arrive but too late, retries climb | — | Tell me; the timeout needs widening, not a setting |
+
+**Read the "no answer" lines carefully — they now say which fault it is.**
+Before 2.0.5 a sender that heard nothing just logged `no answer to block 0`,
+which covered two completely different problems. It now says one of:
+
+- `nothing heard (squelch floor -52 dBFS, opens at -42 dBFS)` — no audio ever
+  rose above the squelch. A receive-level, keying or wiring fault, or the far
+  station never answered. The two levels tell you which: a floor far above the
+  real noise means the squelch is the problem, not the radio.
+- `2 burst(s) heard, none usable: header rejected: ...` — the answer arrived and
+  the modem could not read it. A signal-quality problem.
+
+One thing that used to look like a failure and was not: if the far station shows
+a message received and delivered while you show it failed, that was the final
+acknowledgement being lost. The receiver now holds the channel for one reply
+window after a message completes and answers a retransmission, so a lost last
+ACK costs one extra burst instead of the whole transfer.
 
 Then send a message with a small attachment, so segmentation and reassembly get
 exercised over more than a couple of blocks.

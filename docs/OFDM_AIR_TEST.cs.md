@@ -5,11 +5,20 @@ PowerShell — všechno je v aplikaci.
 
 *(English version: [OFDM_AIR_TEST.md](OFDM_AIR_TEST.md))*
 
-Modem dosud nikdy nevysílal. Všechna čísla, která zatím máme, pocházejí ze
-simulovaného kanálu a **skutečná šířka pásma, kterou rádio propustí, není známa**.
-Právě na to odpovídá **test 2** a má větší cenu než ostatní tři dohromady.
+**Modem už vysílal.** OK7PS a OK2IPW odjeli 2026-08-09 testy 1–4 s dvojicí
+IC-705 a to, co z toho vyšlo, změnilo tři čísla v tomto dokumentu a jeden jeho
+předpoklad. Výsledky jsou v
+[OFDM_AIR_RESULTS_2026-08-09.md](OFDM_AIR_RESULTS_2026-08-09.md); stručně:
 
-Dělejte je v uvedeném pořadí. Pokud selže test 4 a testy 1–3 jste přeskočili,
+- Zvuková cesta propouští asi do **3 kHz** a tam spadne ze skály — 14 dB na
+  jedné rozteči subnosných. `BENCH` se do toho vejde, `WIDE_5K` ne a žádná
+  úroveň s tím nic neudělá.
+- Linka doopravdy dávala **9,7–12,0 dB** po ekvalizaci, zatímco Guardian hlásil
+  18–20 dB. Staré číslo neumělo vidět zkreslení. Nové ano a dialogy ukazují obě.
+- **MCS3 na téhle cestě fungovat nemůže** a MCS2 leží přesně na svém prahu. To
+  je aritmetika, ne závada.
+
+Testy přesto dělejte v pořadí. Pokud selže test 4 a testy 1–3 jste přeskočili,
 nebudete vědět, zda je chyba v rádiu, ve zvukové cestě, nebo v softwaru.
 
 ---
@@ -117,23 +126,72 @@ odebíráte.
 ### Potom stoupejte po žebříku
 
 Zopakujte s `WIDE_5K`, `WIDE_10K`, `WIDE_20K` (a `WIDE_40K`, pokud vaše karta umí
-96 kHz). Poznamenejte si, kde se přestane dekódovat. Pak se vraťte o stupeň zpět a
-ten zopakujte při třech nastaveních zdvihu — běžném, výrazně nižším a výrazně
-vyšším.
+96 kHz). Poznamenejte si, kde se přestane dekódovat.
+
+U dvojice IC-705 to skončilo hned: `WIDE_5K` ukázal 42–53 dB rozptylu kanálu,
+protože všechno, co dá nad 3,2 kHz, leží 20–45 dB dole. Pokud vaše rádio dělá
+totéž, žebřík končí a vaším profilem je `BENCH` — zabírá 539–2977 Hz, což je
+skoro přesně to, co tahle cesta propustí.
+
+**Potom rozmítání zdvihu, což je ta část, která se vynechala a která je
+nejdůležitější.** Vraťte se na `BENCH` MCS1 a zopakujte ho při třech úrovních
+buzení — běžné, výrazně nižší, výrazně vyšší — a pokaždé si zapište **rozdíl
+mezi oběma SNR**. Ten rozdíl je zkreslení, je to těch 8 dB, které stojí mezi
+touhle linkou a MCS2, a úroveň buzení je nejpravděpodobnější věc, která ho řídí.
+Nic jiného v tomhle dokumentu nepřinese tolik.
+
+### Dvě SNR a proč dialog ukazuje obě
+
+Tohle je to nejdůležitější, co první testy na pásmu naučily.
+
+**Odstup linky (co modem dostal)** se měří tak, že se z toho, co burst
+dekódoval, zase spočítá vysílaný signál a porovná se s tím, co vyšlo z
+ekvalizéru. Počítá se do něj všechno: šum, zkreslení, chyba odhadu kanálu,
+ztráty samotného ekvalizéru. **Tohle je číslo, které předpovídá, jestli režim
+bude fungovat.**
+
+**Odstup jen vůči šumu** vychází ze dvou trénovacích symbolů na začátku burstu.
+Jsou identické, takže jejich rozdíl nechá jen náhodný šum — a vyruší, přesně,
+každé zhoršení, které je v obou stejné. Každé deterministické zkreslení, které
+rádio přidá, je v obou stejné. 2026-08-09 hlásil 18–20 dB na lince, která
+doopravdy dávala 9,7–12,0 dB.
+
+Ani jedno není špatně. Měří různé věci a **rozdíl mezi nimi je zkreslení ve vaší
+cestě**. Rozdíl kolem 3 dB je vlastní ztráta přijímače a lepší to nebude. Rozdíl
+8 dB, jaký ukázala tahle rádia, znamená, že většina toho, co lince škodí, není
+šum — a přidat výkon s tím nehne.
 
 ### Ke každému záznamu si zapište
 
-Profil · zdvih · spolehlivost synchronizace · naměřené SNR · EVM · kmitočtovou
-odchylku (CFO) · rozptyl kmitočtové charakteristiky · PASS/FAIL.
+Profil · zdvih · spolehlivost synchronizace · **odstup linky** · odstup jen vůči
+šumu · EVM · kmitočtovou odchylku (CFO) · rozptyl kmitočtové charakteristiky ·
+PASS/FAIL.
 
 | Hodnota | V pořádku | Když není |
 |---|---|---|
 | no burst detected | — | Burst v souboru není, je příliš slabý, nebo nesouhlasí vzorkovací kmitočet. Nejdřív zkontrolujte úroveň. |
 | spolehlivost synchronizace | > 0,7 | Burst je blízko šumu. Přidejte úroveň, nebo zvolte užší profil. |
-| naměřené SNR | > 10 dB | Pod 7 dB začne MCS1 selhávat. Zkuste MCS0 nebo o stupeň užší profil. |
-| EVM | < 40 % | Vysoké EVM při dobrém SNR není šum, ale zkreslení — obvykle přebuzení. |
+| **odstup linky** | viz tabulka režimů níže | Podle tohohle se rozhoduje. |
+| rozdíl proti odstupu vůči šumu | ~3 dB | 8 dB je zkreslení, ne šum. Měňte buzení, ne výkon. |
+| EVM | < 25 % | Nad tím jsou bezpečné jen MCS0/MCS1. |
 | CFO | u FM blízko 0 | Velká odchylka u FM je nečekaná, napište mi. U SSB jde o rozdíl naladění a je normální. |
-| rozptyl charakteristiky | < 10 dB | **Tohle je to zjištění.** Velký rozptyl je zvukový filtr rádia — hranice toho, co propustí. |
+| rozptyl charakteristiky | < 10 dB | **Tohle je to zjištění.** Velký rozptyl je zvukový filtr rádia — hranice toho, co propustí. `WIDE_5K` ukázal na IC-705 42–53 dB, což je ten filtr, ne linka. |
+
+### Co který režim potřebuje
+
+Naměřeno rozmítáním simulátoru kanálu po 1 dB, osm bloků po 512 B na krok, se
+čtením téhož **odstupu linky**, jaký přijímač hlásí na pásmu.
+
+| Režim | | Potřebný odstup linky | Na cestě IC-705 z 2026-08-09 (9,7–12,0 dB) |
+|---|---|---|---|
+| MCS0 | BPSK r=1/2 | ≤ 3 dB | pohodlně |
+| MCS1 | QPSK r=1/2 | ≤ 3 dB | pohodlně — **tenhle používejte** |
+| MCS2 | 16-QAM r=1/2 | 10,5 dB | na prahu; dekóduje se, spolehlivé nebude |
+| MCS3 | 64-QAM r=1/2 | 15,5 dB | chybí 5 dB — nikdy se nedekódoval a ani nemohl |
+
+Guardian to teď řekne za vás: analyzujte libovolný záznam a řádek **Co tento
+odstup unese** pojmenuje nejrychlejší režim, který linka udrží, a — když burst
+selhal — o kolik chybělo použitému režimu.
 
 Z rozptylu kmitočtové charakteristiky se odvozuje skutečný profil pro pásmo.
 Pošlete mi záznamy a odvodíme ho společně; sada subnosných má vzejít z měření, ne
@@ -157,8 +215,25 @@ všechno na téže stránce nastavení:
 |---|---|---|
 | Nic se nedekóduje, protistanice nikdy neodpoví | Předstih klíčování | Nahoru — vysílač nestoupne dřív, než začne preambule |
 | Bursty se dekódují, ale poslední blok zprávy selže | Doběh klíčování | Nahoru — konec burstu se odřezává |
-| Bloky selhávají trvale i při dobrém SNR | Modulace OFDM (MCS) | Dolů na MCS0 |
+| Bloky selhávají trvale i při dobrém odstupu linky | Modulace OFDM (MCS) | Dolů — nejdřív se podívejte do tabulky režimů výše |
 | Odpovědi přicházejí, ale pozdě, a roste počet opakování | — | Napište mi; je potřeba rozšířit časový limit, není to otázka nastavení |
+
+**Čtěte pozorně řádky „no answer" — teď říkají, o kterou závadu jde.** Před
+2.0.5 vysílající stanice, která nic neslyšela, jen zapsala `no answer to
+block 0`, což zakrývalo dva úplně jiné problémy. Teď napíše jedno z:
+
+- `nothing heard (squelch floor -52 dBFS, opens at -42 dBFS)` — nic se nikdy
+  nedostalo nad šumovou bránu. Závada v úrovni příjmu, klíčování nebo kabeláži,
+  nebo protistanice vůbec neodpověděla. Které to je, poznáte z těch dvou
+  úrovní: práh hodně nad skutečným šumem znamená, že problém je brána, ne rádio.
+- `2 burst(s) heard, none usable: header rejected: ...` — odpověď dorazila a
+  modem ji nepřečetl. Problém kvality signálu.
+
+Jedna věc, která vypadala jako selhání a nebyla: pokud protistanice ukazuje
+zprávu přijatou a doručenou, zatímco vy ukazujete selhání, ztratilo se poslední
+potvrzení. Přijímač teď po dokončení zprávy podrží kanál po dobu jednoho okna
+pro odpověď a na opakované vysílání odpoví znovu, takže ztracené poslední
+potvrzení stojí jeden burst navíc místo celého přenosu.
 
 Potom odešlete zprávu s malou přílohou, aby se prověřilo dělení na bloky a jejich
 skládání na více než dvou blocích.

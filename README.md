@@ -385,7 +385,7 @@ Select it in *Settings → Payload* as **Guardian OFDM VHF (Experimental)**. VAR
 
 It is a real OFDM modem — BPSK through 64-QAM, forward error correction, interleaving, channel estimation, per-carrier equalisation, and stop-and-wait ARQ with retries and duplicate suppression. It reports what it measures: SNR, EVM, frequency offset, the channel response of every subcarrier.
 
-**It has not been on the air yet.** Everything measured so far was measured through a simulated channel on a PC, and the bandwidth a real VHF radio passes is still to be determined. [docs/ofdm-vhf.md](docs/ofdm-vhf.md) has the numbers and the limitations; [docs/OFDM_AIR_TEST.md](docs/OFDM_AIR_TEST.md) is the on-air procedure as four numbered tests ([česky](docs/OFDM_AIR_TEST.cs.md)).
+**It has now been on the air, once.** Two IC-705s, 2026-08-09: messages moved, and the audio path turned out to pass about 3 kHz — which makes `BENCH` the profile to use and `WIDE_5K` and above unreachable on that radio. It also showed that the SNR Guardian was reporting stood 8 dB above what the link was really delivering, because the estimate could not see distortion; it now reports both figures, and the gap between them is the distortion. [docs/OFDM_AIR_RESULTS_2026-08-09.md](docs/OFDM_AIR_RESULTS_2026-08-09.md) is what those radios measured, [docs/ofdm-vhf.md](docs/ofdm-vhf.md) has the design and its limitations, and [docs/OFDM_AIR_TEST.md](docs/OFDM_AIR_TEST.md) is the procedure as four numbered tests ([česky](docs/OFDM_AIR_TEST.cs.md)).
 
 ### Testing it without a radio
 
