@@ -34,6 +34,8 @@ from ..modem.audio import (PTT_LEAD_SECONDS, PTT_TAIL_SECONDS,
                            _import_sounddevice, resolve_device,
                            transmit_waveform)
 from ..ofdm import OfdmLink, OfdmStatus, PhyHeader, profile_or_default
+from ..ofdm.adaptation import AdaptationConfig, LinkAdaptationController
+from ..ofdm.coding import FecProfile, fec_profile, fec_spec
 from ..ofdm.framing import OfdmFrameType, burst_samples
 from .base import DoneCb, PayloadBackend
 
@@ -121,6 +123,7 @@ class RadioAudioPipe:
     def __init__(self, profile, *, input_device, output_device,
                  ptt: Callable[[bool], None],
                  tx_lead_ms: int = 300, tx_tail_ms: int = 100,
+                 max_burst_bytes: int = 8192, arq_block_bytes: int = 512,
                  on_log: Callable[[str], None] | None = None) -> None:
         self.profile = profile
         self.input_device = input_device
@@ -128,6 +131,8 @@ class RadioAudioPipe:
         self.ptt = ptt
         self.tx_lead = max(0.0, tx_lead_ms / 1000.0)
         self.tx_tail = max(0.0, tx_tail_ms / 1000.0)
+        self.max_burst_bytes = max(1, int(max_burst_bytes))
+        self.arq_block_bytes = max(1, int(arq_block_bytes))
         self.on_log = on_log or (lambda message: None)
 
         self._sd = None
@@ -291,10 +296,15 @@ class RadioAudioPipe:
 
     def longest_burst_samples(self) -> int:
         """The longest burst this profile can produce, at the most robust MCS."""
-        return burst_samples(
-            self.profile,
-            PhyHeader(OfdmFrameType.DATA, 0, payload_len=self.profile.block_size),
+        count = min(32, max(1, (self.max_burst_bytes + self.arq_block_bytes - 1)
+                              // self.arq_block_bytes))
+        lengths = [self.arq_block_bytes] * count
+        header = PhyHeader(
+            OfdmFrameType.DATA, 0, block_count=count,
+            payload_len=sum(lengths), subblock_count=count,
+            fec=FecProfile.FEC_1_2,
         )
+        return burst_samples(self.profile, header, lengths)
 
     # -- transmit -----------------------------------------------------------
 
@@ -335,7 +345,15 @@ class OfdmVhfBackend(PayloadBackend):
 
     def __init__(self, *, ofdm_profile: str = "BENCH", ofdm_mcs: int = 1,
                  ofdm_tx_lead_ms: int = 300, ofdm_tx_tail_ms: int = 100,
-                 ofdm_max_retries: int = 4, audio_input=None, audio_output=None,
+                 ofdm_max_retries: int = 4,
+                 ofdm_adaptive_fec: bool = True, ofdm_fec: str = "1/2",
+                 ofdm_adaptive_burst: bool = True, ofdm_burst_bytes: int = 4096,
+                 ofdm_min_burst_bytes: int = 512,
+                 ofdm_max_burst_bytes: int = 8192,
+                 ofdm_arq_block_bytes: int = 512,
+                 ofdm_timeout_multiplier: float = 1.0,
+                 ofdm_legacy_mode: bool = False,
+                 audio_input=None, audio_output=None,
                  ptt: Callable[[bool], None] | None = None,
                  ptt_turnaround_ms: int = 0,
                  on_log=None, on_qsy=None, on_receive_qsy=None, on_unqsy=None,
@@ -346,6 +364,31 @@ class OfdmVhfBackend(PayloadBackend):
         self.tx_lead_ms = int(ofdm_tx_lead_ms)
         self.tx_tail_ms = int(ofdm_tx_tail_ms)
         self.max_retries = int(ofdm_max_retries)
+        arq_bytes = int(ofdm_arq_block_bytes)
+        minimum = max(
+            arq_bytes,
+            min(int(ofdm_min_burst_bytes), int(ofdm_max_burst_bytes)),
+        )
+        maximum = max(
+            minimum,
+            int(ofdm_min_burst_bytes),
+            int(ofdm_max_burst_bytes),
+        )
+        fixed_burst = max(arq_bytes, int(ofdm_burst_bytes))
+        self.adaptation_config = AdaptationConfig(
+            adaptive_fec=bool(ofdm_adaptive_fec),
+            fixed_fec=fec_profile(ofdm_fec),
+            adaptive_burst=bool(ofdm_adaptive_burst),
+            fixed_burst_bytes=fixed_burst,
+            min_burst_bytes=minimum,
+            max_burst_bytes=maximum,
+            arq_block_bytes=arq_bytes,
+        )
+        self.controller = LinkAdaptationController(
+            self.adaptation_config, mcs_index=self.mcs_index
+        )
+        self.timeout_multiplier = max(0.5, min(4.0, float(ofdm_timeout_multiplier)))
+        self.legacy_mode = bool(ofdm_legacy_mode)
         self.audio_input = audio_input
         self.audio_output = audio_output
         self.ptt = ptt or (lambda enabled: None)
@@ -363,7 +406,13 @@ class OfdmVhfBackend(PayloadBackend):
         self._pipe_factory = pipe_factory
         self._transfer_lock = threading.Lock()
         #: Latest measurements, for the transfer panel to poll.
-        self.status = OfdmStatus(profile=self.profile.name, mcs=self.mcs_index)
+        selected = self.controller.profile
+        self.status = OfdmStatus(
+            profile=self.profile.name, mcs=self.mcs_index,
+            fec=fec_spec(selected.fec).label,
+            burst_bytes=selected.burst_bytes,
+            arq_block_bytes=selected.arq_block_bytes,
+        )
 
         if self.profile.name != ofdm_profile:
             self.on_log(
@@ -383,6 +432,11 @@ class OfdmVhfBackend(PayloadBackend):
             ptt=self.ptt,
             tx_lead_ms=self.tx_lead_ms,
             tx_tail_ms=self.tx_tail_ms,
+            max_burst_bytes=max(
+                self.adaptation_config.max_burst_bytes,
+                self.adaptation_config.fixed_burst_bytes,
+            ),
+            arq_block_bytes=self.adaptation_config.arq_block_bytes,
             on_log=self.on_log,
         )
 
@@ -397,8 +451,11 @@ class OfdmVhfBackend(PayloadBackend):
             # its airtime and turnaround alone suggest. Counting it here rather
             # than padding the turnaround keeps each number meaning one thing.
             timeout_margin=2.0 * HANGOVER_SECONDS + 1.0,
+            timeout_multiplier=self.timeout_multiplier,
             on_log=self.on_log,
             on_status=self._publish,
+            controller=self.controller,
+            legacy_mode=self.legacy_mode,
         )
 
     def _publish(self, status: OfdmStatus) -> None:
@@ -433,7 +490,9 @@ class OfdmVhfBackend(PayloadBackend):
                 pipe.start()
                 self.on_log(
                     f"OFDM VHF: sending #{msg.msg_id} ({len(data)} bytes) on "
-                    f"profile {self.profile.name}, MCS{self.mcs_index}"
+                    f"profile {self.profile.name}, MCS{self.mcs_index}, "
+                    f"{self.controller.summary()}, "
+                    f"mode={'legacy v1' if self.legacy_mode else 'adaptive v2'}"
                 )
                 success = self._make_link(pipe).send_message(msg.msg_id, data)
             except Exception as exc:  # noqa: BLE001 - fail the transfer, not the app

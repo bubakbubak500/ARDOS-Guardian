@@ -13,9 +13,12 @@ import threading
 import numpy as np
 import pytest
 
-from guardian.ofdm import BENCH, OfdmLink, simulated_pair
+from guardian.ofdm import (BENCH, AckBitmap, FecProfile, OfdmLink,
+                           simulated_pair)
 from guardian.ofdm.channel import Channel, ChannelSpec
-from guardian.ofdm.framing import OfdmFrameType, PhyHeader, burst_duration
+from guardian.ofdm.config import HEADER_MCS, mcs
+from guardian.ofdm.framing import (OfdmFrameType, PhyHeader, burst_duration,
+                                   header_symbols, section_symbols)
 from guardian.ofdm.link import SimulatedDuplexPipe
 from guardian.ofdm.metrics import AdaptationState, LinkMetrics, OfdmStatus
 
@@ -28,6 +31,24 @@ MARGIN = 0.5
 
 def _payload(size: int, seed: int = SEED) -> bytes:
     return np.random.default_rng(seed).integers(0, 256, size, dtype=np.uint8).tobytes()
+
+
+def _erase_subblock(samples: np.ndarray, *, delay: int, members: int,
+                    position: int, block_bytes: int = 512) -> np.ndarray:
+    """Erase exactly one independently coded section, leaving its peers intact."""
+    manifest_symbols = section_symbols(BENCH, members * 4 + 2,
+                                       HEADER_MCS.modulation)
+    block_symbols = section_symbols(
+        BENCH, block_bytes + 2, mcs(1).modulation, FecProfile.FEC_1_2
+    )
+    first = (BENCH.preamble_symbols + BENCH.training_symbols
+             + header_symbols(BENCH) + manifest_symbols
+             + position * block_symbols)
+    start = delay + first * BENCH.symbol_samples
+    stop = start + block_symbols * BENCH.symbol_samples
+    damaged = samples.copy()
+    damaged[start:stop] = 0.0
+    return damaged
 
 
 def _exchange(payload: bytes, spec: ChannelSpec | None = None, *, msg_id: int = 42,
@@ -91,9 +112,13 @@ def test_the_damage_hook_only_touches_the_transmission_it_names() -> None:
 def test_timeouts_are_derived_from_airtime_and_turnaround() -> None:
     # Not round numbers: change the profile and these follow it.
     link = OfdmLink(BENCH, None, mcs_index=1, ptt_turnaround=0.4, timeout_margin=1.0)
-    ack = burst_duration(BENCH, PhyHeader(OfdmFrameType.ACK, 0))
-    data = burst_duration(BENCH, PhyHeader(OfdmFrameType.DATA, 0, mcs=1,
-                                           payload_len=BENCH.block_size))
+    bitmap = AckBitmap(1, frozenset()).encode()
+    ack = burst_duration(BENCH, PhyHeader(
+        OfdmFrameType.ACK, 0, payload_len=len(bitmap)
+    ))
+    data_header = PhyHeader(OfdmFrameType.DATA, 0, block_count=4, mcs=1,
+                            payload_len=2048, subblock_count=4)
+    data = burst_duration(BENCH, data_header, [512] * 4)
     assert link.reply_timeout() == pytest.approx(ack + 0.8 + 1.0)
     assert link.data_timeout() == pytest.approx(data + 0.8 + 1.0)
     assert link.reply_timeout() < link.data_timeout()
@@ -155,7 +180,7 @@ def test_a_duplicate_block_is_reacknowledged_and_dropped() -> None:
     assert ok
     assert got["data"] == payload
     assert sender.status.retries == 1
-    assert receiver.adaptation.duplicates == 1
+    assert receiver.adaptation.duplicates == 3
     assert receiver.adaptation.blocks_received == 3
 
 
@@ -173,11 +198,7 @@ def test_a_damaged_block_is_nacked_and_resent() -> None:
 
     def wreck_the_first_block(count: int, samples: np.ndarray) -> np.ndarray:
         if count == 1:
-            damaged = samples.copy()
-            start = len(damaged) // 2
-            damaged[start:] += np.random.default_rng(3).normal(
-                0.0, 0.6, len(damaged) - start)
-            return damaged
+            return _erase_subblock(samples, delay=500, members=2, position=1)
         return samples
 
     sender, receiver, received, ok = _exchange(payload, damage=wreck_the_first_block)
@@ -192,6 +213,8 @@ def test_a_damaged_block_is_nacked_and_resent() -> None:
     # A block that needed a second try is not a lost packet.
     assert sender.adaptation.packet_error_rate == 0.0
     assert sender.adaptation.retransmission_rate == 0.5
+    assert sender.status.last_first_pass_ok == 1
+    assert sender.status.retransmitted_bytes == 512
 
 
 def test_a_sender_gives_up_after_the_retry_limit() -> None:
@@ -233,18 +256,15 @@ def test_a_block_for_another_message_is_ignored() -> None:
 
 def _run_reference_transfer() -> tuple[OfdmLink, OfdmLink, bytes | None, bool]:
     """The canonical run: 4096 bytes at 12 dB, seed 0xA5, one forced NACK."""
-    def wreck_the_third_burst(count: int, samples: np.ndarray) -> np.ndarray:
-        if count == 3:
-            damaged = samples.copy()
-            start = len(damaged) // 2
-            damaged[start:] += np.random.default_rng(1).normal(
-                0.0, 0.5, len(damaged) - start)
-            return damaged
+    def wreck_one_member_of_the_first_burst(count: int,
+                                            samples: np.ndarray) -> np.ndarray:
+        if count == 1:
+            return _erase_subblock(samples, delay=500, members=4, position=1)
         return samples
 
     return _exchange(_payload(4096), ChannelSpec(snr_db=12.0, delay=500,
                                                  trailing=1500),
-                     seed=0xA5, damage=wreck_the_third_burst)
+                     seed=0xA5, damage=wreck_one_member_of_the_first_burst)
 
 
 def test_the_reference_transfer_delivers_exactly_one_retry() -> None:
@@ -287,7 +307,7 @@ def test_throughput_is_measured_from_airtime_and_sits_below_the_phy_rate() -> No
     phy_rate = BENCH.num_data_carriers * 2 * 0.5 / BENCH.symbol_duration
     assert phy_rate == pytest.approx(1833.0, abs=1.0)
     assert 0 < sender.status.est_bitrate_bps < phy_rate
-    assert sender.channel_seconds > 8 * burst_duration(
+    assert sender.channel_seconds < 8 * burst_duration(
         BENCH, PhyHeader(OfdmFrameType.DATA, 0, mcs=1, payload_len=BENCH.block_size))
 
 
@@ -355,7 +375,8 @@ def test_adaptation_state_accumulates_the_per_carrier_picture() -> None:
 
     assert state.carrier_power is not None
     assert len(state.carrier_power) == BENCH.num_carriers
-    assert len(state.snr_history) >= 4
+    assert len(state.snr_history) >= 1
+    assert len(state.snr_history) == receiver.status.data_bursts
     assert state.worst_carriers is not None
     assert len(state.worst_carriers) == BENCH.num_carriers
     assert "blocks accepted" in state.summary()

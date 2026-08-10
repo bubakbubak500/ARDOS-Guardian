@@ -104,13 +104,29 @@ class OfdmStatus:
     state: str = "idle"  # idle|synchronizing|receiving|transmitting|waiting_ack|failed
     mcs: int = 0
     profile: str = ""
+    fec: str = "1/2"
+    burst_bytes: int = 512
+    arq_block_bytes: int = 512
     snr_db: float | None = None
     evm_rms: float | None = None
+    remote_snr_db: float | None = None
+    remote_evm_rms: float | None = None
     retries: int = 0
+    retransmitted_bytes: int = 0
+    protocol_overhead_bytes: int = 0
+    data_bursts: int = 0
+    ack_bursts: int = 0
+    data_airtime_seconds: float = 0.0
+    ack_airtime_seconds: float = 0.0
+    turnaround_seconds: float = 0.0
+    elapsed_seconds: float = 0.0
+    goodput_bps: float | None = None
     tx_bytes: int = 0
     rx_bytes: int = 0
     total_bytes: int = 0
     last_block_ok: bool | None = None
+    last_burst_blocks: int = 0
+    last_first_pass_ok: int = 0
     #: Measured from acknowledged bytes over elapsed time. `None` until enough
     #: has moved to divide by -- never a nominal figure from the profile.
     est_bitrate_bps: float | None = None
@@ -126,7 +142,7 @@ class OfdmStatus:
 
 @dataclass
 class AdaptationState:
-    """History an adaptation controller would consume. Phase 1 only fills it.
+    """Measured link history retained beside the active adaptation controller.
 
     Accumulated per transfer rather than per burst so a single bad burst cannot
     move a decision, which is the failure mode of every naive rate-control loop.

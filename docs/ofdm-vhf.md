@@ -3,10 +3,12 @@
 An experimental native payload modem. It moves a message payload over a VHF/UHF
 radio using the PC soundcard and Guardian's own PTT, with no VARA involved.
 
-Status: **first milestone.** The physical layer, the framing, the ARQ state
-machine and the Guardian integration are implemented and tested. Everything has
-been measured through a simulated channel on a PC. **Nothing here has been on the
-air yet**, and no figure in this document is an over-the-air result.
+Status: **G2 adaptive/selective-repeat milestone.** The physical layer first flew
+between two IC-705s on 2026-08-09. Frame format 2 now adds punctured adaptive FEC,
+multi-block keyed bursts, bitmap acknowledgements, and selective retransmission.
+The new link protocol is fully simulated and awaits its first two-radio run. See
+[`OFDM_G2_ADAPTIVE_ARQ.md`](OFDM_G2_ADAPTIVE_ARQ.md) for the current wire format
+and test parameters, and `OFDM_AIR_RESULTS_2026-08-09.md` for measured evidence.
 
 VARA P2P remains the default transport and is unchanged.
 
@@ -33,6 +35,8 @@ change, not a settings dialog, and not a constant buried in the DSP.
 ```
 guardian/ofdm/                  pure numpy + stdlib. No Qt, no sounddevice,
     config.py                   no Hamlib, no VARA. Testable on a PC with no
+    coding.py                   punctured K=7 convolutional-code profiles
+    adaptation.py               joint FEC/keyed-burst controller
     constellation.py            audio hardware at all.
     interleaving.py
     phy.py
@@ -99,13 +103,14 @@ Recorded here so the decision does not get re-litigated.
 
 ## 3. Waveform and frame structure
 
-### One burst
+### One format-2 burst
 
 ```
 [ preamble:  2 symbols ]   detection, coarse timing, frequency offset
 [ training:  2 symbols ]   channel estimate and noise measurement
 [ header:    7 symbols ]   always MCS0/BPSK, versioned, CRC-protected
-[ data:      n symbols ]   MCS taken from the header
+[ manifest:  n symbols ]   robust global block identities and lengths
+[ blocks:    n symbols ]   independent CRC/FEC; MCS/FEC from the header
 [ tail guard: 0.4 s    ]   added by the transport, not the DSP
 ```
 
@@ -122,14 +127,14 @@ is nothing to subtract and every SNR the receiver reported would be a guess.
 
 | Field | Size | Notes |
 |---|---|---|
-| version | 1 B | OFDM frame format, currently 1. Independent of the ARDOS control-frame version. |
+| version | 1 B | OFDM frame format, currently 2; version 1 remains decodable. |
 | frame_type | 1 B | DATA / ACK / NACK |
 | msg_id | 4 B | Guardian message id |
-| block_seq | 2 B | this block's index |
-| block_count | 2 B | blocks in the message |
-| mcs | 1 B | MCS of the *data* section |
-| payload_len | 2 B | bytes in this block |
-| flags | 1 B | reserved — a bit-loading map would announce itself here |
+| block_seq | 2 B | keyed-burst ID |
+| block_count | 2 B | total global ARQ blocks in the message |
+| scheme | 1 B | high 3 bits FEC ID, low 5 bits MCS ID |
+| payload_len | 2 B | valid bytes carried by this burst |
+| flags | 1 B | subblock count, retransmission marker, one reserved bit |
 | header_crc | 2 B | CRC-16/CCITT-FALSE over the previous 14 bytes |
 
 The header is always sent at MCS0, so a receiver decodes it without knowing
@@ -140,18 +145,23 @@ on it. A corrupt header rejects the whole burst.
 
 ### Data section
 
-`payload bytes ‖ crc16(payload)` → convolutional encode → interleave → QAM map →
-carriers. A payload CRC failure produces a NACK; it **never** returns wrong bytes
-to the caller.
+The robust manifest carries `(global sequence, valid length)` for each member and
+its own CRC. Every `payload bytes ‖ crc16(payload)` member is then independently
+FEC encoded, interleaved and mapped. A failed member is named in the bitmap while
+verified neighbours remain buffered; bad bytes are never returned to the caller.
 
 One burst is deliberately not one Guardian attachment. Payloads are cut into
-bounded blocks (512 B on BENCH) from the start, because a transmission that has
+bounded ARQ blocks (512 B by default; 256 and 1024 are supported) from the start,
+because a transmission that has
 to restart from the beginning is not a usable link.
 
 ### FEC and interleaving
 
 The existing rate-1/2, K=7 convolutional code in `guardian/modem/fec.py` is
-reused, not reimplemented, with **soft-decision** decoding: the demapper produces
+reused, not reimplemented. Rates 2/3, 3/4, 5/6, and 7/8 puncture the 171/133
+mother-code output; omitted bits return to the decoder as zero-confidence
+erasures. The robust header explicitly identifies the rate. **Soft-decision**
+decoding remains: the demapper produces
 max-log LLRs weighted by each carrier's measured channel gain, so a carrier the
 channel notched out is discounted instead of trusted.
 
@@ -375,10 +385,11 @@ between modes are what a future adaptation controller would step across.
 
 ### Measured throughput
 
-Over a full 4096-byte ARQ transfer at 12 dB with one forced retransmission:
-**1247 bit/s end to end**, against 1833 bit/s of MCS1 payload carriers. The
-difference is the preamble, the training block, the header, every acknowledgement
-and the PTT turnaround — all of which are real.
+The old 512-byte stop-and-wait link measured about **736 bit/s** in the 2026-08-09
+analysis despite an MCS1/FEC-1/2 payload-carrier rate near 1833 bit/s. A clean
+4096-byte format-2 simulation at the same robust coding now models roughly
+**1656 bit/s**, because four blocks share one preamble/header/PTT cycle and one
+bitmap ACK. This is a simulation comparison, not a new over-air claim.
 
 Throughput is measured from **channel occupancy** (airtime in both directions plus
 a turnaround per change of direction), not from wall-clock. Wall-clock is the
@@ -390,16 +401,18 @@ spend.
 
 ## 7. ARQ
 
-Stop-and-wait, deliberately. There is no window, no congestion control and no
-connection — on a half-duplex channel where turning the transmitter around costs a
-fraction of a second, having nothing in flight to reason about is a feature.
+Selective repeat within one half-duplex keyed burst. Only one burst is outstanding,
+so there is still no congestion window or collision-prone bidirectional pipeline;
+the improvement comes from amortising PTT and ACK cost over several independent
+ARQ blocks.
 
 ```
-sender:    DATA(seq) -> wait for ACK/NACK -> next block, or send it again
-           more than ofdm_max_retries tries => the transfer fails
-receiver:  DATA decoded and CRC ok  => ACK(seq), keep the bytes
-           already have that seq    => ACK(seq) again, drop the payload
-           header ok, payload bad   => NACK(seq)
+sender:    DATA_BURST(blocks[]) -> wait for one bitmap
+           remove received identities; resend only missing blocks
+           strengthen retry FEC; bounded retries or clean failure
+receiver:  keep every independently CRC-verified block
+           ACK/NACK bitmap says everything already held
+           duplicate identities => acknowledge again, never append twice
            no readable header       => stay silent; the sender's timeout handles it
 ```
 
@@ -408,9 +421,10 @@ plus a margin. PTT turnaround is an explicit named parameter rather than slack
 hidden inside a number, because it is what actually dominates how long an answer
 takes.
 
-A duplicate block means the receiver's previous acknowledgement was lost, not that
-the sender has anything new to say — so it is acknowledged again and the payload
-dropped. Staying silent there would strand the sender.
+A variable bitmap covers the whole message and includes remote link SNR/EVM. The
+receiver lingers after completion and repeats the complete bitmap when a final ACK
+was lost. Timeouts use the actual variable burst/control duration, turnaround, and
+processing margin.
 
 ---
 
@@ -427,6 +441,15 @@ ofdm_mcs         = 1
 ofdm_tx_lead_ms  = 300
 ofdm_tx_tail_ms  = 100
 ofdm_max_retries = 4
+ofdm_adaptive_fec = true
+ofdm_fec = "1/2"                 # used when AUTO FEC is off
+ofdm_adaptive_burst = true
+ofdm_burst_bytes = 4096          # used when AUTO burst is off
+ofdm_min_burst_bytes = 512
+ofdm_max_burst_bytes = 8192
+ofdm_arq_block_bytes = 512       # 256 | 512 | 1024
+ofdm_timeout_multiplier = 1.0
+ofdm_legacy_mode = false
 ```
 
 FFT size, cyclic prefix, carrier set and sample rate are **not** here. They belong
@@ -513,9 +536,9 @@ Architected for, not built:
   when there are measurements to base them on. A 40 kHz rung exists, so the
   "50 kHz mode" that used to be listed here is now a matter of choosing a carrier
   set rather than of building anything.
-* **Automatic MCS selection.** The measurements an adaptation controller needs are
-  all collected (§10); nothing decides anything yet. Inventing thresholds before
-  there is on-air data to fit them to would only encode a guess.
+* **Automatic modulation selection.** FEC rate and burst length now adapt from
+  delivery evidence, but BPSK/QPSK/16-QAM remains the operator-selected MCS.
+  64-QAM is intentionally not part of this change.
 * **Per-subcarrier bit loading.** The header reserves a flags bit for announcing a
   map, and `AdaptationState` already accumulates the per-carrier channel power a
   map would be computed from.
@@ -533,8 +556,8 @@ Architected for, not built:
 
 ## 10. Limitations, honestly
 
-* **Never been on the air.** Every number in this document is from simulation.
-* **Over-the-air ARQ is untested.** `OfdmLink` is fully exercised against a
+* **Format-2 selective ARQ has not yet been on the air.** The original PHY and
+  format-1 link flew on 2026-08-09; the new `OfdmLink` is fully exercised against a
   simulated duplex channel and `RadioAudioPipe` is unit-tested against a fake
   sounddevice for keying and codec ordering, but the two have never run together
   against a real radio. This is the isolated remaining hardware step (§11).
@@ -543,10 +566,9 @@ Architected for, not built:
   decodes reliably, twice the guard essentially never does. (Three times the guard
   happens to decode again — that is geometry, not robustness, and not something to
   rely on.) Failure is always a rejection, never wrong bytes.
-* **A wide notch eventually wins.** Three carriers of 52 lost to a −30 dB notch
-  are recovered by the code and the interleaver. Twelve carriers at −40 dB — about
-  a quarter of the band — are past what a rate-1/2 code can make up, and the block
-  is rejected.
+* **A wide notch eventually wins.** The robust rate-1/2 profile recovered three
+  of 52 carriers lost to a −30 dB notch in prior testing. Higher punctured rates
+  deliberately trade that margin for speed and need new measured cliffs.
 * **Sample-rate offset between two stations is designed for but barely tested.**
   The pilot phase-slope tracker is what handles it, and the simulator's ppm
   impairment exercises it up to ±20 ppm on a single burst. What is *not* tested is
@@ -558,10 +580,10 @@ Architected for, not built:
 * **The receive squelch is a first cut.** `RadioAudioPipe` triggers on the level
   rising above a slowly tracked noise floor. It has never met a real FM squelch
   tail, a repeater's courtesy tone, or a station transmitting on the same channel.
-* **EVM is decision-directed**, so it flatters a bad link: once decisions start
-  being wrong, the error to the *wrong* constellation point is small. The reported
-  SNR comes from the known training symbols instead, and
-  `LinkMetrics.evm_source` records which method produced the EVM figure.
+* **Reference EVM needs a CRC-valid section.** When bytes decode, the modem
+  re-encodes them and measures against the true transmitted constellation. On a
+  total failure it can only report decision-directed EVM, and `evm_source` makes
+  that distinction explicit.
 * **No sample-rate conversion.** A profile's sample rate must match the device's.
 
 ---
@@ -592,14 +614,13 @@ it passed.
 
 ## 12. Forward design
 
-### Adaptive MCS
+### Adaptive modulation
 
-`LinkMetrics` (per burst) and `AdaptationState` (per transfer) already collect
-everything the decision needs: per-carrier SNR, EVM, packet error rate,
-retransmission rate, and the per-carrier channel power accumulated as a running
-mean. Nothing consumes them yet.
+`LinkAdaptationController` now consumes delivery ratio, retransmitted bytes,
+modeled goodput, and remote SNR to select FEC and burst length with asymmetric
+hysteresis. It deliberately does not change modulation yet.
 
-The shape a controller should take, when there is data to fit it to:
+The remaining modulation controller should follow the same evidence-first shape:
 
 * Decide on the **accumulated** state, not on one burst. A single bad burst moving
   the rate is the failure mode of every naive rate-control loop.
@@ -612,8 +633,8 @@ The shape a controller should take, when there is data to fit it to:
   simulation figures. Real ones will differ, and the table is the only thing that
   should need changing.
 
-Nothing in the frame format has to change: the header already carries the data
-MCS, so the transmitter can change mode on any burst and the receiver follows.
+Nothing in frame format 2 has to change: the header carries MCS and FEC explicitly,
+so the transmitter can later change either on a burst boundary.
 
 ### Per-subcarrier bit loading
 
@@ -636,11 +657,12 @@ rejected by older releases, so they create a safe capability gap by construction
 
 ## 13. Running it
 
-**In the application: Tools -> Modem test.** Profile and MCS pickers with the
-resolved waveform shown beside them, then a single burst, a full ARQ transfer, or
-a decode-rate sweep against SNR -- plus writing a clean burst to a WAV to play
-through a radio, and decoding any WAV back. Everything slow runs off the UI
-thread and the sweep is cancellable. No console is involved in any of it.
+**In the application: Tools -> Modem test.** Profile, MCS, FEC, and burst pickers
+show the resolved waveform, then let the operator inspect a deterministic burst,
+transmit a test burst through the configured radio, write a clean burst to a WAV,
+or decode a recorded WAV. The simulator-only full ARQ transfer and decode-rate
+sweep remain in `tools/ofdm_bench.py` for development and regression work rather
+than appearing as operator tabs. Slow work runs off the UI thread.
 
 The measurement engine is `guardian/ofdm/bench.py`, which returns data rather
 than printing it. `tools/ofdm_bench.py` is a thin front end over the same engine
@@ -650,18 +672,21 @@ implementation, so the two cannot disagree:
 ```powershell
 python tools\ofdm_bench.py --profiles      # the ladder
 python tools\ofdm_bench.py --help
+python tools\ofdm_bench.py --profile BENCH --mcs 2 --fec 3/4 `
+    --burst 8192 --arq-block 512 --bytes 16384 --snr 18
 
 # The whole physical layer, no radio and no Qt involved. About a minute.
-python -m pytest tests	est_ofdm_constellation.py tests	est_ofdm_phy.py `
-                 tests	est_ofdm_sync.py tests	est_ofdm_channel.py `
-                 tests	est_ofdm_link.py tests	est_ofdm_payload.py `
-                 tests	est_bench.py -q
+python -m pytest tests\test_ofdm_constellation.py tests\test_ofdm_phy.py `
+                 tests\test_ofdm_sync.py tests\test_ofdm_channel.py `
+                 tests\test_ofdm_link.py tests\test_ofdm_adaptive.py `
+                 tests\test_ofdm_payload.py tests\test_bench.py -q
 ```
 
 `tools/ofdm_bench.py` reports the profile, sample rate, FFT size, occupied
 bandwidth, data carriers, modulation, coded and information bits per symbol,
 waveform duration, crest factor, measured SNR, EVM, CFO, pilot phase slope,
-channel-response spread, the uncoded theory curve for comparison, retries, and
+channel-response spread, the uncoded theory curve, actual FEC bits/rate,
+data/ACK airtime, retransmitted bytes, turnaround loss, modeled goodput, and
 whether the payload came back identical.
 
 `--write-wav` and `--read-wav` are what make it useful once there are radios:

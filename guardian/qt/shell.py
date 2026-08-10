@@ -701,7 +701,11 @@ class GuardianMainWindow(QMainWindow):
         self.context_activity.setText("  ·  ".join(context_items))
         self.context_activity.setVisible(bool(context_items))
         self.transfer_panel.apply(
-            transfer_state(snapshot, self.runtime.operations.payload_active())
+            transfer_state(
+                snapshot,
+                self.runtime.operations.payload_active(),
+                self.runtime.operations.ofdm_status(),
+            )
         )
         self._update_recording_indicator()
 

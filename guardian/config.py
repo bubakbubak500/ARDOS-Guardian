@@ -215,7 +215,19 @@ class StationConfig:
     ofdm_mcs: int = 1                  # MCS1 = QPSK, rate 1/2
     ofdm_tx_lead_ms: int = 300         # after keying, before the waveform starts
     ofdm_tx_tail_ms: int = 100         # after the waveform, before unkeying
-    ofdm_max_retries: int = 4          # retransmissions before a block is failed
+    ofdm_max_retries: int = 4          # retransmissions before a burst is failed
+    # Version-2 adaptive FEC + selective-repeat ARQ. The fixed values are used
+    # directly when their AUTO switch is off and are also the reproducible test
+    # settings shown in the modem workspace.
+    ofdm_adaptive_fec: bool = True
+    ofdm_fec: str = "1/2"              # 1/2 | 2/3 | 3/4 | 5/6 | 7/8
+    ofdm_adaptive_burst: bool = True
+    ofdm_burst_bytes: int = 4096       # fixed-mode keyed-burst target
+    ofdm_min_burst_bytes: int = 512
+    ofdm_max_burst_bytes: int = 8192
+    ofdm_arq_block_bytes: int = 512
+    ofdm_timeout_multiplier: float = 1.0
+    ofdm_legacy_mode: bool = False      # version-1 512 B stop-and-wait comparison
 
     # Control-burst channel: "off" (idle) | "audio" (real RF via the radio).
     control_channel: str = "off"
@@ -342,6 +354,27 @@ class StationConfig:
                 ]
             else:
                 clean.pop(name, None)
+        # Keep hand-edited adaptive modem values on explicit protocol ladders.
+        if str(clean.get("ofdm_fec", "")) not in {"1/2", "2/3", "3/4", "5/6", "7/8"}:
+            clean.pop("ofdm_fec", None)
+        burst_ladder = {256, 512, 1024, 2048, 4096, 8192, 16384}
+        for name in ("ofdm_burst_bytes", "ofdm_min_burst_bytes",
+                     "ofdm_max_burst_bytes"):
+            if clean.get(name) not in burst_ladder:
+                clean.pop(name, None)
+        if clean.get("ofdm_arq_block_bytes") not in {256, 512, 1024}:
+            clean.pop("ofdm_arq_block_bytes", None)
+        arq_bytes = int(clean.get("ofdm_arq_block_bytes", 512))
+        for name in ("ofdm_burst_bytes", "ofdm_min_burst_bytes",
+                     "ofdm_max_burst_bytes"):
+            if name in clean and int(clean[name]) < arq_bytes:
+                clean.pop(name)
+        try:
+            timeout_multiplier = float(clean.get("ofdm_timeout_multiplier", 1.0))
+        except (TypeError, ValueError):
+            clean.pop("ofdm_timeout_multiplier", None)
+        else:
+            clean["ofdm_timeout_multiplier"] = min(4.0, max(0.5, timeout_multiplier))
         return cls(**clean)
 
     def save(self, path: Path | str | None = None) -> Path:

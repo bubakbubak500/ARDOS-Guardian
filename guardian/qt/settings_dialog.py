@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -32,6 +33,8 @@ from ..install.dependencies import find_vara_fm, find_vara_hf
 from ..install.hamlib_installer import existing_rigctld
 from ..modem.audio import match_device_name, scan_audio_devices
 from ..ofdm import MCS_TABLE
+from ..ofdm.adaptation import BURST_LADDER
+from ..ofdm.coding import FEC_SPECS
 from ..ofdm.config import PROFILE_LADDER, profile_or_default
 from ..protocol import MAX_PTT_DELAY_MS, PTT_DELAY_STEP_MS
 from ..radio.presets import CURATED, load_hamlib_models
@@ -964,6 +967,22 @@ class SettingsDialog(QDialog):
                 self.ofdm_profile,
             ),
             (dual("OFDM modulation (MCS)", "Modulace OFDM (MCS)"), self.ofdm_mcs),
+            (dual("Adaptive FEC", "Adaptivní FEC"), self.ofdm_adaptive_fec),
+            (dual("Fixed FEC rate", "Pevná rychlost FEC"), self.ofdm_fec),
+            (dual("Adaptive burst length", "Adaptivní délka dávky"),
+             self.ofdm_adaptive_burst),
+            (dual("Fixed burst target", "Pevná cílová dávka"),
+             self.ofdm_burst_bytes),
+            (dual("Minimum adaptive burst", "Nejmenší adaptivní dávka"),
+             self.ofdm_min_burst_bytes),
+            (dual("Maximum adaptive burst", "Největší adaptivní dávka"),
+             self.ofdm_max_burst_bytes),
+            (dual("Selective-ARQ sub-block", "Podblok selektivního ARQ"),
+             self.ofdm_arq_block_bytes),
+            (dual("Timeout scale", "Násobek časového limitu"),
+             self.ofdm_timeout_multiplier),
+            (dual("Legacy comparison mode", "Starší srovnávací režim"),
+             self.ofdm_legacy_mode),
             (
                 dual("Keying lead before transmit", "Předstih klíčování"),
                 self.ofdm_tx_lead,
@@ -1064,6 +1083,58 @@ class SettingsDialog(QDialog):
         self.ofdm_mcs.setCurrentIndex(
             max(0, self.ofdm_mcs.findData(self.config.ofdm_mcs))
         )
+        self.ofdm_adaptive_fec = QCheckBox(dual(
+            "AUTO — learn from delivery results",
+            "AUTO — učit se z výsledků doručení",
+        ))
+        self.ofdm_adaptive_fec.setChecked(self.config.ofdm_adaptive_fec)
+        self.ofdm_fec = QComboBox()
+        for spec in FEC_SPECS:
+            self.ofdm_fec.addItem(f"FEC {spec.label}", spec.label)
+        self.ofdm_fec.setCurrentIndex(
+            max(0, self.ofdm_fec.findData(self.config.ofdm_fec))
+        )
+        self.ofdm_adaptive_burst = QCheckBox(dual(
+            "AUTO — grow only after clean bursts",
+            "AUTO — zvětšovat jen po čistých dávkách",
+        ))
+        self.ofdm_adaptive_burst.setChecked(self.config.ofdm_adaptive_burst)
+
+        def burst_picker(value: int) -> QComboBox:
+            picker = QComboBox()
+            for size in BURST_LADDER:
+                picker.addItem(f"{size} B" if size < 1024 else f"{size // 1024} KiB", size)
+            picker.setCurrentIndex(max(0, picker.findData(value)))
+            return picker
+
+        self.ofdm_burst_bytes = burst_picker(self.config.ofdm_burst_bytes)
+        self.ofdm_min_burst_bytes = burst_picker(self.config.ofdm_min_burst_bytes)
+        self.ofdm_max_burst_bytes = burst_picker(self.config.ofdm_max_burst_bytes)
+        self.ofdm_arq_block_bytes = QComboBox()
+        for size in (256, 512, 1024):
+            self.ofdm_arq_block_bytes.addItem(
+                f"{size} B" if size < 1024 else "1 KiB", size
+            )
+        self.ofdm_arq_block_bytes.setCurrentIndex(max(
+            0, self.ofdm_arq_block_bytes.findData(self.config.ofdm_arq_block_bytes)
+        ))
+        self.ofdm_timeout_multiplier = QDoubleSpinBox()
+        self.ofdm_timeout_multiplier.setRange(0.5, 4.0)
+        self.ofdm_timeout_multiplier.setSingleStep(0.1)
+        self.ofdm_timeout_multiplier.setDecimals(1)
+        self.ofdm_timeout_multiplier.setSuffix("×")
+        self.ofdm_timeout_multiplier.setValue(self.config.ofdm_timeout_multiplier)
+        self.ofdm_timeout_multiplier.setToolTip(dual(
+            "Scales duration-derived ACK and receive deadlines. Leave at 1.0 "
+            "unless radio turnaround measurements require more margin.",
+            "Násobí časové limity odvozené z délky rámce. Hodnotu 1,0 měňte "
+            "jen pokud měření přepínání rádia vyžaduje větší rezervu.",
+        ))
+        self.ofdm_legacy_mode = QCheckBox(dual(
+            "Use version-1 512 B stop-and-wait for comparison/debugging",
+            "Použít verzi 1 s 512 B a potvrzením každého bloku pro srovnání",
+        ))
+        self.ofdm_legacy_mode.setChecked(self.config.ofdm_legacy_mode)
         self.ofdm_tx_lead = _spin(0, 3_000, self.config.ofdm_tx_lead_ms)
         self.ofdm_tx_lead.setSuffix(dual(" ms", " ms"))
         self.ofdm_tx_lead.setToolTip(dual(
@@ -1080,6 +1151,31 @@ class SettingsDialog(QDialog):
         self.ofdm_summary = QLabel()
         self.ofdm_summary.setObjectName("Metadata")
         self.ofdm_summary.setWordWrap(True)
+        self.ofdm_adaptive_fec.toggled.connect(self._sync_ofdm_controls)
+        self.ofdm_adaptive_burst.toggled.connect(self._sync_ofdm_controls)
+        self.ofdm_legacy_mode.toggled.connect(self._sync_ofdm_controls)
+        for picker in (
+            self.ofdm_fec, self.ofdm_burst_bytes, self.ofdm_min_burst_bytes,
+            self.ofdm_max_burst_bytes, self.ofdm_arq_block_bytes,
+        ):
+            picker.currentIndexChanged.connect(self._sync_ofdm_summary)
+        self._sync_ofdm_controls()
+
+    def _sync_ofdm_controls(self) -> None:
+        legacy = self.ofdm_legacy_mode.isChecked()
+        self.ofdm_adaptive_fec.setEnabled(not legacy)
+        self.ofdm_fec.setEnabled(not legacy and not self.ofdm_adaptive_fec.isChecked())
+        self.ofdm_adaptive_burst.setEnabled(not legacy)
+        self.ofdm_burst_bytes.setEnabled(
+            not legacy and not self.ofdm_adaptive_burst.isChecked()
+        )
+        self.ofdm_min_burst_bytes.setEnabled(
+            not legacy and self.ofdm_adaptive_burst.isChecked()
+        )
+        self.ofdm_max_burst_bytes.setEnabled(
+            not legacy and self.ofdm_adaptive_burst.isChecked()
+        )
+        self.ofdm_arq_block_bytes.setEnabled(not legacy)
         self._sync_ofdm_summary()
 
     def _sync_ofdm_summary(self) -> None:
@@ -1090,7 +1186,25 @@ class SettingsDialog(QDialog):
         directly above it.
         """
         waveform = profile_or_default(str(self.ofdm_profile.currentData()))
-        self.ofdm_summary.setText(self._ofdm_summary_text(waveform))
+        if self.ofdm_legacy_mode.isChecked():
+            mode = dual(
+                "Protocol v1 compatibility: 512 B stop-and-wait, FEC 1/2.",
+                "Kompatibilita protokolu v1: 512 B, jednotlivá potvrzení, FEC 1/2.",
+            )
+        else:
+            fec = ("AUTO" if self.ofdm_adaptive_fec.isChecked()
+                   else f"fixed {self.ofdm_fec.currentData()}")
+            burst = (f"AUTO {self.ofdm_min_burst_bytes.currentData()}–"
+                     f"{self.ofdm_max_burst_bytes.currentData()} B"
+                     if self.ofdm_adaptive_burst.isChecked()
+                     else f"fixed {self.ofdm_burst_bytes.currentData()} B")
+            mode = dual(
+                f"Protocol v2 selective repeat · FEC {fec} · burst {burst} · "
+                f"ARQ {self.ofdm_arq_block_bytes.currentData()} B.",
+                f"Protokol v2 se selektivním opakováním · FEC {fec} · dávka "
+                f"{burst} · ARQ {self.ofdm_arq_block_bytes.currentData()} B.",
+            )
+        self.ofdm_summary.setText(f"{mode}\n{self._ofdm_summary_text(waveform)}")
         # A rung that needs a faster sound card is a failure the operator can
         # anticipate at the moment of choosing rather than debug afterwards.
         if waveform.sample_rate != 48000:
@@ -1289,6 +1403,21 @@ class SettingsDialog(QDialog):
                 ("VARA FM", self.vara_fm_path),
                 ("VARA HF", self.vara_hf_path),
             ]
+        if self.payload_backend.currentData() == "ofdm_vhf":
+            arq = int(self.ofdm_arq_block_bytes.currentData())
+            fixed = int(self.ofdm_burst_bytes.currentData())
+            minimum = int(self.ofdm_min_burst_bytes.currentData())
+            maximum = int(self.ofdm_max_burst_bytes.currentData())
+            if minimum > maximum:
+                errors.append(dual(
+                    "Minimum OFDM burst cannot exceed the maximum.",
+                    "Nejmenší dávka OFDM nesmí překročit největší.",
+                ))
+            if fixed < arq or minimum < arq:
+                errors.append(dual(
+                    "An OFDM burst must be large enough to hold one ARQ sub-block.",
+                    "Dávka OFDM musí pojmout alespoň jeden podblok ARQ.",
+                ))
         for label, field in checked_paths:
             value = field.text()
             if value and Path(value).suffix.lower() == ".exe" and not Path(value).is_file():
@@ -1331,6 +1460,15 @@ class SettingsDialog(QDialog):
         cfg.ofdm_tx_lead_ms = self.ofdm_tx_lead.value()
         cfg.ofdm_tx_tail_ms = self.ofdm_tx_tail.value()
         cfg.ofdm_max_retries = self.ofdm_max_retries.value()
+        cfg.ofdm_adaptive_fec = self.ofdm_adaptive_fec.isChecked()
+        cfg.ofdm_fec = str(self.ofdm_fec.currentData())
+        cfg.ofdm_adaptive_burst = self.ofdm_adaptive_burst.isChecked()
+        cfg.ofdm_burst_bytes = int(self.ofdm_burst_bytes.currentData())
+        cfg.ofdm_min_burst_bytes = int(self.ofdm_min_burst_bytes.currentData())
+        cfg.ofdm_max_burst_bytes = int(self.ofdm_max_burst_bytes.currentData())
+        cfg.ofdm_arq_block_bytes = int(self.ofdm_arq_block_bytes.currentData())
+        cfg.ofdm_timeout_multiplier = self.ofdm_timeout_multiplier.value()
+        cfg.ofdm_legacy_mode = self.ofdm_legacy_mode.isChecked()
         cfg.control_modem = self.control_modem.currentData()
         cfg.vara_hf_bandwidth = self.vara_hf_bandwidth.currentData()
         cfg.vara_host_ptt = self.vara_host_ptt.isChecked()

@@ -7,7 +7,8 @@ import dataclasses
 import numpy as np
 import pytest
 
-from guardian.ofdm import BENCH, MCS_TABLE, PhyHeader, mcs, profile, profile_names
+from guardian.ofdm import (BENCH, MCS_TABLE, FecProfile, PhyHeader, mcs,
+                           profile, profile_names)
 from guardian.ofdm.config import DEFAULT_MCS_INDEX, HEADER_MCS, OfdmConfigError
 from guardian.ofdm.framing import (HEADER_BYTES, OfdmFrameError, OfdmFrameType,
                                    build_burst, burst_duration, decode_burst,
@@ -261,7 +262,9 @@ def test_acknowledgements_are_header_only_and_much_shorter_than_data() -> None:
 
 def test_the_header_is_sixteen_bytes_and_survives_a_byte_round_trip() -> None:
     header = PhyHeader(OfdmFrameType.DATA, msg_id=0xDEADBEEF, block_seq=513,
-                       block_count=1024, mcs=3, payload_len=512, flags=0x81)
+                       block_count=1024, mcs=3, payload_len=512, flags=0x40,
+                       fec=FecProfile.FEC_7_8, subblock_count=17,
+                       retransmission=True)
     raw = header.encode()
     assert len(raw) == HEADER_BYTES == 16
     assert PhyHeader.decode(raw) == header
@@ -305,14 +308,14 @@ def test_a_truncated_header_is_refused() -> None:
 
 
 def test_the_header_never_promises_more_payload_than_the_block_allows() -> None:
-    header = PhyHeader(OfdmFrameType.DATA, 1, payload_len=BENCH.block_size + 1)
-    with pytest.raises(ValueError, match="block size"):
-        build_burst(BENCH, header, _payload(BENCH.block_size + 1))
+    header = PhyHeader(OfdmFrameType.DATA, 1, payload_len=1025)
+    with pytest.raises(ValueError, match="protocol ARQ block size"):
+        build_burst(BENCH, header, _payload(1025))
 
 
 def test_a_header_that_disagrees_with_its_payload_is_a_programming_error() -> None:
     header = PhyHeader(OfdmFrameType.DATA, 1, payload_len=10)
-    with pytest.raises(ValueError, match="payload bytes"):
+    with pytest.raises(ValueError, match="payload length"):
         build_burst(BENCH, header, b"short")
 
 
@@ -335,7 +338,9 @@ def test_a_denser_constellation_needs_fewer_symbols(modulation: str,
 
 def test_airtime_follows_the_profile_rather_than_a_stored_constant() -> None:
     header = PhyHeader(OfdmFrameType.DATA, 1, mcs=1, payload_len=BENCH.block_size)
-    symbols = header_symbols(BENCH) + section_symbols(BENCH, BENCH.block_size + 2, "qpsk")
+    symbols = (header_symbols(BENCH)
+               + section_symbols(BENCH, 6, "bpsk")
+               + section_symbols(BENCH, BENCH.block_size + 2, "qpsk"))
     overhead = BENCH.preamble_symbols + BENCH.training_symbols
     assert burst_duration(BENCH, header) == pytest.approx(
         (symbols + overhead) * BENCH.symbol_duration
@@ -367,7 +372,9 @@ def test_the_receiver_reports_how_many_symbols_a_short_buffer_holds() -> None:
     header = PhyHeader(OfdmFrameType.DATA, 1, mcs=1, payload_len=len(payload))
     waveform = build_burst(BENCH, header, payload)
     full = BurstReceiver(BENCH, waveform, 0)
-    expected = header_symbols(BENCH) + section_symbols(BENCH, BENCH.block_size + 2, "qpsk")
+    expected = (header_symbols(BENCH)
+                + section_symbols(BENCH, 6, "bpsk")
+                + section_symbols(BENCH, BENCH.block_size + 2, "qpsk"))
     assert full.available_data_symbols() == expected
 
     clipped = BurstReceiver(BENCH, waveform[: len(waveform) // 2], 0)
@@ -390,7 +397,7 @@ def test_a_truncated_burst_reports_a_reason_instead_of_returning_bytes() -> None
 
     assert decoded.payload is None
     assert not decoded.ok
-    assert "data symbols" in decoded.metrics.error
+    assert "truncated" in decoded.metrics.error
 
 
 def test_pure_noise_never_produces_a_payload() -> None:

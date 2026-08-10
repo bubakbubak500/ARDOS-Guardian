@@ -25,6 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from guardian.ofdm import bench  # noqa: E402
+from guardian.ofdm.adaptation import AdaptationConfig, BURST_LADDER  # noqa: E402
+from guardian.ofdm.coding import FEC_SPECS, fec_profile  # noqa: E402
 from guardian.ofdm.config import (DEFAULT_PROFILE_NAME, MCS_TABLE,  # noqa: E402
                                   PROFILE_LADDER, mcs, profile)
 
@@ -56,10 +58,14 @@ def show_facts(facts: bench.WaveformFacts) -> None:
           " and no RF claim is made]")
     print(f"symbol duration:      {facts.symbol_ms:.2f} ms")
     print(f"MCS:                  {facts.mcs_label}")
+    print(f"payload FEC:          {facts.fec_label}"
+          f"  (actual block rate {facts.effective_fec_rate:.3f})")
     print(f"bits per symbol:      {facts.coded_bits_per_symbol} coded /"
           f" {facts.information_bits_per_symbol} information")
-    print(f"PHY rate:             {facts.phy_rate:.0f} bit/s"
-          "  [payload carriers only, before preamble/header/ACK overhead]")
+    print(f"constellation raw:    {facts.raw_data_bps:.0f} bit/s"
+          "  [data carriers after pilot/CP overhead, before FEC]")
+    print(f"after FEC:            {facts.phy_rate:.0f} bit/s"
+          "  [before preamble/header/manifest/ACK overhead]")
     print(f"block size:           {facts.block_size} bytes")
     print(f"header:               {facts.header_symbols} symbols at {mcs(0).label}")
     print(f"full block airtime:   {facts.full_block_seconds:.3f} s")
@@ -144,12 +150,31 @@ def show_transfer(result: bench.TransferResult) -> int:
           "  (mean over bursts)")
     print(f"EVM:                  {_percent(result.measured_evm)}")
     print(f"retries:              {result.retries}")
+    print(f"FEC selected:         {result.fec_initial} -> {result.fec_final}")
+    print(f"burst target:         {result.burst_initial} -> {result.burst_final} bytes"
+          f"  (ARQ blocks {result.arq_block_bytes} bytes)")
+    print(f"keyed bursts:         {result.data_bursts} data + {result.ack_bursts} ACK")
+    print(f"retransmitted bytes:  {result.retransmitted_bytes}"
+          f"  ({result.retransmission_loss * 100:.1f} % of payload traffic)")
     print(f"blocks acked:         {result.blocks_acked}/{result.blocks}")
     print(f"packet error rate:    {_percent(result.packet_error_rate, 1)}")
     print(f"channel occupancy:    {result.channel_seconds:.1f} s of airtime"
           " (both directions, plus PTT turnaround)")
     print(f"measured throughput:  {_value(result.throughput_bps, ' bit/s', 0)}"
           "  [end to end, ACKs and retries included]")
+    print(THIN)
+    print("Modem Efficiency Report")
+    print(f"constellation raw:    {result.raw_data_bps:.0f} bit/s")
+    print(f"after FEC:            {result.fec_adjusted_bps:.0f} bit/s")
+    print(f"protocol payload:     {_value(result.protocol_payload_bps, ' bit/s', 0)}"
+          "  [data + ACK airtime]")
+    print(f"protocol overhead:    {result.protocol_overhead_bytes} bytes"
+          "  [headers, manifests, bitmaps and CRCs]")
+    print(f"modeled goodput:      {_value(result.throughput_bps, ' bit/s', 0)}"
+          "  [including keyed turnaround]")
+    print(f"data/ACK airtime:     {result.data_airtime_seconds:.2f} /"
+          f" {result.ack_airtime_seconds:.2f} s")
+    print(f"turnaround loss:      {result.turnaround_loss * 100:.1f} %")
     print(f"result:               {'PASS' if result.passed else 'FAIL'}")
     print(f"RX payload identical: {'YES' if result.identical else 'NO'}")
     return 0 if result.passed else 1
@@ -205,10 +230,11 @@ def show_capture(result: bench.CaptureResult) -> int:
 
 
 def show_transmit(prof, mcs_index: int, path: Path, payload_bytes: int,
-                  repeats: int, seed: int) -> int:
+                  repeats: int, seed: int, fec: str = "1/2") -> int:
     _, written = bench.make_test_burst(prof, mcs_index, payload_bytes=payload_bytes,
-                                       seed=seed, repeats=repeats, wav_path=path)
-    facts = bench.describe(prof, mcs_index)
+                                       seed=seed, repeats=repeats, wav_path=path,
+                                       fec=fec)
+    facts = bench.describe(prof, mcs_index, fec)
     print(f"wrote {written}")
     print(f"  {repeats} clean burst(s) of {min(payload_bytes, prof.block_size)}"
           f" bytes at {facts.mcs_label}, {facts.occupied:.0f} Hz occupied,"
@@ -228,6 +254,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mcs", type=int, default=1,
                         choices=[entry.index for entry in MCS_TABLE],
                         help="MCS index for the data section (default: %(default)s)")
+    parser.add_argument("--fec", default="1/2",
+                        choices=[entry.label for entry in FEC_SPECS],
+                        help="fixed payload FEC for reproducible tests")
+    parser.add_argument("--auto-fec", action="store_true",
+                        help="let a whole-transfer run adapt its FEC")
+    parser.add_argument("--burst", type=int, default=4096,
+                        choices=list(BURST_LADDER),
+                        help="fixed keyed-burst target in bytes")
+    parser.add_argument("--auto-burst", action="store_true",
+                        help="let a whole-transfer run adapt burst length")
+    parser.add_argument("--min-burst", type=int, default=512,
+                        choices=list(BURST_LADDER))
+    parser.add_argument("--max-burst", type=int, default=8192,
+                        choices=list(BURST_LADDER))
+    parser.add_argument("--arq-block", type=int, default=512,
+                        choices=[256, 512, 1024])
     parser.add_argument("--bytes", type=int, default=4096, help="payload size")
     parser.add_argument("--snr", type=float, default=15.0,
                         help="in-band SNR in dB; a large value asks for an ideal"
@@ -259,17 +301,27 @@ def main(argv: list[str] | None = None) -> int:
         return show_capture(bench.decode_capture(prof, args.read_wav))
     if args.transmit is not None:
         return show_transmit(prof, args.mcs, args.transmit, args.bytes,
-                             args.repeats, args.seed)
+                             args.repeats, args.seed, args.fec)
     if args.sweep:
         return show_sweep(bench.run_sweep(prof, args.mcs, runs=args.runs,
-                                          seed=args.seed))
+                                          seed=args.seed, fec=args.fec))
     if args.single or args.write_wav is not None:
         return show_burst(bench.run_burst(prof, args.mcs, payload_bytes=args.bytes,
                                           snr_db=args.snr, seed=args.seed,
-                                          wav_path=args.write_wav))
+                                          wav_path=args.write_wav, fec=args.fec))
+    adaptation = AdaptationConfig(
+        adaptive_fec=args.auto_fec,
+        fixed_fec=fec_profile(args.fec),
+        adaptive_burst=args.auto_burst,
+        fixed_burst_bytes=args.burst,
+        min_burst_bytes=args.min_burst,
+        max_burst_bytes=args.max_burst,
+        arq_block_bytes=args.arq_block,
+    )
     return show_transfer(bench.run_transfer(prof, args.mcs,
                                             payload_bytes=args.bytes,
-                                            snr_db=args.snr, seed=args.seed))
+                                            snr_db=args.snr, seed=args.seed,
+                                            adaptation_config=adaptation))
 
 
 if __name__ == "__main__":

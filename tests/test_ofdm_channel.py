@@ -15,8 +15,10 @@ import pytest
 
 from guardian.ofdm import BENCH, PhyHeader, build_burst, decode_burst, mcs
 from guardian.ofdm.channel import Channel, ChannelSpec, ideal, realistic
+from guardian.ofdm.config import HEADER_MCS
 from guardian.ofdm.constellation import bits_per_symbol
-from guardian.ofdm.framing import OfdmFrameType
+from guardian.ofdm.framing import (OfdmFrameType, header_symbols,
+                                   section_symbols)
 
 SEED = 0xA5
 
@@ -272,11 +274,17 @@ def test_a_corrupted_payload_is_rejected_by_its_crc() -> None:
     waveform = _burst(payload)
     aired = Channel(BENCH, ChannelSpec(snr_db=25.0, delay=500,
                                        trailing=2000), seed=12)(waveform)
-    # Wreck the middle of the data section, past the header, hard enough that the
-    # code cannot repair it.
+    # Erase the independently protected payload section but leave the robust
+    # header and manifest readable. The receiver then knows which block failed.
     damaged = aired.copy()
-    start = len(aired) // 2
-    damaged[start: start + 20000] += np.random.default_rng(1).normal(0.0, 0.5, 20000)
+    manifest = section_symbols(BENCH, 6, HEADER_MCS.modulation)
+    start = 500 + (
+        BENCH.preamble_symbols + BENCH.training_symbols
+        + header_symbols(BENCH) + manifest
+    ) * BENCH.symbol_samples
+    damaged[start:start + section_symbols(
+        BENCH, len(payload) + 2, mcs(1).modulation
+    ) * BENCH.symbol_samples] = 0.0
     decoded = decode_burst(BENCH, damaged)
 
     assert decoded.header is not None           # the header still read

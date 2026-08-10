@@ -103,10 +103,11 @@ def _stub_transmit(runtime: ShellRuntime, monkeypatch, aired: float | None = 4.0
     calls: list[dict] = []
 
     def transmit(*, profile_name=None, mcs_index=None, payload_bytes=512,
-                 repeats=3, on_log=None):
+                 repeats=3, on_log=None, fec=None):
         calls.append({
             "profile_name": profile_name, "mcs_index": mcs_index,
             "payload_bytes": payload_bytes, "repeats": repeats,
+            "fec": fec,
         })
         if hold is not None:
             assert hold.wait(60.0), "the transmission was never released"
@@ -405,9 +406,9 @@ def test_a_block_delivered_with_the_wrong_bytes_is_an_unmissable_alarm() -> None
         assert result.wrong_byte_deliveries == 2
         workspace._render_sweep(result)
 
-        # Raised to the front, so it cannot be sitting behind another tab.
-        assert workspace.tabs.currentWidget() is workspace.sweep_page
-        assert workspace.sweep_alarm.isVisibleTo(workspace)
+        # The developer regression page is deliberately absent from the
+        # operator-facing tab bar.
+        assert workspace.tabs.indexOf(workspace.sweep_page) == -1
         assert workspace.sweep_alarm.property("statusRole") == "danger"
         assert "2" in workspace.sweep_alarm.text()
         assert "SERIOUS" in workspace.sweep_alarm.text()
@@ -622,6 +623,7 @@ def test_confirming_transmits_the_waveform_selected_here_not_the_saved_one(
         assert calls == [{
             "profile_name": "WIDE_10K", "mcs_index": 3,
             "payload_bytes": 256, "repeats": 2,
+            "fec": workspace.selected_fec(),
         }]
         assert workspace.transmit_status.property("statusRole") == "success"
         assert "6.2 s aired" in workspace.transmit_status.text()
@@ -872,7 +874,14 @@ def test_the_workspace_is_bilingual() -> None:
         )
         assert "datových" in workspace.facts_fields["carriers"].text()
         assert "pilotních" in workspace.facts_fields["carriers"].text()
-        assert workspace.tabs.tabText(2) == "Úspěšnost podle odstupu"
+        assert workspace.tabs.count() == 2
+        assert [workspace.tabs.tabText(index) for index in range(2)] == [
+            "Jedno vysílání", "Soubory"
+        ]
+        assert all("přenos" not in workspace.tabs.tabText(index).lower()
+                   for index in range(workspace.tabs.count()))
+        assert all("odstup" not in workspace.tabs.tabText(index).lower()
+                   for index in range(workspace.tabs.count()))
     finally:
         runtime.close()
         set_language(Language.ENGLISH)

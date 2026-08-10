@@ -28,10 +28,10 @@ dev = [
 guardian = "guardian.app:main"
 
 [project.urls]
-Homepage = "https://github.com/bubakbubak500/ARDOS-Guardian"
-Documentation = "https://github.com/bubakbubak500/ARDOS-Guardian#readme"
-Releases = "https://github.com/bubakbubak500/ARDOS-Guardian/releases"
-Issues = "https://github.com/bubakbubak500/ARDOS-Guardian/issues"
+Homepage = "https://github.com/bubakbubak500/ARDOS-Guardian-G2"
+Documentation = "https://github.com/bubakbubak500/ARDOS-Guardian-G2#readme"
+Releases = "https://github.com/bubakbubak500/ARDOS-Guardian-G2/releases"
+Issues = "https://github.com/bubakbubak500/ARDOS-Guardian-G2/issues"
 
 [tool.setuptools.dynamic]
 version = {attr = "guardian._version.__version__"}

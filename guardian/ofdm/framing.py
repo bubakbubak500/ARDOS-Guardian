@@ -27,9 +27,9 @@ from enum import IntEnum
 
 import numpy as np
 
-from ..modem.fec import K as FEC_K
-from ..modem.fec import conv_encode, viterbi_decode_soft
 from ..protocol import crc16
+from .coding import (FecProfile, decode_soft, effective_rate, encode_bits,
+                     encoded_bits, fec_profile, fec_spec)
 from .config import HEADER_MCS, OfdmConfigError, OfdmProfile, mcs
 from .constellation import bits_per_symbol, demap_llr, evm, map_bits
 from .interleaving import deinterleave, interleave
@@ -39,7 +39,8 @@ from .sync import candidates
 
 #: OFDM frame-format version. Independent of the ARDOS control-frame version:
 #: this one describes the payload waveform, which no legacy station ever hears.
-FRAME_VERSION = 1
+FRAME_VERSION = 2
+LEGACY_FRAME_VERSION = 1
 
 # version, frame_type, msg_id, block_seq, block_count, mcs, payload_len, flags
 _HEADER = struct.Struct(">BBIHHBHB")
@@ -47,8 +48,11 @@ _CRC = struct.Struct(">H")
 #: Header size on the wire, CRC included.
 HEADER_BYTES = _HEADER.size + _CRC.size
 
-#: Bits the convolutional encoder appends to flush its register.
-_FLUSH_BITS = FEC_K - 1
+_SUBBLOCK_MASK = 0x3F
+_RETRANSMISSION_FLAG = 0x80
+_MANIFEST_ENTRY = struct.Struct(">HH")
+_ACK_PREFIX = struct.Struct(">HbB")
+MAX_ARQ_BLOCK_BYTES = 1024
 
 
 class OfdmFrameError(Exception):
@@ -75,20 +79,37 @@ class PhyHeader:
     block_count: int = 1
     mcs: int = HEADER_MCS.index
     payload_len: int = 0
-    #: Reserved. A per-subcarrier bit-loading map would announce itself here.
+    #: Reserved version-2 flag bits.
     flags: int = 0
     version: int = FRAME_VERSION
+    #: New fields follow every version-1 positional field for source compatibility.
+    fec: FecProfile | int = FecProfile.FEC_1_2
+    subblock_count: int = 1
+    retransmission: bool = False
 
     def encode(self) -> bytes:
+        if self.version not in (LEGACY_FRAME_VERSION, FRAME_VERSION):
+            raise ValueError("unsupported OFDM frame version")
+        if self.version == LEGACY_FRAME_VERSION:
+            scheme = int(self.mcs)
+            wire_flags = int(self.flags)
+        else:
+            fec = fec_profile(self.fec)
+            if not 1 <= int(self.subblock_count) <= 32:
+                raise ValueError("subblock_count must be in 1..32")
+            scheme = (int(fec) << 5) | (int(self.mcs) & 0x1F)
+            wire_flags = (int(self.flags) & 0x40) | int(self.subblock_count)
+            if self.retransmission:
+                wire_flags |= _RETRANSMISSION_FLAG
         body = _HEADER.pack(
             int(self.version) & 0xFF,
             int(self.frame_type) & 0xFF,
             int(self.msg_id) & 0xFFFFFFFF,
             int(self.block_seq) & 0xFFFF,
             int(self.block_count) & 0xFFFF,
-            int(self.mcs) & 0xFF,
+            scheme & 0xFF,
             int(self.payload_len) & 0xFFFF,
-            int(self.flags) & 0xFF,
+            wire_flags & 0xFF,
         )
         return body + _CRC.pack(crc16(body))
 
@@ -101,8 +122,8 @@ class PhyHeader:
         want = crc16(body)
         if given != want:
             raise OfdmFrameError(f"header CRC {given:#06x}, computed {want:#06x}")
-        version, ftype, msg_id, seq, count, index, length, flags = _HEADER.unpack(body)
-        if version != FRAME_VERSION:
+        version, ftype, msg_id, seq, count, scheme, length, flags = _HEADER.unpack(body)
+        if version not in (LEGACY_FRAME_VERSION, FRAME_VERSION):
             raise OfdmFrameError(f"unsupported OFDM frame version {version}")
         try:
             frame_type = OfdmFrameType(ftype)
@@ -112,6 +133,23 @@ class PhyHeader:
         # be demapped with a constellation the sender never used. It surfaces as
         # a frame error, not a config error: this is untrusted input off the air,
         # and `decode_burst` has to be able to catch everything a bad burst does.
+        if version == LEGACY_FRAME_VERSION:
+            index = scheme
+            fec = FecProfile.FEC_1_2
+            subblock_count = 1
+            retransmission = False
+            reserved_flags = flags
+        else:
+            index = scheme & 0x1F
+            try:
+                fec = fec_profile(scheme >> 5)
+            except ValueError as exc:
+                raise OfdmFrameError(str(exc)) from None
+            subblock_count = flags & _SUBBLOCK_MASK
+            retransmission = bool(flags & _RETRANSMISSION_FLAG)
+            reserved_flags = flags & 0x40
+            if not 1 <= subblock_count <= 32:
+                raise OfdmFrameError(f"invalid sub-block count {subblock_count}")
         try:
             mcs(index)
         except OfdmConfigError as exc:
@@ -122,33 +160,93 @@ class PhyHeader:
             block_seq=seq,
             block_count=count,
             mcs=index,
+            fec=fec,
             payload_len=length,
-            flags=flags,
+            subblock_count=subblock_count,
+            retransmission=retransmission,
+            flags=reserved_flags,
             version=version,
         )
 
     def summary(self) -> str:
         parts = [self.frame_type.label, f"id={self.msg_id}"]
         if self.frame_type is OfdmFrameType.DATA:
-            parts.append(f"block {self.block_seq + 1}/{self.block_count}")
+            parts.append(f"burst {self.block_seq}")
+            parts.append(f"{self.subblock_count} block(s)/{self.block_count}")
             parts.append(f"{self.payload_len} B")
             parts.append(f"MCS{self.mcs}")
+            parts.append(f"FEC {fec_spec(self.fec).label}")
         else:
-            parts.append(f"block {self.block_seq + 1}")
+            parts.append(f"burst {self.block_seq}")
         return " ".join(parts)
+
+
+@dataclass(frozen=True)
+class SubBlock:
+    """One independently recoverable application block inside a keyed burst."""
+
+    sequence: int
+    payload: bytes
+
+
+@dataclass(frozen=True)
+class AckBitmap:
+    """Compact selective-repeat state carried by one robust control section."""
+
+    total_blocks: int
+    received: frozenset[int]
+    remote_snr_db: float | None = None
+    remote_evm_rms: float | None = None
+
+    def encode(self) -> bytes:
+        if not 1 <= int(self.total_blocks) <= 0xFFFF:
+            raise ValueError("ACK total_blocks must be in 1..65535")
+        bitmap = bytearray((self.total_blocks + 7) // 8)
+        for sequence in self.received:
+            if not 0 <= int(sequence) < self.total_blocks:
+                raise ValueError(f"ACK block {sequence} is outside the message")
+            bitmap[sequence // 8] |= 1 << (7 - sequence % 8)
+        snr = (-128 if self.remote_snr_db is None else
+               max(-127, min(127, round(float(self.remote_snr_db) * 2.0))))
+        evm = (255 if self.remote_evm_rms is None else
+               max(0, min(254, round(float(self.remote_evm_rms) * 200.0))))
+        return _ACK_PREFIX.pack(self.total_blocks, snr, evm) + bytes(bitmap)
+
+    @classmethod
+    def decode(cls, raw: bytes) -> "AckBitmap":
+        if len(raw) < _ACK_PREFIX.size:
+            raise OfdmFrameError("ACK bitmap is truncated")
+        total, snr, evm = _ACK_PREFIX.unpack_from(raw)
+        expected = _ACK_PREFIX.size + (total + 7) // 8
+        if total < 1 or len(raw) != expected:
+            raise OfdmFrameError(
+                f"ACK bitmap is {len(raw)} bytes, expected {expected} for {total} blocks"
+            )
+        bitmap = raw[_ACK_PREFIX.size:]
+        received = frozenset(
+            sequence for sequence in range(total)
+            if bitmap[sequence // 8] & (1 << (7 - sequence % 8))
+        )
+        return cls(
+            total_blocks=total, received=received,
+            remote_snr_db=None if snr == -128 else snr / 2.0,
+            remote_evm_rms=None if evm == 255 else evm / 200.0,
+        )
 
 
 # -- section coding --------------------------------------------------------- #
 
-def coded_bits(byte_count: int) -> int:
-    """Coded bits the rate-1/2 encoder produces for `byte_count` bytes."""
-    return 2 * (byte_count * 8 + _FLUSH_BITS)
+def coded_bits(byte_count: int,
+               fec: FecProfile | int = FecProfile.FEC_1_2) -> int:
+    """Actual transmitted coded bits, including flush and puncturing."""
+    return encoded_bits(byte_count, fec)
 
 
-def section_symbols(profile: OfdmProfile, byte_count: int, modulation: str) -> int:
+def section_symbols(profile: OfdmProfile, byte_count: int, modulation: str,
+                    fec: FecProfile | int = FecProfile.FEC_1_2) -> int:
     """OFDM symbols one coded section occupies."""
     per_symbol = profile.coded_bits_per_symbol(bits_per_symbol(modulation))
-    return int(math.ceil(coded_bits(byte_count) / per_symbol))
+    return int(math.ceil(coded_bits(byte_count, fec) / per_symbol))
 
 
 def header_symbols(profile: OfdmProfile) -> int:
@@ -156,10 +254,11 @@ def header_symbols(profile: OfdmProfile) -> int:
     return section_symbols(profile, HEADER_BYTES, HEADER_MCS.modulation)
 
 
-def encode_section(profile: OfdmProfile, data: bytes, modulation: str) -> np.ndarray:
+def encode_section(profile: OfdmProfile, data: bytes, modulation: str,
+                   fec: FecProfile | int = FecProfile.FEC_1_2) -> np.ndarray:
     """Code, interleave and map one section into a (symbols, carriers) grid."""
     bits = np.unpackbits(np.frombuffer(data, dtype=np.uint8))
-    coded = conv_encode(bits)
+    coded = encode_bits(bits, fec)
     per_symbol = profile.coded_bits_per_symbol(bits_per_symbol(modulation))
     symbols = int(math.ceil(len(coded) / per_symbol))
     # Zero-pad to a whole number of symbols. The padding is deterministic and
@@ -171,16 +270,18 @@ def encode_section(profile: OfdmProfile, data: bytes, modulation: str) -> np.nda
     return mapped.reshape(symbols, profile.num_data_carriers)
 
 
-def decode_section(symbols, noise_var, byte_count: int, modulation: str) -> bytes:
+def decode_section(symbols, noise_var, byte_count: int, modulation: str,
+                   fec: FecProfile | int = FecProfile.FEC_1_2) -> bytes:
     """Demap, deinterleave and decode one section back to `byte_count` bytes."""
     llr = demap_llr(symbols, modulation, noise_var)
     soft = deinterleave(llr)
-    bits = viterbi_decode_soft(soft[: coded_bits(byte_count)])
+    bits = decode_soft(soft[: coded_bits(byte_count, fec)], byte_count, fec)
     return np.packbits(bits[: byte_count * 8].astype(np.uint8)).tobytes()
 
 
 def reference_evm(profile: OfdmProfile, symbols, data: bytes,
-                  modulation: str) -> float | None:
+                  modulation: str,
+                  fec: FecProfile | int = FecProfile.FEC_1_2) -> float | None:
     """RMS error against the symbols the sender must have transmitted.
 
     Once a section has decoded and passed its CRC, the bytes are known, and
@@ -200,7 +301,7 @@ def reference_evm(profile: OfdmProfile, symbols, data: bytes,
     None when there is nothing to compare -- an empty section, or a reference
     that came out shorter than the symbols handed in.
     """
-    reference = encode_section(profile, data, modulation).reshape(-1)
+    reference = encode_section(profile, data, modulation, fec).reshape(-1)
     symbols = np.asarray(symbols, dtype=np.complex128).reshape(-1)
     count = min(len(reference), len(symbols))
     if count < 1:
@@ -221,45 +322,136 @@ def evm_to_snr_db(evm_rms: float | None) -> float | None:
 
 # -- whole bursts ----------------------------------------------------------- #
 
+def _encode_manifest(blocks: list[SubBlock]) -> bytes:
+    body = b"".join(
+        _MANIFEST_ENTRY.pack(int(block.sequence) & 0xFFFF, len(block.payload))
+        for block in blocks
+    )
+    return body + _CRC.pack(crc16(body))
+
+
+def _decode_manifest(raw: bytes, count: int, total_blocks: int,
+                     max_block_size: int) -> list[tuple[int, int]]:
+    body, given = raw[:-_CRC.size], raw[-_CRC.size:]
+    if given != _CRC.pack(crc16(body)):
+        raise OfdmFrameError("burst manifest CRC failed")
+    entries = [_MANIFEST_ENTRY.unpack_from(body, offset)
+               for offset in range(0, len(body), _MANIFEST_ENTRY.size)]
+    sequences = [sequence for sequence, _ in entries]
+    if len(entries) != count or len(set(sequences)) != count:
+        raise OfdmFrameError("burst manifest has duplicate or missing entries")
+    if any(sequence >= total_blocks for sequence in sequences):
+        raise OfdmFrameError("burst manifest block is outside the message")
+    if any(length > max_block_size for _, length in entries):
+        raise OfdmFrameError("burst manifest block exceeds the ARQ block size")
+    return entries
+
+
+def _normalise_blocks(header: PhyHeader, payload: bytes,
+                      blocks: list[SubBlock] | None) -> list[SubBlock]:
+    result = ([SubBlock(header.block_seq, bytes(payload))] if blocks is None
+              else [SubBlock(int(block.sequence), bytes(block.payload))
+                    for block in blocks])
+    if not result:
+        raise ValueError("a data burst must contain at least one sub-block")
+    if len(result) != header.subblock_count:
+        raise ValueError("header sub-block count does not match the manifest")
+    if sum(len(block.payload) for block in result) != header.payload_len:
+        raise ValueError("header payload length does not match the sub-blocks")
+    return result
+
+
 def build_burst(profile: OfdmProfile, header: PhyHeader,
-                payload: bytes = b"") -> np.ndarray:
+                payload: bytes = b"", *,
+                blocks: list[SubBlock] | None = None) -> np.ndarray:
     """Render one burst as real audio samples.
 
     An ACK or NACK carries no payload and is therefore header-only: short, and
     at the most robust MCS, because the whole ARQ loop stalls if it is missed.
     """
-    if header.frame_type is OfdmFrameType.DATA:
-        if len(payload) != header.payload_len:
-            raise ValueError(
-                f"header says {header.payload_len} payload bytes, given {len(payload)}"
-            )
-        if len(payload) > profile.block_size:
-            raise ValueError(
-                f"payload of {len(payload)} B exceeds the profile block size "
-                f"{profile.block_size} B"
-            )
     modulator = OfdmModulator(profile)
     grids = [encode_section(profile, header.encode(), HEADER_MCS.modulation)]
     if header.frame_type is OfdmFrameType.DATA:
+        if header.version == LEGACY_FRAME_VERSION:
+            if blocks is not None or len(payload) != header.payload_len:
+                raise ValueError("legacy DATA header does not match its payload")
+            framed = payload + _CRC.pack(crc16(payload))
+            grids.append(encode_section(profile, framed, mcs(header.mcs).modulation))
+        else:
+            members = _normalise_blocks(header, payload, blocks)
+            if any(len(block.payload) > MAX_ARQ_BLOCK_BYTES for block in members):
+                raise ValueError("sub-block exceeds the protocol ARQ block size")
+            if len({block.sequence for block in members}) != len(members):
+                raise ValueError("burst contains duplicate sub-block numbers")
+            manifest = _encode_manifest(members)
+            grids.append(encode_section(profile, manifest, HEADER_MCS.modulation))
+            for block in members:
+                framed = block.payload + _CRC.pack(crc16(block.payload))
+                grids.append(encode_section(
+                    profile, framed, mcs(header.mcs).modulation, header.fec
+                ))
+    elif payload:
+        if len(payload) != header.payload_len:
+            raise ValueError("control header does not match its payload")
         framed = payload + _CRC.pack(crc16(payload))
-        grids.append(encode_section(profile, framed, mcs(header.mcs).modulation))
+        grids.append(encode_section(profile, framed, HEADER_MCS.modulation))
     return modulator.burst(np.vstack(grids))
 
 
-def burst_samples(profile: OfdmProfile, header: PhyHeader) -> int:
+def burst_samples(profile: OfdmProfile, header: PhyHeader,
+                  block_lengths: list[int] | None = None) -> int:
     """Length in samples of the burst `build_burst` would produce."""
     modulator = OfdmModulator(profile)
     symbols = header_symbols(profile)
     if header.frame_type is OfdmFrameType.DATA:
+        if header.version == LEGACY_FRAME_VERSION:
+            lengths = [header.payload_len]
+        elif block_lengths is None:
+            remaining = header.payload_len
+            lengths = []
+            for position in range(header.subblock_count):
+                slots = header.subblock_count - position
+                length = min(
+                    MAX_ARQ_BLOCK_BYTES,
+                    int(math.ceil(remaining / max(1, slots))),
+                )
+                lengths.append(length)
+                remaining -= length
+        else:
+            lengths = [int(length) for length in block_lengths]
+        if header.version != LEGACY_FRAME_VERSION:
+            manifest_bytes = header.subblock_count * _MANIFEST_ENTRY.size + _CRC.size
+            symbols += section_symbols(profile, manifest_bytes, HEADER_MCS.modulation)
+        symbols += sum(
+            section_symbols(profile, length + _CRC.size,
+                            mcs(header.mcs).modulation, header.fec)
+            for length in lengths
+        )
+    elif header.payload_len:
         symbols += section_symbols(
-            profile, header.payload_len + _CRC.size, mcs(header.mcs).modulation
+            profile, header.payload_len + _CRC.size, HEADER_MCS.modulation
         )
     return modulator.burst_samples(symbols)
 
 
-def burst_duration(profile: OfdmProfile, header: PhyHeader) -> float:
+def burst_duration(profile: OfdmProfile, header: PhyHeader,
+                   block_lengths: list[int] | None = None) -> float:
     """Airtime in seconds of the burst `build_burst` would produce."""
-    return burst_samples(profile, header) / profile.sample_rate
+    return burst_samples(profile, header, block_lengths) / profile.sample_rate
+
+
+def protocol_overhead_bytes(header: PhyHeader) -> int:
+    """Logical framing/CRC bytes, separate from payload and FEC expansion."""
+    if header.frame_type is OfdmFrameType.DATA:
+        if header.version == LEGACY_FRAME_VERSION:
+            return HEADER_BYTES + _CRC.size
+        # Header + manifest entries/CRC + one CRC per independently protected
+        # subblock. This is logical overhead; coded-bit and symbol padding loss
+        # is reported separately by the benchmark from actual generated samples.
+        return (HEADER_BYTES + header.subblock_count * _MANIFEST_ENTRY.size
+                + _CRC.size + header.subblock_count * _CRC.size)
+    return HEADER_BYTES + (header.payload_len + _CRC.size
+                           if header.payload_len else 0)
 
 
 @dataclass
@@ -268,15 +460,30 @@ class DecodedBurst:
 
     header: PhyHeader | None = None
     payload: bytes | None = None
+    blocks: dict[int, bytes] = None  # type: ignore[assignment]
+    failed_blocks: set[int] = None  # type: ignore[assignment]
+    block_order: tuple[int, ...] = ()
+    block_lengths: dict[int, int] = None  # type: ignore[assignment]
     metrics: LinkMetrics = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.metrics is None:
             self.metrics = LinkMetrics()
+        if self.blocks is None:
+            self.blocks = {}
+        if self.failed_blocks is None:
+            self.failed_blocks = set()
+        if self.block_lengths is None:
+            self.block_lengths = {}
 
     @property
     def ok(self) -> bool:
         return self.metrics.frame_ok
+
+    @property
+    def manifest_ok(self) -> bool:
+        """Whether a v2 data burst can safely identify its individual blocks."""
+        return bool(self.header is not None and self.block_order)
 
 
 def decode_burst(profile: OfdmProfile, samples) -> DecodedBurst:
@@ -354,40 +561,141 @@ def _decode_at(profile: OfdmProfile, sync) -> DecodedBurst:
 
     metrics.mcs = header.mcs
     if header.frame_type is not OfdmFrameType.DATA:
+        return _decode_control(profile, receiver, header, head_count, metrics)
+    if header.version == LEGACY_FRAME_VERSION:
+        return _decode_legacy_data(profile, receiver, header, head_count, metrics)
+    return _decode_v2_data(profile, receiver, header, head_count, metrics)
+
+
+def _decode_control(profile: OfdmProfile, receiver: BurstReceiver,
+                    header: PhyHeader, cursor: int,
+                    metrics: LinkMetrics) -> DecodedBurst:
+    """Decode the optional robust ACK/NACK payload and its CRC."""
+    if header.payload_len == 0:
         metrics.frame_ok = True
         return DecodedBurst(header=header, payload=b"", metrics=metrics)
-
-    modulation = mcs(header.mcs).modulation
     framed_bytes = header.payload_len + _CRC.size
-    data_count = section_symbols(profile, framed_bytes, modulation)
-    if receiver.available_data_symbols() < head_count + data_count:
-        metrics.error = (
-            f"burst holds {receiver.available_data_symbols() - head_count} of the "
-            f"{data_count} data symbols the header announced"
-        )
+    count = section_symbols(profile, framed_bytes, HEADER_MCS.modulation)
+    if receiver.available_data_symbols() < cursor + count:
+        metrics.error = "control payload is truncated"
         return DecodedBurst(header=header, metrics=metrics)
-
-    data_symbols, data_var, slope = receiver.data_symbols(head_count, data_count)
+    symbols, variance, slope = receiver.data_symbols(cursor, count)
     metrics.phase_slope = slope
-    framed = decode_section(data_symbols, data_var, framed_bytes, modulation)
-    payload, given = framed[: header.payload_len], framed[header.payload_len:]
-    want = _CRC.pack(crc16(payload))
-    if given != want:
-        # The data bytes are not trustworthy, so they cannot serve as a
-        # reference. The header measurement already on `metrics` was taken at
-        # MCS0 over the same channel moments earlier and is the better estimate;
-        # keep it, and fall back to decision-directed only if it is missing.
-        if metrics.evm_rms is None:
-            _set_evm(metrics, evm(data_symbols, modulation), "decision_directed")
-        metrics.error = f"payload CRC failed on block {header.block_seq}"
+    framed = decode_section(symbols, variance, framed_bytes, HEADER_MCS.modulation)
+    payload, given = framed[:header.payload_len], framed[header.payload_len:]
+    if given != _CRC.pack(crc16(payload)):
+        metrics.error = "control payload CRC failed"
         return DecodedBurst(header=header, metrics=metrics)
-
-    # The whole data section is known now: far more symbols than the header, and
-    # at the constellation actually in use, so it supersedes the header figure.
-    _set_evm(metrics, reference_evm(profile, data_symbols, framed, modulation),
-             "reference")
+    _set_evm(metrics, reference_evm(
+        profile, symbols, framed, HEADER_MCS.modulation
+    ), "reference")
     metrics.frame_ok = True
     return DecodedBurst(header=header, payload=payload, metrics=metrics)
+
+
+def _decode_legacy_data(profile: OfdmProfile, receiver: BurstReceiver,
+                        header: PhyHeader, cursor: int,
+                        metrics: LinkMetrics) -> DecodedBurst:
+    """The version-1 single-block path, retained for legacy reception."""
+    modulation = mcs(header.mcs).modulation
+    framed_bytes = header.payload_len + _CRC.size
+    count = section_symbols(profile, framed_bytes, modulation)
+    if receiver.available_data_symbols() < cursor + count:
+        metrics.error = "legacy data payload is truncated"
+        return DecodedBurst(header=header, metrics=metrics)
+    symbols, variance, slope = receiver.data_symbols(cursor, count)
+    metrics.phase_slope = slope
+    framed = decode_section(symbols, variance, framed_bytes, modulation)
+    payload, given = framed[:header.payload_len], framed[header.payload_len:]
+    if given != _CRC.pack(crc16(payload)):
+        metrics.error = f"payload CRC failed on block {header.block_seq}"
+        return DecodedBurst(header=header, failed_blocks={header.block_seq},
+                            block_order=(header.block_seq,), metrics=metrics)
+    _set_evm(metrics, reference_evm(profile, symbols, framed, modulation),
+             "reference")
+    metrics.frame_ok = True
+    return DecodedBurst(
+        header=header, payload=payload, blocks={header.block_seq: payload},
+        block_order=(header.block_seq,), metrics=metrics,
+    )
+
+
+def _decode_v2_data(profile: OfdmProfile, receiver: BurstReceiver,
+                    header: PhyHeader, cursor: int,
+                    metrics: LinkMetrics) -> DecodedBurst:
+    """Decode a robust manifest then every independent sub-block section."""
+    manifest_bytes = header.subblock_count * _MANIFEST_ENTRY.size + _CRC.size
+    manifest_count = section_symbols(
+        profile, manifest_bytes, HEADER_MCS.modulation
+    )
+    if receiver.available_data_symbols() < cursor + manifest_count:
+        metrics.error = "burst manifest is truncated"
+        return DecodedBurst(header=header, metrics=metrics)
+    symbols, variance, slope = receiver.data_symbols(cursor, manifest_count)
+    cursor += manifest_count
+    metrics.phase_slope = slope
+    raw_manifest = decode_section(
+        symbols, variance, manifest_bytes, HEADER_MCS.modulation
+    )
+    try:
+        entries = _decode_manifest(
+            raw_manifest, header.subblock_count, header.block_count,
+            max(profile.block_size, MAX_ARQ_BLOCK_BYTES),
+        )
+    except OfdmFrameError as exc:
+        metrics.error = str(exc)
+        return DecodedBurst(header=header, metrics=metrics)
+    order = tuple(sequence for sequence, _ in entries)
+    lengths_by_sequence = dict(entries)
+    if sum(length for _, length in entries) != header.payload_len:
+        metrics.error = "burst manifest byte count does not match the header"
+        return DecodedBurst(header=header, block_order=order,
+                            block_lengths=lengths_by_sequence, metrics=metrics)
+
+    modulation = mcs(header.mcs).modulation
+    blocks: dict[int, bytes] = {}
+    failed: set[int] = set()
+    slopes = [slope]
+    reference_evms: list[float] = []
+    available = receiver.available_data_symbols()
+    for position, (sequence, length) in enumerate(entries):
+        framed_bytes = length + _CRC.size
+        count = section_symbols(profile, framed_bytes, modulation, header.fec)
+        if available < cursor + count:
+            failed.update(item[0] for item in entries[position:])
+            break
+        data_symbols, data_var, data_slope = receiver.data_symbols(cursor, count)
+        cursor += count
+        slopes.append(data_slope)
+        framed = decode_section(
+            data_symbols, data_var, framed_bytes, modulation, header.fec
+        )
+        payload, given = framed[:length], framed[length:]
+        if given != _CRC.pack(crc16(payload)):
+            failed.add(sequence)
+            continue
+        blocks[sequence] = payload
+        value = reference_evm(
+            profile, data_symbols, framed, modulation, header.fec
+        )
+        if value is not None:
+            reference_evms.append(value)
+
+    metrics.phase_slope = float(np.mean(slopes))
+    if reference_evms:
+        _set_evm(metrics, float(np.sqrt(np.mean(np.square(reference_evms)))),
+                 "reference")
+    metrics.frame_ok = not failed and len(blocks) == len(entries)
+    if not metrics.frame_ok:
+        missing = sorted(failed | (set(order) - set(blocks)))
+        metrics.error = f"sub-block CRC failed or truncated: {missing}"
+    payload = (b"".join(blocks[sequence] for sequence in order)
+               if metrics.frame_ok else None)
+    return DecodedBurst(
+        header=header, payload=payload, blocks=blocks,
+        failed_blocks=failed | (set(order) - set(blocks)),
+        block_order=order, block_lengths=lengths_by_sequence, metrics=metrics,
+    )
 
 
 def _set_evm(metrics: LinkMetrics, value: float | None, source: str) -> None:

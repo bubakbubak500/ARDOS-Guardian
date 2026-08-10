@@ -24,7 +24,9 @@ from pathlib import Path
 
 import numpy as np
 
+from .adaptation import AdaptationConfig, LinkAdaptationController
 from .channel import Channel, ChannelSpec, realistic
+from .coding import FecProfile, effective_rate, encoded_bits, fec_profile, fec_spec
 from .config import OfdmProfile, mcs
 from .constellation import bits_per_symbol
 from .framing import (OfdmFrameType, PhyHeader, build_burst, burst_duration,
@@ -126,21 +128,30 @@ class WaveformFacts:
     phy_rate: float
     header_symbols: int
     full_block_seconds: float
+    fec_label: str
+    raw_data_bps: float
+    block_information_bits: int
+    block_encoded_bits: int
+    effective_fec_rate: float
 
     @property
     def band(self) -> str:
         return f"{self.band_low:.0f}-{self.band_high:.0f} Hz"
 
 
-def describe(profile: OfdmProfile, mcs_index: int) -> WaveformFacts:
+def describe(profile: OfdmProfile, mcs_index: int,
+             fec: FecProfile | int | str = FecProfile.FEC_1_2) -> WaveformFacts:
     """The parameters of one profile/MCS pairing, all derived, none stored twice."""
     scheme = mcs(mcs_index)
+    selected_fec = fec_profile(fec)
     low, high = profile.occupied_band
     coded = profile.coded_bits_per_symbol(scheme.bits_per_symbol)
-    rate = scheme.code_rate
-    information = coded * rate.numerator // rate.denominator
+    nominal_rate = fec_spec(selected_fec).rate
+    information = coded * nominal_rate.numerator // nominal_rate.denominator
     header = PhyHeader(OfdmFrameType.DATA, 0, mcs=mcs_index,
-                       payload_len=profile.block_size)
+                       fec=selected_fec, payload_len=profile.block_size)
+    info_bits = profile.block_size * 8
+    transmitted_bits = encoded_bits(profile.block_size + 2, selected_fec)
     return WaveformFacts(
         profile=profile.name,
         sample_rate=profile.sample_rate,
@@ -160,9 +171,15 @@ def describe(profile: OfdmProfile, mcs_index: int) -> WaveformFacts:
         mcs_label=scheme.label,
         coded_bits_per_symbol=coded,
         information_bits_per_symbol=information,
-        phy_rate=coded * rate.numerator / rate.denominator / profile.symbol_duration,
+        phy_rate=coded * nominal_rate.numerator / nominal_rate.denominator /
+                 profile.symbol_duration,
         header_symbols=header_symbols(profile),
         full_block_seconds=burst_duration(profile, header),
+        fec_label=fec_spec(selected_fec).label,
+        raw_data_bps=coded / profile.symbol_duration,
+        block_information_bits=info_bits,
+        block_encoded_bits=transmitted_bits,
+        effective_fec_rate=effective_rate(info_bits, transmitted_bits),
     )
 
 
@@ -204,7 +221,8 @@ class BurstResult:
 def run_burst(profile: OfdmProfile, mcs_index: int = 1, *, payload_bytes: int = 512,
               snr_db: float = 15.0, seed: int = 0xA5,
               wav_path: Path | str | None = None,
-              spec: ChannelSpec | None = None) -> BurstResult:
+              spec: ChannelSpec | None = None,
+              fec: FecProfile | int | str = FecProfile.FEC_1_2) -> BurstResult:
     """Push one block through the channel and report every measurement.
 
     The channel is the deterministic simulator with everything switched on --
@@ -212,12 +230,14 @@ def run_burst(profile: OfdmProfile, mcs_index: int = 1, *, payload_bytes: int = 
     array-to-array handover. A very large `snr_db` is how to ask for the ideal
     case.
     """
-    facts = describe(profile, mcs_index)
+    selected_fec = fec_profile(fec)
+    facts = describe(profile, mcs_index, selected_fec)
     rng = np.random.default_rng(seed)
     size = min(int(payload_bytes), profile.block_size)
     payload = rng.integers(0, 256, size, dtype=np.uint8).tobytes()
     header = PhyHeader(OfdmFrameType.DATA, msg_id=0x0FD, block_seq=0, block_count=1,
-                       mcs=mcs_index, payload_len=len(payload))
+                       mcs=mcs_index, fec=selected_fec,
+                       payload_len=len(payload))
     clean = build_burst(profile, header, payload)
     channel = (Channel(profile, spec, seed=seed) if spec is not None
                else realistic(profile, snr_db=snr_db, seed=seed))
@@ -273,6 +293,32 @@ class TransferResult:
     identical: bool
     sent_ok: bool
     log: tuple[str, ...] = ()
+    fec_initial: str = "1/2"
+    fec_final: str = "1/2"
+    burst_initial: int = 512
+    burst_final: int = 512
+    arq_block_bytes: int = 512
+    retransmitted_bytes: int = 0
+    data_bursts: int = 0
+    ack_bursts: int = 0
+    data_airtime_seconds: float = 0.0
+    ack_airtime_seconds: float = 0.0
+    turnaround_seconds: float = 0.0
+    raw_data_bps: float = 0.0
+    fec_adjusted_bps: float = 0.0
+    protocol_payload_bps: float | None = None
+    protocol_overhead_bytes: int = 0
+    wall_seconds: float = 0.0
+
+    @property
+    def retransmission_loss(self) -> float:
+        total = self.payload_bytes + self.retransmitted_bytes
+        return 0.0 if total <= 0 else self.retransmitted_bytes / total
+
+    @property
+    def turnaround_loss(self) -> float:
+        return (0.0 if self.channel_seconds <= 0.0 else
+                self.turnaround_seconds / self.channel_seconds)
 
     @property
     def passed(self) -> bool:
@@ -282,9 +328,14 @@ class TransferResult:
 def run_transfer(profile: OfdmProfile, mcs_index: int = 1, *,
                  payload_bytes: int = 4096, snr_db: float = 15.0,
                  seed: int = 0xA5, ptt_turnaround: float = 0.25,
-                 timeout: float = 600.0, on_log=None) -> TransferResult:
+                 timeout: float = 600.0, on_log=None,
+                 adaptation_config: AdaptationConfig | None = None) -> TransferResult:
     """Move a whole message over the simulated duplex link and report the outcome."""
-    facts = describe(profile, mcs_index)
+    config = adaptation_config or AdaptationConfig()
+    sender_controller = LinkAdaptationController(config, mcs_index=mcs_index)
+    receiver_controller = LinkAdaptationController(config, mcs_index=mcs_index)
+    initial = sender_controller.profile
+    facts = describe(profile, mcs_index, initial.fec)
     rng = np.random.default_rng(seed)
     payload = rng.integers(0, 256, int(payload_bytes), dtype=np.uint8).tobytes()
     one_ms = max(1, int(profile.sample_rate / 1000))
@@ -305,10 +356,10 @@ def run_transfer(profile: OfdmProfile, mcs_index: int = 1, *,
 
     sender = OfdmLink(profile, near, mcs_index=mcs_index,
                       ptt_turnaround=ptt_turnaround, timeout_margin=0.5,
-                      on_log=record("tx"))
+                      on_log=record("tx"), controller=sender_controller)
     receiver = OfdmLink(profile, far, mcs_index=mcs_index,
                         ptt_turnaround=ptt_turnaround, timeout_margin=0.5,
-                        on_log=record("rx"))
+                        on_log=record("rx"), controller=receiver_controller)
 
     received: dict[str, bytes | None] = {}
     listener = threading.Thread(
@@ -317,15 +368,17 @@ def run_transfer(profile: OfdmProfile, mcs_index: int = 1, *,
         daemon=True,
     )
     listener.start()
+    started = time.monotonic()
     sent_ok = sender.send_message(0x0FD, payload)
     listener.join(timeout=timeout)
+    wall_seconds = time.monotonic() - started
 
     evm = receiver.adaptation.evm_history
     return TransferResult(
         facts=facts,
         channel=spec.describe(),
         payload_bytes=len(payload),
-        blocks=len(split_blocks(payload, profile.block_size)),
+        blocks=len(split_blocks(payload, config.arq_block_bytes)),
         applied_snr_db=snr_db,
         measured_snr_db=receiver.adaptation.mean_snr_db,
         measured_evm=float(np.mean(evm)) if evm else None,
@@ -337,6 +390,26 @@ def run_transfer(profile: OfdmProfile, mcs_index: int = 1, *,
         identical=received.get("data") == payload,
         sent_ok=sent_ok,
         log=tuple(lines),
+        fec_initial=fec_spec(initial.fec).label,
+        fec_final=fec_spec(sender_controller.profile.fec).label,
+        burst_initial=initial.burst_bytes,
+        burst_final=sender_controller.profile.burst_bytes,
+        arq_block_bytes=config.arq_block_bytes,
+        retransmitted_bytes=sender.status.retransmitted_bytes,
+        data_bursts=near.transmissions,
+        ack_bursts=far.transmissions,
+        data_airtime_seconds=near.samples_sent / profile.sample_rate,
+        ack_airtime_seconds=far.samples_sent / profile.sample_rate,
+        turnaround_seconds=(near.transmissions + far.transmissions) * ptt_turnaround,
+        raw_data_bps=facts.raw_data_bps,
+        fec_adjusted_bps=facts.phy_rate,
+        protocol_payload_bps=(
+            None if near.samples_sent + far.samples_sent <= 0 else
+            len(payload) * 8.0 * profile.sample_rate /
+            (near.samples_sent + far.samples_sent)
+        ),
+        protocol_overhead_bytes=sender.status.protocol_overhead_bytes,
+        wall_seconds=wall_seconds,
     )
 
 
@@ -388,7 +461,8 @@ class SweepResult:
 
 def run_sweep(profile: OfdmProfile, mcs_index: int = 1, *, runs: int = 10,
               seed: int = 0xA5, points=None, on_point=None,
-              cancelled=None) -> SweepResult:
+              cancelled=None,
+              fec: FecProfile | int | str = FecProfile.FEC_1_2) -> SweepResult:
     """Decode rate against in-band SNR, one block per run.
 
     `on_point` is called with each `SweepPoint` as it completes, so a caller can
@@ -396,10 +470,12 @@ def run_sweep(profile: OfdmProfile, mcs_index: int = 1, *, runs: int = 10,
     polled between points; a sweep of eleven points at ten runs is a couple of
     thousand Viterbi decodes and an operator must be able to stop it.
     """
-    facts = describe(profile, mcs_index)
+    selected_fec = fec_profile(fec)
+    facts = describe(profile, mcs_index, selected_fec)
     rng = np.random.default_rng(seed)
     payload = rng.integers(0, 256, profile.block_size, dtype=np.uint8).tobytes()
-    header = PhyHeader(OfdmFrameType.DATA, 0x0FD, 0, 1, mcs_index, len(payload))
+    header = PhyHeader(OfdmFrameType.DATA, 0x0FD, 0, 1, mcs_index,
+                       len(payload), fec=selected_fec)
     clean = build_burst(profile, header, payload)
     modulation = mcs(mcs_index).modulation
 
@@ -516,7 +592,9 @@ def decode_capture(profile: OfdmProfile, path: Path | str) -> CaptureResult:
 def make_test_burst(profile: OfdmProfile, mcs_index: int = 1, *,
                     payload_bytes: int = 512, seed: int = 0xA5,
                     repeats: int = 1, gap_seconds: float = 1.0,
-                    wav_path: Path | str | None = None) -> tuple[np.ndarray, Path | None]:
+                    wav_path: Path | str | None = None,
+                    fec: FecProfile | int | str = FecProfile.FEC_1_2,
+                    ) -> tuple[np.ndarray, Path | None]:
     """A clean burst (or several, spaced out) with no channel applied.
 
     This is the file to transmit on air: it is what the modem would put on the
@@ -526,6 +604,7 @@ def make_test_burst(profile: OfdmProfile, mcs_index: int = 1, *,
     settings, which is worth much more than one.
     """
     rng = np.random.default_rng(seed)
+    selected_fec = fec_profile(fec)
     size = min(int(payload_bytes), profile.block_size)
     parts: list[np.ndarray] = []
     gap = np.zeros(int(max(0.0, gap_seconds) * profile.sample_rate))
@@ -533,7 +612,7 @@ def make_test_burst(profile: OfdmProfile, mcs_index: int = 1, *,
         payload = rng.integers(0, 256, size, dtype=np.uint8).tobytes()
         header = PhyHeader(OfdmFrameType.DATA, msg_id=0x0FD, block_seq=index,
                            block_count=max(1, int(repeats)), mcs=mcs_index,
-                           payload_len=len(payload))
+                           fec=selected_fec, payload_len=len(payload))
         if parts:
             parts.append(gap)
         parts.append(build_burst(profile, header, payload))

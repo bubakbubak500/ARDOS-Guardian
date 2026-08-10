@@ -20,7 +20,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
-from ..i18n import tr
+from ..i18n import dual, tr
 from .theme import DARK_TOKENS, ThemeTokens
 
 SEGMENTS = 20
@@ -36,6 +36,15 @@ class TransferState:
     active: bool = False
     sent_bytes: int = 0
     total_bytes: int = 0
+    transport: str = "vara"
+    fec: str = ""
+    burst_bytes: int = 0
+    arq_block_bytes: int = 0
+    retries: int = 0
+    retransmitted_bytes: int = 0
+    goodput_bps: float | None = None
+    last_burst_blocks: int = 0
+    last_first_pass_ok: int = 0
 
     @property
     def fraction(self) -> float:
@@ -44,7 +53,7 @@ class TransferState:
         return max(0.0, min(1.0, self.sent_bytes / self.total_bytes))
 
 
-def transfer_state(snapshot, payload_active: bool) -> TransferState:
+def transfer_state(snapshot, payload_active: bool, ofdm_status=None) -> TransferState:
     """Read a transfer state out of an application snapshot.
 
     ``data_bytes_written`` is reset by prepare_data_transfer(), so it is the
@@ -53,6 +62,36 @@ def transfer_state(snapshot, payload_active: bool) -> TransferState:
     "queued, nothing confirmed on the air yet", so it reports zero sent rather
     than guessing.
     """
+    if payload_active and ofdm_status is not None:
+        total = int(getattr(ofdm_status, "total_bytes", 0) or 0)
+        moved = max(
+            int(getattr(ofdm_status, "tx_bytes", 0) or 0),
+            int(getattr(ofdm_status, "rx_bytes", 0) or 0),
+        )
+        return TransferState(
+            active=total > 0,
+            sent_bytes=max(0, min(total, moved)),
+            total_bytes=total,
+            transport="ofdm",
+            fec=str(getattr(ofdm_status, "fec", "")),
+            burst_bytes=int(getattr(ofdm_status, "burst_bytes", 0) or 0),
+            arq_block_bytes=int(getattr(ofdm_status, "arq_block_bytes", 0) or 0),
+            retries=int(getattr(ofdm_status, "retries", 0) or 0),
+            retransmitted_bytes=int(
+                getattr(ofdm_status, "retransmitted_bytes", 0) or 0
+            ),
+            # Prefer the true elapsed transfer rate.  Keep the modeled,
+            # channel-occupancy rate as a fallback for older status producers.
+            goodput_bps=(getattr(ofdm_status, "goodput_bps", None)
+                         if getattr(ofdm_status, "goodput_bps", None) is not None
+                         else getattr(ofdm_status, "est_bitrate_bps", None)),
+            last_burst_blocks=int(
+                getattr(ofdm_status, "last_burst_blocks", 0) or 0
+            ),
+            last_first_pass_ok=int(
+                getattr(ofdm_status, "last_first_pass_ok", 0) or 0
+            ),
+        )
     vara = snapshot.vara
     total = int(getattr(vara, "data_bytes_written", 0) or 0)
     if not payload_active or total <= 0:
@@ -150,11 +189,24 @@ class TransferPanel(QWidget):
             self.detail.clear()
             return
         self.bar.set_fraction(state.fraction)
-        self.detail.setText(
-            tr(
-                "transfer.detail",
-                sent=state.sent_bytes,
-                total=state.total_bytes,
-                percent=round(state.fraction * 100),
-            )
+        base = tr(
+            "transfer.detail",
+            sent=state.sent_bytes,
+            total=state.total_bytes,
+            percent=round(state.fraction * 100),
         )
+        if state.transport == "ofdm":
+            speed = (dual("measuring", "měří se") if state.goodput_bps is None
+                     else f"{state.goodput_bps:.0f} bit/s")
+            live = dual(
+                f"FEC {state.fec} · burst {state.burst_bytes} B · "
+                f"ARQ {state.arq_block_bytes} B · first pass "
+                f"{state.last_first_pass_ok}/{state.last_burst_blocks} · "
+                f"{state.retries} retries / {state.retransmitted_bytes} B · {speed}",
+                f"FEC {state.fec} · dávka {state.burst_bytes} B · "
+                f"ARQ {state.arq_block_bytes} B · napoprvé "
+                f"{state.last_first_pass_ok}/{state.last_burst_blocks} · "
+                f"{state.retries} opakování / {state.retransmitted_bytes} B · {speed}",
+            )
+            base = f"{base}\n{live}"
+        self.detail.setText(base)

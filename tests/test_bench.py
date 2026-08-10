@@ -94,7 +94,10 @@ def test_the_facts_are_all_derived_from_the_profile() -> None:
     assert facts.information_bits_per_symbol == 44
     assert facts.phy_rate == pytest.approx(1833.0, abs=1.0)
     assert facts.header_symbols == 7
-    assert facts.full_block_seconds == pytest.approx(2.52, abs=0.01)
+    assert facts.full_block_seconds == pytest.approx(2.592, abs=0.01)
+    assert facts.fec_label == "1/2"
+    assert facts.raw_data_bps == pytest.approx(3667.0, abs=1.0)
+    assert facts.effective_fec_rate < 0.5  # CRC and trellis termination are real overhead.
     assert facts.band == "539-2977 Hz"
 
 
@@ -196,6 +199,7 @@ def test_a_transfer_reports_blocks_retries_and_measured_throughput() -> None:
     assert result.packet_error_rate == 0.0
     assert result.measured_snr_db == pytest.approx(15.0, abs=2.0)
     assert result.channel_seconds > 0.0
+    assert result.protocol_overhead_bytes > 0
     # Below the raw PHY rate, because acknowledgements and overhead are counted.
     assert 0 < result.throughput_bps < bench.describe(BENCH, 1).phy_rate
 
@@ -208,6 +212,9 @@ def test_a_transfer_streams_its_log_as_it_goes() -> None:
     assert any("sending" in line for line in lines)
     assert any(line.startswith("tx | ") for line in lines)
     assert any(line.startswith("rx | ") for line in lines)
+    assert any("remote_snr=" in line and "remote_evm=" in line for line in lines)
+    assert any("protocol_overhead=" in line and "goodput=" in line
+               for line in lines)
     assert "\n".join(lines).isascii()
 
 

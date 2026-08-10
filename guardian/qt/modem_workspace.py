@@ -66,6 +66,8 @@ from ..config import config_dir
 from ..i18n import dual, tr
 from ..ofdm import MCS_TABLE
 from ..ofdm import bench
+from ..ofdm.adaptation import AdaptationConfig, BURST_LADDER
+from ..ofdm.coding import FEC_SPECS, FecProfile, fec_profile
 from ..ofdm.config import PROFILE_LADDER, profile_or_default
 from ..services import TaskResult
 from .inputs import RowTable
@@ -98,7 +100,7 @@ TRANSFER_TIMEOUT_SECONDS = 180.0
 
 
 class ModemWorkspace(QWidget):
-    """Pick a waveform, then measure it: one burst, a transfer, or a sweep."""
+    """Pick a waveform, then inspect one burst or work with radio test files."""
 
     def __init__(self, runtime: ShellRuntime, parent=None) -> None:
         super().__init__(parent)
@@ -135,9 +137,13 @@ class ModemWorkspace(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
         self.tabs.addTab(self._burst_page(), tr("modem.tab_burst"))
-        self.tabs.addTab(self._transfer_page(), tr("modem.tab_transfer"))
+        # These two pages simulate both ends entirely in memory. Retain their
+        # implementation for development regression tests without presenting
+        # them as tools that measure an operator's radio path.
+        self._developer_transfer_page = self._transfer_page()
+        self._developer_transfer_page.hide()
         self.sweep_page = self._sweep_page()
-        self.tabs.addTab(self.sweep_page, tr("modem.tab_sweep"))
+        self.sweep_page.hide()
         self.tabs.addTab(self._files_page(), tr("modem.tab_files"))
         outer.addWidget(self.tabs, 1)
 
@@ -172,10 +178,37 @@ class ModemWorkspace(QWidget):
         )
         self.mcs_picker.currentIndexChanged.connect(self._render_facts)
 
+        self.fec_picker = QComboBox()
+        self.fec_picker.addItem("AUTO", None)
+        for spec in FEC_SPECS:
+            self.fec_picker.addItem(f"FEC {spec.label}", spec.label)
+        selected_fec = (None if self.runtime.config.ofdm_adaptive_fec
+                        else self.runtime.config.ofdm_fec)
+        self.fec_picker.setCurrentIndex(
+            max(0, self.fec_picker.findData(selected_fec))
+        )
+        self.fec_picker.currentIndexChanged.connect(self._render_facts)
+
+        self.burst_picker = QComboBox()
+        self.burst_picker.addItem("AUTO", None)
+        for size in BURST_LADDER:
+            if size >= self.runtime.config.ofdm_arq_block_bytes:
+                label = f"{size} B" if size < 1024 else f"{size // 1024} KiB"
+                self.burst_picker.addItem(label, size)
+        selected_burst = (None if self.runtime.config.ofdm_adaptive_burst
+                          else self.runtime.config.ofdm_burst_bytes)
+        self.burst_picker.setCurrentIndex(
+            max(0, self.burst_picker.findData(selected_burst))
+        )
+
         row.addWidget(QLabel(tr("modem.profile")))
         row.addWidget(self.profile_picker, 1)
         row.addWidget(QLabel(tr("modem.mcs")))
         row.addWidget(self.mcs_picker)
+        row.addWidget(QLabel("FEC"))
+        row.addWidget(self.fec_picker)
+        row.addWidget(QLabel(dual("Burst", "Dávka")))
+        row.addWidget(self.burst_picker)
         return host
 
     def _facts_panel(self) -> QWidget:
@@ -230,6 +263,10 @@ class ModemWorkspace(QWidget):
     def selected_mcs(self) -> int:
         return int(self.mcs_picker.currentData())
 
+    def selected_fec(self) -> FecProfile:
+        value = self.fec_picker.currentData()
+        return (FecProfile.FEC_1_2 if value is None else fec_profile(value))
+
     def _render_facts(self) -> None:
         """Restate the whole waveform whenever either picker moves.
 
@@ -237,7 +274,7 @@ class ModemWorkspace(QWidget):
         so it is derived from `bench.describe` and never from a stored copy.
         """
         entry = self.selected_profile()
-        facts = bench.describe(entry, self.selected_mcs())
+        facts = bench.describe(entry, self.selected_mcs(), self.selected_fec())
         self.facts = facts
         fields = self.facts_fields
         fields["band"].setText(dual(
@@ -266,7 +303,9 @@ class ModemWorkspace(QWidget):
             f"{facts.carriers} ({facts.data_carriers} datových + "
             f"{facts.pilots} pilotních)",
         ))
-        fields["mcs"].setText(f"MCS{facts.mcs_index} — {facts.mcs_label}")
+        fields["mcs"].setText(
+            f"MCS{facts.mcs_index} — {facts.mcs_label} · payload FEC {facts.fec_label}"
+        )
         fields["bits"].setText(dual(
             f"{facts.coded_bits_per_symbol} coded → "
             f"{facts.information_bits_per_symbol} information",
@@ -274,8 +313,10 @@ class ModemWorkspace(QWidget):
             f"{facts.information_bits_per_symbol} informačních",
         ))
         fields["phy_rate"].setText(dual(
-            f"{facts.phy_rate:.0f} bit/s before framing and ARQ",
-            f"{facts.phy_rate:.0f} bit/s před rámcováním a ARQ",
+            f"{facts.raw_data_bps:.0f} raw → {facts.phy_rate:.0f} bit/s after FEC, "
+            "before framing and ARQ",
+            f"{facts.raw_data_bps:.0f} hrubě → {facts.phy_rate:.0f} bit/s po FEC, "
+            "před rámcováním a ARQ",
         ))
         fields["header"].setText(dual(
             f"{facts.header_symbols} symbols of every burst",
@@ -352,10 +393,12 @@ class ModemWorkspace(QWidget):
         snr = float(self.burst_snr.value())
         payload = int(self.burst_payload.value())
         seed = int(self.burst_seed.value())
+        selected_fec = self.selected_fec()
         self._submit(
             BURST_TASK,
             lambda: bench.run_burst(entry, index, payload_bytes=payload,
-                                    snr_db=snr, seed=seed),
+                                    snr_db=snr, seed=seed,
+                                    fec=selected_fec),
             self.burst_status,
             self._render_burst,
         )
@@ -437,6 +480,9 @@ class ModemWorkspace(QWidget):
             ("blocks", dual("Blocks", "Bloky")),
             ("acked", dual("Blocks acknowledged", "Potvrzené bloky")),
             ("retries", dual("Retransmissions", "Opakovaná vysílání")),
+            ("profile", dual("FEC and burst adaptation", "Adaptace FEC a dávky")),
+            ("bursts", dual("Keyed data / ACK bursts", "Klíčované datové / ACK dávky")),
+            ("resent", dual("Retransmitted bytes", "Znovu vyslané bajty")),
             ("per", dual("Packet error rate", "Chybovost paketů")),
             ("measured", dual("SNR measured", "Měřený odstup")),
             ("evm", dual("EVM", "Chyba vektoru (EVM)")),
@@ -464,12 +510,29 @@ class ModemWorkspace(QWidget):
         # the measurement uses it rather than a figure invented here.
         turnaround = max(0.05, self.runtime.config.ofdm_tx_lead_ms / 1000.0)
         pending = self._pending
+        selected_fec = self.fec_picker.currentData()
+        selected_burst = self.burst_picker.currentData()
+        runtime_config = self.runtime.config
+        adaptation = AdaptationConfig(
+            adaptive_fec=selected_fec is None,
+            fixed_fec=fec_profile(runtime_config.ofdm_fec if selected_fec is None
+                                  else selected_fec),
+            adaptive_burst=selected_burst is None,
+            fixed_burst_bytes=(runtime_config.ofdm_burst_bytes
+                               if selected_burst is None else int(selected_burst)),
+            min_burst_bytes=max(runtime_config.ofdm_min_burst_bytes,
+                                runtime_config.ofdm_arq_block_bytes),
+            max_burst_bytes=max(runtime_config.ofdm_max_burst_bytes,
+                                runtime_config.ofdm_arq_block_bytes),
+            arq_block_bytes=runtime_config.ofdm_arq_block_bytes,
+        )
 
         def work():
             return bench.run_transfer(
                 entry, index, payload_bytes=payload, snr_db=snr,
                 ptt_turnaround=turnaround, timeout=TRANSFER_TIMEOUT_SECONDS,
                 on_log=lambda line: pending.put(("log", line)),
+                adaptation_config=adaptation,
             )
 
         if self._submit(TRANSFER_TASK, work, self.transfer_status,
@@ -486,6 +549,15 @@ class ModemWorkspace(QWidget):
         ))
         fields["acked"].setText(f"{result.blocks_acked} / {result.blocks}")
         fields["retries"].setText(str(result.retries))
+        fields["profile"].setText(
+            f"FEC {result.fec_initial} → {result.fec_final} · "
+            f"burst {result.burst_initial} → {result.burst_final} B · "
+            f"ARQ {result.arq_block_bytes} B"
+        )
+        fields["bursts"].setText(f"{result.data_bursts} / {result.ack_bursts}")
+        fields["resent"].setText(
+            f"{result.retransmitted_bytes} B ({result.retransmission_loss * 100:.1f} %)"
+        )
         fields["per"].setText(measurement(
             result.packet_error_rate * 100.0
             if result.packet_error_rate is not None else None,
@@ -595,6 +667,7 @@ class ModemWorkspace(QWidget):
         index = self.selected_mcs()
         runs = int(self.sweep_runs.value())
         ladder = tuple(points) if points else tuple(self.sweep_detail.currentData())
+        selected_fec = self.selected_fec()
         pending = self._pending
         self._sweep_cancel.clear()
         cancelled = self._sweep_cancel.is_set
@@ -604,6 +677,7 @@ class ModemWorkspace(QWidget):
                 entry, index, runs=runs, points=ladder,
                 on_point=lambda point: pending.put(("point", point)),
                 cancelled=cancelled,
+                fec=selected_fec,
             )
 
         if self._submit(SWEEP_TASK, work, self.sweep_status, self._render_sweep):
@@ -693,10 +767,10 @@ class ModemWorkspace(QWidget):
         if wrong:
             self.sweep_status.setText(tr("modem.wrong_bytes_alarm", count=wrong))
             self.sweep_status.setProperty("statusRole", "danger")
-            # Raise the page holding the alarm. The operator who started the
-            # sweep is usually already looking at it, but one who wandered off
-            # to another tab must not have to come back to find this out.
-            self.tabs.setCurrentWidget(self.sweep_page)
+            # A development host may explicitly insert this page; production
+            # builds no longer expose the simulator-only sweep as a tab.
+            if self.tabs.indexOf(self.sweep_page) >= 0:
+                self.tabs.setCurrentWidget(self.sweep_page)
         elif result.cancelled:
             self.sweep_status.setText(tr("modem.sweep_cancelled",
                                          count=len(result.points)))
@@ -828,12 +902,13 @@ class ModemWorkspace(QWidget):
         repeats = int(self.file_repeats.value())
         payload = int(self.file_payload.value())
         gap = float(self.file_gap.value())
+        selected_fec = self.selected_fec()
         target = Path(chosen)
         self._submit(
             FILE_TASK,
             lambda: bench.make_test_burst(
                 entry, index, payload_bytes=payload, repeats=repeats,
-                gap_seconds=gap, wav_path=target,
+                gap_seconds=gap, wav_path=target, fec=selected_fec,
             ),
             self.file_status,
             self._render_saved_file,
@@ -874,7 +949,9 @@ class ModemWorkspace(QWidget):
         """
         facts = self.facts
         if facts is None:
-            facts = bench.describe(self.selected_profile(), self.selected_mcs())
+            facts = bench.describe(
+                self.selected_profile(), self.selected_mcs(), self.selected_fec()
+            )
         repeats = max(1, int(repeats))
         share = min(1.0, max(1, int(payload_bytes)) / max(1, facts.block_size))
         fixed = facts.header_symbols * facts.symbol_ms / 1000.0
@@ -930,6 +1007,7 @@ class ModemWorkspace(QWidget):
             return
         entry = self.selected_profile()
         index = self.selected_mcs()
+        selected_fec = self.selected_fec()
         repeats = int(self.file_repeats.value())
         payload = int(self.file_payload.value())
         expected = self.transmit_seconds(payload, repeats)
@@ -943,6 +1021,7 @@ class ModemWorkspace(QWidget):
             lambda: operations.transmit_test_burst(
                 profile_name=entry.name, mcs_index=index,
                 payload_bytes=payload, repeats=repeats,
+                fec=selected_fec,
             ),
             self.transmit_status,
             self._render_transmitted,

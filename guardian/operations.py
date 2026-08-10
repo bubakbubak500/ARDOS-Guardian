@@ -621,6 +621,16 @@ class Operations:
         """True while VARA owns the shared audio; the UI keeps quiet then."""
         return self._payload_active.is_set()
 
+    def ofdm_status(self):
+        """Return the live native-modem snapshot, if that backend is present."""
+        payload = getattr(self.net, "payload", None)
+        backends = getattr(payload, "backends", None)
+        if isinstance(backends, dict):
+            payload = backends.get("ofdm_vhf")
+        if getattr(payload, "name", None) != "ofdm_vhf":
+            return None
+        return getattr(payload, "status", None)
+
     # ----- recording received audio ---------------------------------------
 
     def recording_active(self) -> bool:
@@ -722,6 +732,7 @@ class Operations:
 
     def transmit_test_burst(self, *, profile_name: str | None = None,
                             mcs_index: int | None = None,
+                            fec=None,
                             payload_bytes: int = 512, repeats: int = 3,
                             on_log=None):
         """Put a generated OFDM test burst on the air. Returns seconds aired, or None.
@@ -757,6 +768,7 @@ class Operations:
         samples, _ = bench.make_test_burst(
             waveform_profile, index, payload_bytes=payload_bytes,
             repeats=repeats,
+            fec=self.config.ofdm_fec if fec is None else fec,
         )
 
         output = resolve_device(self.config.audio_output, "output")
@@ -1228,6 +1240,15 @@ class Operations:
             ofdm_tx_lead_ms=self.config.ofdm_tx_lead_ms,
             ofdm_tx_tail_ms=self.config.ofdm_tx_tail_ms,
             ofdm_max_retries=self.config.ofdm_max_retries,
+            ofdm_adaptive_fec=self.config.ofdm_adaptive_fec,
+            ofdm_fec=self.config.ofdm_fec,
+            ofdm_adaptive_burst=self.config.ofdm_adaptive_burst,
+            ofdm_burst_bytes=self.config.ofdm_burst_bytes,
+            ofdm_min_burst_bytes=self.config.ofdm_min_burst_bytes,
+            ofdm_max_burst_bytes=self.config.ofdm_max_burst_bytes,
+            ofdm_arq_block_bytes=self.config.ofdm_arq_block_bytes,
+            ofdm_timeout_multiplier=self.config.ofdm_timeout_multiplier,
+            ofdm_legacy_mode=self.config.ofdm_legacy_mode,
         )
 
     def _open_radio(self) -> list[str]:

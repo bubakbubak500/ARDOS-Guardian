@@ -405,9 +405,15 @@ def test_the_send_lifecycle_matches_the_vara_backend_hook_for_hook() -> None:
             events.append("air")
 
         def receive(self, timeout):  # noqa: ARG002
-            from guardian.ofdm.framing import (OfdmFrameType, PhyHeader,
-                                               build_burst)
-            return build_burst(BENCH, PhyHeader(OfdmFrameType.ACK, 1, block_seq=0))
+            from guardian.ofdm.framing import (AckBitmap, OfdmFrameType,
+                                               PhyHeader, build_burst)
+            answer = AckBitmap(1, frozenset({0})).encode()
+            return build_burst(
+                BENCH,
+                PhyHeader(OfdmFrameType.ACK, 1, block_seq=0,
+                          payload_len=len(answer)),
+                answer,
+            )
 
     backend = OfdmVhfBackend(
         pipe_factory=LoggingPipe,
