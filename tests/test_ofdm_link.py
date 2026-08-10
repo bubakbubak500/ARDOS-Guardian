@@ -255,14 +255,19 @@ def test_a_block_for_another_message_is_ignored() -> None:
 # -- required test 20: a deterministic seeded simulation -------------------- #
 
 def _run_reference_transfer() -> tuple[OfdmLink, OfdmLink, bytes | None, bool]:
-    """The canonical run: 4096 bytes at 12 dB, seed 0xA5, one forced NACK."""
+    """The canonical run: clean 24 dB path, seed 0xA5, one forced NACK.
+
+    The erased sub-block is the impairment this fixture is meant to measure.
+    Keeping the remaining path well above the decoder cliff prevents
+    platform-level floating-point differences from adding incidental retries.
+    """
     def wreck_one_member_of_the_first_burst(count: int,
                                             samples: np.ndarray) -> np.ndarray:
         if count == 1:
             return _erase_subblock(samples, delay=500, members=4, position=1)
         return samples
 
-    return _exchange(_payload(4096), ChannelSpec(snr_db=12.0, delay=500,
+    return _exchange(_payload(4096), ChannelSpec(snr_db=24.0, delay=500,
                                                  trailing=1500),
                      seed=0xA5, damage=wreck_one_member_of_the_first_burst)
 
@@ -278,7 +283,7 @@ def test_the_reference_transfer_delivers_exactly_one_retry() -> None:
     assert sender.adaptation.blocks_sent == 8
     assert sender.adaptation.blocks_acked == 8
     assert receiver.adaptation.blocks_received == 8
-    assert receiver.adaptation.mean_snr_db == pytest.approx(12.0, abs=1.5)
+    assert receiver.adaptation.mean_snr_db == pytest.approx(24.0, abs=1.5)
 
 
 def test_the_reference_transfer_repeats_identically() -> None:
@@ -301,7 +306,7 @@ def test_throughput_is_measured_from_airtime_and_sits_below_the_phy_rate() -> No
     # block, the header, every acknowledgement and every retry. The BENCH MCS1
     # payload carriers alone would give 1833 bit/s; end to end is well under that.
     payload = _payload(4096)
-    sender, _, received, ok = _exchange(payload, ChannelSpec(snr_db=15.0, delay=400,
+    sender, _, received, ok = _exchange(payload, ChannelSpec(snr_db=24.0, delay=400,
                                                             trailing=1500))
     assert ok and received == payload
     phy_rate = BENCH.num_data_carriers * 2 * 0.5 / BENCH.symbol_duration
@@ -313,7 +318,7 @@ def test_throughput_is_measured_from_airtime_and_sits_below_the_phy_rate() -> No
 
 def test_a_retry_lowers_the_measured_throughput() -> None:
     payload = _payload(4096)
-    clean, _, _, _ = _exchange(payload, ChannelSpec(snr_db=15.0, delay=400,
+    clean, _, _, _ = _exchange(payload, ChannelSpec(snr_db=24.0, delay=400,
                                                     trailing=1500))
     retried, _, _, _ = _run_reference_transfer()
     assert retried.status.est_bitrate_bps < clean.status.est_bitrate_bps
