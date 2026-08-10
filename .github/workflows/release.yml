@@ -36,8 +36,22 @@ jobs:
             throw "Tag ${{ github.ref_name }} does not match Guardian version $version."
           }
 
-      - name: Test
-        run: python -m pytest
+      # The main/pull-request Test workflow runs the complete DSP and benchmark
+      # suite. The tag path repeats the release-critical integration surface so
+      # installer publication is not gated twice on long simulated RF sweeps.
+      - name: Run release smoke tests
+        run: >-
+          python -m pytest
+          tests/test_config.py
+          tests/test_updates.py
+          tests/test_update_dialog.py
+          tests/test_session.py
+          tests/test_operations.py
+          tests/test_payloads.py
+          tests/test_ofdm_payload.py
+          tests/test_transfer_progress.py
+          tests/test_qt_shell.py
+          tests/test_stage4_dialogs.py
 
       - name: Build application
         shell: pwsh

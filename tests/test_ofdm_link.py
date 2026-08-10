@@ -23,10 +23,12 @@ from guardian.ofdm.link import SimulatedDuplexPipe
 from guardian.ofdm.metrics import AdaptationState, LinkMetrics, OfdmStatus
 
 SEED = 0xA5
-#: Short compared with a real radio, but the pipe answers instantly, so the
-#: timeouts only need to be long enough to be non-zero.
+#: The pipe moves samples instantly, but the receiver still performs the full
+#: FFT/FEC decode on another Python thread before it can answer. Shared CI
+#: runners can take several seconds for a four-block burst, so leave enough
+#: wall-clock scheduling margin to test link behavior rather than CPU speed.
 TURNAROUND = 0.05
-MARGIN = 0.5
+MARGIN = 10.0
 
 
 def _payload(size: int, seed: int = SEED) -> bytes:
