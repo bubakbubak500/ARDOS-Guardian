@@ -461,6 +461,18 @@ class OfdmVhfBackend(PayloadBackend):
     def _publish(self, status: OfdmStatus) -> None:
         self.status = status
 
+    def _reset_status(self, direction: str) -> None:
+        """Publish a clean transfer view before audio/QSY setup can block."""
+        selected = self.controller.profile
+        self.status = OfdmStatus(
+            direction=direction,
+            profile=self.profile.name,
+            mcs=self.mcs_index,
+            fec=fec_spec(selected.fec).label,
+            burst_bytes=selected.burst_bytes,
+            arq_block_bytes=selected.arq_block_bytes,
+        )
+
     @staticmethod
     def _payload_of(msg) -> bytes:
         return (msg.payload_bytes if msg.payload_bytes is not None
@@ -478,6 +490,7 @@ class OfdmVhfBackend(PayloadBackend):
         success = False
         acquired = False
         with self._transfer_lock:
+            self._reset_status("send")
             pipe = None
             try:
                 if self.on_acquire:
@@ -512,6 +525,7 @@ class OfdmVhfBackend(PayloadBackend):
         success = False
         acquired = False
         with self._transfer_lock:
+            self._reset_status("receive")
             pipe = None
             try:
                 if self.on_acquire:

@@ -34,6 +34,10 @@ class FakeVara:
             data_socket_reopens=0,
             tx_bitrate_bps=None,
             data_bytes_read=0,
+            data_bytes_written=0,
+            transfer_direction="",
+            rx_transfer_bytes=0,
+            rx_transfer_total=0,
             ptt_keyings=0,
             transport_lost=False,
         )
@@ -65,6 +69,18 @@ class FakeVara:
 
     def prepare_data_transfer(self) -> None:
         self.commands.append(("prepare",))
+        self.state.transfer_direction = "send"
+
+    def prepare_receive_transfer(self) -> None:
+        self.commands.append(("prepare-receive",))
+        self.state.data_bytes_written = 0
+        self.state.transfer_direction = "receive"
+        self.state.rx_transfer_bytes = 0
+        self.state.rx_transfer_total = 0
+
+    def set_receive_transfer_total(self, total: int) -> None:
+        self.commands.append(("receive-total", total))
+        self.state.rx_transfer_total = total
 
     def wait_data_ready(self) -> None:
         self.commands.append(("data-ready",))
@@ -86,6 +102,8 @@ class FakeVara:
         del self.incoming[:size]
         if len(result) != size:
             raise EOFError("test stream ended early")
+        if self.state.transfer_direction == "receive":
+            self.state.rx_transfer_bytes += len(result)
         return result
 
 
@@ -166,6 +184,25 @@ def test_vara_read_exactly_restores_blocking_data_socket() -> None:
     assert data.timeouts == [3.0, None]
 
 
+def test_vara_receive_progress_counts_each_socket_chunk() -> None:
+    class ChunkedDataSocket:
+        def settimeout(self, _value) -> None:
+            pass
+
+        def recv(self, size: int) -> bytes:
+            return b"x" * min(size, 2)
+
+    vara = VaraClient()
+    vara._data = ChunkedDataSocket()
+    vara.prepare_receive_transfer()
+    vara.set_receive_transfer_total(7)
+
+    assert vara.read_exactly(7, timeout=3.0) == b"x" * 7
+    assert vara.state.transfer_direction == "receive"
+    assert vara.state.rx_transfer_bytes == 7
+    assert vara.state.rx_transfer_total == 7
+
+
 def test_vara_reconnects_the_complete_tcp_pair_when_existing_state_is_dead(
     monkeypatch,
 ) -> None:
@@ -241,7 +278,10 @@ def test_vara_send_and_receive_preserve_payload_bytes() -> None:
     VaraP2PBackend(incoming)._receive(received, receive_result.append)
 
     assert receive_result == [True]
-    assert incoming.commands == []
+    assert incoming.commands == [
+        ("prepare-receive",),
+        ("receive-total", MIN_WIRE_SIZE),
+    ]
     assert received.payload_bytes == b"bundle"
 
 
@@ -347,6 +387,9 @@ def test_vara_receive_uses_the_agreed_channel_and_returns_before_confirmation() 
         "release",
         ("done", True),
     ]
+    assert ("prepare-receive",) in incoming.commands
+    assert ("receive-total", MIN_WIRE_SIZE) in incoming.commands
+    assert incoming.state.rx_transfer_bytes == MIN_WIRE_SIZE
 
 
 def test_failed_working_qsy_never_starts_vara() -> None:

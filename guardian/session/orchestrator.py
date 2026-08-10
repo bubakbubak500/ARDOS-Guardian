@@ -198,13 +198,15 @@ class SessionState(Enum):
     ANNOUNCING = "announcing"      # sent HAVE_MSG, waiting for ACK
     NEGOTIATING_WORKING = "working"  # both peers prove the same opt-in payload channel
     WAITING_BUSY = "waiting"       # peer was busy, will retry
-    STARTING_VARA = "starting"     # got ACK, starting VARA session
-    TRANSFERRING = "transferring"  # payload in flight over VARA
+    # The names/values predate negotiated payload transports.  Keep them for
+    # compatibility, but they now describe the selected VARA or OFDM phase.
+    STARTING_VARA = "starting"     # got ACK, starting payload session
+    TRANSFERRING = "transferring"  # negotiated payload in flight
     CONFIRMED = "confirmed"        # next hop confirmed RECEIVED
     # responder
     HEARD = "heard"                # heard a HAVE_MSG addressed to me
     ACKED = "acked"                # acked, waiting for START_VARA
-    RECEIVING = "receiving"        # receiving payload over VARA
+    RECEIVING = "receiving"        # receiving negotiated payload
     RECEIVED_OK = "received"       # payload received, sent RECEIVED
     # terminal (both)
     FORWARDED = "forwarded"        # next relay holds it; final receipt absent
@@ -1091,12 +1093,17 @@ class Orchestrator:
                     f"{channel[1]}",
                 )
                 return
-            self._start_vara(msg, f.source)
+            self._start_payload(msg, f.source)
 
-    def _start_vara(self, msg: Message, peer: str) -> None:
+    @staticmethod
+    def _payload_label(msg: Message) -> str:
+        """Operator-facing name of the transport negotiated for this hop."""
+        return "OFDM VHF" if msg.payload_transport == "ofdm_vhf" else "VARA"
+
+    def _start_payload(self, msg: Message, peer: str) -> None:
         self._enter(msg, SessionState.STARTING_VARA)
         self._send(FrameType.START_VARA, msg)
-        self._emit(msg, f"{peer} ready — starting VARA")
+        self._emit(msg, f"{peer} ready — starting {self._payload_label(msg)}")
         self._enter(msg, SessionState.TRANSFERRING)
         if self.begin_transfer:
             self.begin_transfer(msg)
@@ -1179,7 +1186,7 @@ class Orchestrator:
             )
         elif f.destination != msg.working_token:
             return
-        self._start_vara(msg, f.source)
+        self._start_payload(msg, f.source)
 
     def _rx_busy(self, f: ControlFrame) -> None:
         msg = self._mine(f, "out")
@@ -1191,7 +1198,7 @@ class Orchestrator:
         msg = self._mine(f, "in")
         if msg and msg.state is SessionState.ACKED:
             self._enter(msg, SessionState.RECEIVING)
-            self._emit(msg, "receiving payload over VARA")
+            self._emit(msg, f"receiving payload over {self._payload_label(msg)}")
             if self.payload is not None:
                 self.payload.start_receive(
                     msg, lambda ok, m=msg: self.notify_payload_delivered(m.msg_id, ok))

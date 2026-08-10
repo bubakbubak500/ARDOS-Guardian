@@ -76,6 +76,20 @@ def test_the_backend_carries_the_configured_waveform_settings() -> None:
     assert isinstance(backend.status, OfdmStatus)
 
 
+def test_each_ofdm_transfer_starts_with_clean_directional_progress() -> None:
+    backend = make_backend("ofdm_vhf", ofdm_profile="BENCH", ofdm_mcs=2)
+    backend.status.tx_bytes = 4096
+    backend.status.total_bytes = 8192
+
+    backend._reset_status("receive")
+
+    assert backend.status.direction == "receive"
+    assert backend.status.tx_bytes == 0
+    assert backend.status.rx_bytes == 0
+    assert backend.status.total_bytes == 0
+    assert backend.status.profile == "BENCH"
+
+
 def test_a_profile_this_build_does_not_have_falls_back_and_says_so() -> None:
     logged = []
     backend = make_backend("ofdm_vhf", ofdm_profile="VHF_NARROW_50K",

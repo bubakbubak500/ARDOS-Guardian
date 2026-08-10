@@ -773,12 +773,19 @@ def _ofdm_pair(sender_capable: bool, receiver_capable: bool):
 
 def test_two_ofdm_stations_agree_on_the_experimental_transport() -> None:
     bus, sender, receiver = _ofdm_pair(True, True)
+    sender_events = []
+    receiver_events = []
+    sender.on_event = lambda _message, event: sender_events.append(event)
+    receiver.on_event = lambda _message, event: receiver_events.append(event)
     message = sender.send_message("OK2IPW", "hi", msg_id=900, next_hop="OK2IPW")
     _drain(bus, sender, receiver)
 
     assert message.state is SessionState.DELIVERED
     assert message.payload_transport == "ofdm_vhf"
     assert receiver.sessions[900].payload_transport == "ofdm_vhf"
+    assert any("starting OFDM VHF" in event for event in sender_events)
+    assert any("receiving payload over OFDM VHF" in event for event in receiver_events)
+    assert not any("starting VARA" in event for event in sender_events)
 
 
 @pytest.mark.parametrize("sender_capable,receiver_capable",
@@ -790,12 +797,19 @@ def test_a_mixed_pair_falls_back_to_vara_before_start_vara_is_sent(
     # on the control channel, where both ends can see it, and before either has
     # committed to a waveform.
     bus, sender, receiver = _ofdm_pair(sender_capable, receiver_capable)
+    sender_events = []
+    receiver_events = []
+    sender.on_event = lambda _message, event: sender_events.append(event)
+    receiver.on_event = lambda _message, event: receiver_events.append(event)
     message = sender.send_message("OK2IPW", "hi", msg_id=901, next_hop="OK2IPW")
     _drain(bus, sender, receiver)
 
     assert message.state is SessionState.DELIVERED
     assert message.payload_transport == "vara_p2p"
     assert receiver.sessions[901].payload_transport == "vara_p2p"
+    assert any("starting VARA" in event for event in sender_events)
+    assert any("receiving payload over VARA" in event for event in receiver_events)
+    assert not any("starting OFDM VHF" in event for event in sender_events)
 
 
 def test_a_station_with_no_ofdm_transport_at_all_behaves_exactly_as_before() -> None:

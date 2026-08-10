@@ -347,6 +347,7 @@ class VaraP2PBackend(PayloadBackend):
                     f"(generation {self.vara.state.data_socket_generation})"
                 )
                 self._drain_stale()
+                self.vara.prepare_receive_transfer()
                 # LISTEN ON is established once when Guardian connects to
                 # VARA. Reissuing it here can reach VARA while the inbound RF
                 # handshake is already pending; the native protocol explicitly
@@ -368,6 +369,7 @@ class VaraP2PBackend(PayloadBackend):
                     wire_size = max(
                         MIN_WIRE_SIZE, _HDR.size + length + _CRC.size
                     )
+                    self.vara.set_receive_transfer_total(wire_size)
                     deadline = max(
                         deadline, started + transfer_timeout_for(wire_size)
                     )

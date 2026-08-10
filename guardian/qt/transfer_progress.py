@@ -1,4 +1,4 @@
-"""A segmented meter for the VARA payload currently on the air.
+"""A segmented meter for the negotiated payload currently on the air.
 
 VARA reports two numbers Guardian already carries in its snapshot: how many
 bytes were handed to the modem for this transfer, and how many are still
@@ -6,7 +6,9 @@ sitting in its RF queue. The difference is what has actually been transmitted,
 which is the only honest progress an HF/VHF link can offer -- there is no
 per-byte acknowledgement to count.
 
-The meter is deliberately segmented rather than a smooth bar. On a 566 bps
+OFDM reports acknowledged bytes and its live ARQ/profile measurements through
+the same panel.  The meter is deliberately segmented rather than a smooth bar.
+On a 566 bps
 unregistered link a 256-byte envelope takes the better part of a minute, and a
 sliver of a continuous bar creeping forward reads as "stuck"; a block that
 lights up every few seconds reads as "working".
@@ -37,6 +39,7 @@ class TransferState:
     sent_bytes: int = 0
     total_bytes: int = 0
     transport: str = "vara"
+    direction: str = "send"
     fec: str = ""
     burst_bytes: int = 0
     arq_block_bytes: int = 0
@@ -61,18 +64,26 @@ def transfer_state(snapshot, payload_active: bool, ofdm_status=None) -> Transfer
     stays None until VARA sends its first BUFFER notice; that is genuinely
     "queued, nothing confirmed on the air yet", so it reports zero sent rather
     than guessing.
+
+    On receive, VARA publishes bytes read against the wire size learned from
+    the envelope header. OFDM publishes acknowledged bytes for either
+    direction. The active modem's reported or measured bit rate is carried in
+    the same state for the shared speed line.
     """
     if payload_active and ofdm_status is not None:
         total = int(getattr(ofdm_status, "total_bytes", 0) or 0)
-        moved = max(
-            int(getattr(ofdm_status, "tx_bytes", 0) or 0),
-            int(getattr(ofdm_status, "rx_bytes", 0) or 0),
-        )
+        tx_bytes = int(getattr(ofdm_status, "tx_bytes", 0) or 0)
+        rx_bytes = int(getattr(ofdm_status, "rx_bytes", 0) or 0)
+        moved = max(tx_bytes, rx_bytes)
+        direction = str(getattr(ofdm_status, "direction", "") or "")
+        if direction not in {"send", "receive"}:
+            direction = "receive" if rx_bytes > tx_bytes else "send"
         return TransferState(
-            active=total > 0,
+            active=True,
             sent_bytes=max(0, min(total, moved)),
             total_bytes=total,
             transport="ofdm",
+            direction=direction,
             fec=str(getattr(ofdm_status, "fec", "")),
             burst_bytes=int(getattr(ofdm_status, "burst_bytes", 0) or 0),
             arq_block_bytes=int(getattr(ofdm_status, "arq_block_bytes", 0) or 0),
@@ -93,12 +104,31 @@ def transfer_state(snapshot, payload_active: bool, ofdm_status=None) -> Transfer
             ),
         )
     vara = snapshot.vara
+    if not payload_active:
+        return TransferState()
+    direction = str(getattr(vara, "transfer_direction", "") or "")
+    if direction == "receive":
+        total = int(getattr(vara, "rx_transfer_total", 0) or 0)
+        received = int(getattr(vara, "rx_transfer_bytes", 0) or 0)
+        return TransferState(
+            active=True,
+            sent_bytes=max(0, min(total, received)),
+            total_bytes=total,
+            direction="receive",
+            goodput_bps=getattr(vara, "tx_bitrate_bps", None),
+        )
     total = int(getattr(vara, "data_bytes_written", 0) or 0)
-    if not payload_active or total <= 0:
+    if total <= 0:
         return TransferState()
     queued = getattr(vara, "tx_buffer_bytes", None)
     sent = 0 if queued is None else max(0, min(total, total - int(queued)))
-    return TransferState(active=True, sent_bytes=sent, total_bytes=total)
+    return TransferState(
+        active=True,
+        sent_bytes=sent,
+        total_bytes=total,
+        direction="send",
+        goodput_bps=getattr(vara, "tx_bitrate_bps", None),
+    )
 
 
 class SegmentedBar(QWidget):
@@ -159,7 +189,7 @@ class SegmentedBar(QWidget):
 
 
 class TransferPanel(QWidget):
-    """The segmented bar plus the byte counts VARA is working through."""
+    """The segmented bar plus byte counts from the active payload modem."""
 
     def __init__(self, tokens: ThemeTokens = DARK_TOKENS, parent=None) -> None:
         super().__init__(parent)
@@ -188,25 +218,43 @@ class TransferPanel(QWidget):
             self.bar.set_fraction(0.0)
             self.detail.clear()
             return
-        self.bar.set_fraction(state.fraction)
-        base = tr(
-            "transfer.detail",
-            sent=state.sent_bytes,
-            total=state.total_bytes,
-            percent=round(state.fraction * 100),
+        transport = "OFDM VHF" if state.transport == "ofdm" else "VARA"
+        self.title.setText(
+            tr(
+                "transfer.title_receive"
+                if state.direction == "receive"
+                else "transfer.title_send",
+                transport=transport,
+            )
         )
+        self.bar.set_fraction(state.fraction)
+        if state.direction == "receive" and state.total_bytes <= 0:
+            base = tr("transfer.detail_receive_waiting")
+        else:
+            base = tr(
+                "transfer.detail_receive"
+                if state.direction == "receive"
+                else "transfer.detail_send",
+                sent=state.sent_bytes,
+                total=state.total_bytes,
+                percent=round(state.fraction * 100),
+            )
+        speed = (
+            dual("measuring", "měří se")
+            if state.goodput_bps is None
+            else f"{state.goodput_bps:.0f} bit/s"
+        )
+        lines = [base, tr("transfer.speed", speed=speed)]
         if state.transport == "ofdm":
-            speed = (dual("measuring", "měří se") if state.goodput_bps is None
-                     else f"{state.goodput_bps:.0f} bit/s")
             live = dual(
                 f"FEC {state.fec} · burst {state.burst_bytes} B · "
                 f"ARQ {state.arq_block_bytes} B · first pass "
                 f"{state.last_first_pass_ok}/{state.last_burst_blocks} · "
-                f"{state.retries} retries / {state.retransmitted_bytes} B · {speed}",
+                f"{state.retries} retries / {state.retransmitted_bytes} B",
                 f"FEC {state.fec} · dávka {state.burst_bytes} B · "
                 f"ARQ {state.arq_block_bytes} B · napoprvé "
                 f"{state.last_first_pass_ok}/{state.last_burst_blocks} · "
-                f"{state.retries} opakování / {state.retransmitted_bytes} B · {speed}",
+                f"{state.retries} opakování / {state.retransmitted_bytes} B",
             )
-            base = f"{base}\n{live}"
-        self.detail.setText(base)
+            lines.append(live)
+        self.detail.setText("\n".join(lines))

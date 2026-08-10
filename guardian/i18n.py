@@ -92,10 +92,30 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Provozní plocha Guardianu je připravena",
     ),
     "shell.station_context": ("STATION CONTEXT", "KONTEXT STANICE"),
-    "transfer.title": ("VARA TRANSMISSION", "PŘENOS VARA"),
-    "transfer.detail": (
+    "transfer.title": ("PAYLOAD TRANSFER", "PŘENOS DAT"),
+    "transfer.title_send": (
+        "SENDING MESSAGE · {transport}",
+        "ODESÍLÁNÍ ZPRÁVY · {transport}",
+    ),
+    "transfer.title_receive": (
+        "RECEIVING MESSAGE · {transport}",
+        "PŘÍJEM ZPRÁVY · {transport}",
+    ),
+    "transfer.detail_send": (
         "{sent} of {total} B on the air · {percent} %",
         "{sent} z {total} B odvysíláno · {percent} %",
+    ),
+    "transfer.detail_receive": (
+        "{sent} of {total} B received · {percent} %",
+        "{sent} z {total} B přijato · {percent} %",
+    ),
+    "transfer.detail_receive_waiting": (
+        "Waiting for incoming payload size",
+        "Čeká se na velikost příchozích dat",
+    ),
+    "transfer.speed": (
+        "Transfer speed: {speed}",
+        "Přenosová rychlost: {speed}",
     ),
     "shell.operation": ("OPERATION", "PROVOZ"),
     "shell.station_idle": ("Station idle", "Stanice je neaktivní"),

@@ -238,6 +238,7 @@ class OfdmLink:
 
     def send_message(self, msg_id: int, payload: bytes) -> bool:
         self._started_at = time.monotonic()
+        self.status.direction = "send"
         if self.legacy_mode:
             return self._send_message_legacy(msg_id, payload)
         selected = self.controller.profile
@@ -435,6 +436,7 @@ class OfdmLink:
     def receive_message(self, msg_id: int | None = None,
                         timeout: float | None = None) -> bytes | None:
         self._started_at = time.monotonic()
+        self.status.direction = "receive"
         wait = self.data_timeout() if timeout is None else timeout
         state: RxBurstState | None = None
         self.status.rx_bytes = 0

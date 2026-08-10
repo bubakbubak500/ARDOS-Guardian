@@ -618,11 +618,29 @@ class Operations:
         return removed
 
     def payload_active(self) -> bool:
-        """True while VARA owns the shared audio; the UI keeps quiet then."""
+        """True while a negotiated payload modem owns the shared audio."""
         return self._payload_active.is_set()
 
     def ofdm_status(self):
-        """Return the live native-modem snapshot, if that backend is present."""
+        """Return live OFDM state only when this hop actually negotiated OFDM.
+
+        An OFDM-configured station keeps VARA as a per-peer fallback.  The OFDM
+        backend therefore exists even during a VARA transfer, and its retained
+        status must not replace VARA's BUFFER-driven progress in the shell.
+        """
+        if not self._payload_active.is_set():
+            return None
+        payload_states = {
+            SessionState.STARTING_VARA,
+            SessionState.TRANSFERRING,
+            SessionState.RECEIVING,
+        }
+        if not any(
+            message.state in payload_states
+            and getattr(message, "payload_transport", "vara_p2p") == "ofdm_vhf"
+            for message in tuple(self.net.sessions.values())
+        ):
+            return None
         payload = getattr(self.net, "payload", None)
         backends = getattr(payload, "backends", None)
         if isinstance(backends, dict):
@@ -1925,6 +1943,9 @@ class Operations:
                 tx_bitrate_bps=state.tx_bitrate_bps,
                 data_bytes_written=state.data_bytes_written,
                 data_bytes_read=state.data_bytes_read,
+                transfer_direction=state.transfer_direction,
+                rx_transfer_bytes=state.rx_transfer_bytes,
+                rx_transfer_total=state.rx_transfer_total,
                 data_socket_generation=state.data_socket_generation,
                 data_local_endpoint=state.data_local_endpoint,
                 data_peer_endpoint=state.data_peer_endpoint,
@@ -1957,10 +1978,11 @@ class Operations:
             f"[{message.source}#{message.msg_id}] {event}",
             source="session",
         )
-        # Adopt the session's negotiated slow-keying gap for the VARA phase.
-        # STARTING_VARA/RECEIVING are emitted before the payload backend takes
-        # the codec, so the value is in place before VARA's first PTT ON.
+        # Adopt the session's negotiated slow-keying gap for its payload phase.
+        # STARTING_VARA/RECEIVING are emitted before the selected backend takes
+        # the codec, so the value is in place before its first PTT ON.
         delay = int(getattr(message, "ptt_delay_ms", 0) or 0)
+        payload_transport = getattr(message, "payload_transport", "vara_p2p")
         if message.state in (
             SessionState.STARTING_VARA,
             SessionState.TRANSFERRING,
@@ -1968,7 +1990,17 @@ class Operations:
         ):
             if delay != self._payload_ptt_delay_ms:
                 self._payload_ptt_delay_ms = delay
-                if delay and self.config.vara_host_ptt:
+                if delay and payload_transport == "ofdm_vhf":
+                    self._log(
+                        dual(
+                            f"Slow keying negotiated: PTT held {delay} ms "
+                            "after each OFDM VHF burst.",
+                            f"Vyjednáno pomalé klíčování: PTT drženo {delay} ms "
+                            "po každém vysílání OFDM VHF.",
+                        ),
+                        source="session",
+                    )
+                elif delay and self.config.vara_host_ptt:
                     self._log(
                         dual(
                             f"Slow keying negotiated: PTT held {delay} ms "

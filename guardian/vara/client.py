@@ -51,6 +51,9 @@ class VaraState:
     tx_bitrate_bps: int | None = None
     data_bytes_written: int = 0
     data_bytes_read: int = 0
+    transfer_direction: str = ""
+    rx_transfer_bytes: int = 0
+    rx_transfer_total: int = 0
     data_socket_generation: int = 0
     data_local_endpoint: str | None = None
     data_peer_endpoint: str | None = None
@@ -226,7 +229,23 @@ class VaraClient:
         self.state.tx_buffer_bytes = None
         self.state.buffer_reports = 0
         self.state.data_bytes_written = 0
+        self.state.transfer_direction = "send"
+        self.state.rx_transfer_bytes = 0
+        self.state.rx_transfer_total = 0
         self.state.ptt_keyings = 0
+
+    def prepare_receive_transfer(self) -> None:
+        """Reset counters used by the UI for one incoming envelope."""
+        self.state.tx_buffer_bytes = None
+        self.state.data_bytes_written = 0
+        self.state.transfer_direction = "receive"
+        self.state.rx_transfer_bytes = 0
+        self.state.rx_transfer_total = 0
+        self.state.ptt_keyings = 0
+
+    def set_receive_transfer_total(self, total: int) -> None:
+        """Publish the wire size learned from the incoming envelope header."""
+        self.state.rx_transfer_total = max(0, int(total))
 
     def wait_data_ready(self, minimum_connected: float = 1.0) -> None:
         """Let VARA finish its CONNECTED/BREAK transition before port 8301 I/O.
@@ -408,6 +427,8 @@ class VaraClient:
                     raise ConnectionError("VARA data connection closed")
                 buf += chunk
                 self.state.data_bytes_read += len(chunk)
+                if self.state.transfer_direction == "receive":
+                    self.state.rx_transfer_bytes += len(chunk)
             return bytes(buf)
         finally:
             try:

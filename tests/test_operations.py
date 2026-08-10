@@ -1923,6 +1923,32 @@ def test_the_negotiated_gap_follows_the_session_and_dies_with_it(tmp_path) -> No
         workers.close(wait=True)
 
 
+def test_ofdm_status_only_replaces_vara_progress_for_an_ofdm_hop(tmp_path) -> None:
+    operations, workers, _ = _operations(tmp_path, payload_backend="ofdm_vhf")
+    try:
+        ofdm = operations.net.payload.backends["ofdm_vhf"]
+        ofdm.status.total_bytes = 2048
+        ofdm.status.tx_bytes = 1024
+        message = SimpleNamespace(
+            state=SessionState.TRANSFERRING,
+            payload_transport="vara_p2p",
+        )
+        operations.net.sessions[9] = message
+        operations._payload_active.set()
+
+        assert operations.ofdm_status() is None, "VARA fallback keeps VARA's bar"
+
+        message.payload_transport = "ofdm_vhf"
+        assert operations.ofdm_status() is ofdm.status
+
+        operations._payload_active.clear()
+        assert operations.ofdm_status() is None
+    finally:
+        operations._payload_active.clear()
+        operations.close()
+        workers.close(wait=True)
+
+
 def test_guardian_keys_for_vara_out_of_the_box(tmp_path) -> None:
     # OK2IPW's evening: rigctld owns the CAT port, so with host PTT off VARA
     # had no port left to key through. The session looked perfect -- CONNECT,
@@ -1989,6 +2015,31 @@ def test_a_negotiated_delay_nobody_can_apply_says_so(tmp_path) -> None:
         warning = operations.events.history()[-1]
         assert warning.level is LogLevel.WARNING
         assert "400" in warning.message
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_negotiated_ofdm_slow_keying_uses_ofdm_status_wording(tmp_path) -> None:
+    operations, workers, _ = _operations(
+        tmp_path, payload_backend="ofdm_vhf", vara_host_ptt=False
+    )
+    try:
+        operations._session_event(
+            SimpleNamespace(
+                source="OK7PS",
+                msg_id=1,
+                direction="out",
+                state=SessionState.STARTING_VARA,
+                ptt_delay_ms=400,
+                payload_transport="ofdm_vhf",
+            ),
+            "starting OFDM VHF",
+        )
+        status = operations.events.history()[-1]
+        assert status.level is LogLevel.INFO
+        assert "OFDM VHF burst" in status.message
+        assert "VARA" not in status.message
     finally:
         operations.close()
         workers.close(wait=True)

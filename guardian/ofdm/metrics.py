@@ -102,6 +102,7 @@ class OfdmStatus:
     """
 
     state: str = "idle"  # idle|synchronizing|receiving|transmitting|waiting_ack|failed
+    direction: str = ""  # send|receive for the active UI progress panel
     mcs: int = 0
     profile: str = ""
     fec: str = "1/2"

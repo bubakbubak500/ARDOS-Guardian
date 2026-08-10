@@ -34,6 +34,9 @@ def test_shell_has_native_menu_minimum_size_and_snapshot_content(tmp_path) -> No
     )
     settings.setValue("ui/theme", ThemePreference.LIGHT.value)
     runtime = ShellRuntime()
+    # This test asserts the five-row VARA layout. Do not let configuration
+    # state left by another UI test turn it into the eight-row OFDM layout.
+    runtime.config.payload_backend = "vara_p2p"
     window = GuardianMainWindow(runtime, settings)
     try:
         assert window.spectrum_window.parent() is None
