@@ -887,6 +887,33 @@ def test_the_workspace_is_bilingual() -> None:
         set_language(Language.ENGLISH)
 
 
+def test_modem_lab_exposes_all_g2_waveform_families() -> None:
+    runtime, workspace = _workspace()
+    try:
+        offered = {
+            workspace.family_picker.itemData(index)
+            for index in range(workspace.family_picker.count())
+        }
+        assert offered == {"ofdm", "sc_hs", "sc_ftn", "sefdm"}
+
+        workspace.family_picker.setCurrentIndex(
+            workspace.family_picker.findData("sc_ftn")
+        )
+        assert workspace.selected_profile().name == "SC_FTN_2K7"
+        assert workspace.facts.profile == "SC_FTN_2K7"
+        assert "τ=0.90" in workspace.facts_fields["spacing"].text()
+        assert workspace.mcs_picker.findData(5) >= 0  # 16-APSK
+        assert workspace.mcs_picker.findData(6) >= 0  # 32-APSK
+
+        workspace.family_picker.setCurrentIndex(
+            workspace.family_picker.findData("sefdm")
+        )
+        assert workspace.selected_profile().name == "SEFDM_2K7"
+        assert "α=0.95" in workspace.facts_fields["spacing"].text()
+    finally:
+        runtime.close()
+
+
 def test_the_transmit_confirmation_and_report_read_in_czech(monkeypatch) -> None:
     # This feature exists because a Czech-speaking operator asked how he was
     # supposed to play the file into the radio. The dialog that keys his

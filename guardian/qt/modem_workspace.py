@@ -68,7 +68,9 @@ from ..ofdm import MCS_TABLE
 from ..ofdm import bench
 from ..ofdm.adaptation import AdaptationConfig, BURST_LADDER
 from ..ofdm.coding import FEC_SPECS, FecProfile, fec_profile
-from ..ofdm.config import PROFILE_LADDER, profile_or_default
+from ..ofdm.config import PROFILE_LADDER, SC_MCS_TABLE, profile_or_default
+from ..waveforms import bench as experimental_bench
+from ..waveforms.config import PROFILES as EXPERIMENTAL_PROFILES
 from ..services import TaskResult
 from .inputs import RowTable
 from .measurements import mcs_verdict, measurement, repolish
@@ -157,26 +159,28 @@ class ModemWorkspace(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
 
+        self.family_picker = QComboBox()
+        for label, value in (
+            ("OFDM", "ofdm"),
+            ("SC-HS", "sc_hs"),
+            ("SC-FTN", "sc_ftn"),
+            ("SEFDM", "sefdm"),
+        ):
+            self.family_picker.addItem(label, value)
+        self.family_picker.setCurrentIndex(max(
+            0, self.family_picker.findData(self.runtime.config.g2_waveform)
+        ))
+
         self.profile_picker = QComboBox()
         # PROFILE_LADDER, not profile_names(): the ladder is ordered by occupied
         # bandwidth, which is the order these are meant to be tried in.
         # Alphabetical order would put NARROW_1K2 between the WIDEs.
-        for name in PROFILE_LADDER:
-            self.profile_picker.addItem(
-                profile_rung_label(profile_or_default(name)), name
-            )
-        self.profile_picker.setCurrentIndex(
-            max(0, self.profile_picker.findData(self.runtime.config.ofdm_profile))
-        )
         self.profile_picker.currentIndexChanged.connect(self._render_facts)
 
         self.mcs_picker = QComboBox()
-        for scheme in MCS_TABLE:
-            self.mcs_picker.addItem(scheme.label, scheme.index)
-        self.mcs_picker.setCurrentIndex(
-            max(0, self.mcs_picker.findData(self.runtime.config.ofdm_mcs))
-        )
         self.mcs_picker.currentIndexChanged.connect(self._render_facts)
+        self.family_picker.currentIndexChanged.connect(self._rebuild_waveform_choices)
+        self._rebuild_waveform_choices(render=False)
 
         self.fec_picker = QComboBox()
         self.fec_picker.addItem("AUTO", None)
@@ -201,6 +205,8 @@ class ModemWorkspace(QWidget):
             max(0, self.burst_picker.findData(selected_burst))
         )
 
+        row.addWidget(QLabel(dual("Waveform", "Průběh")))
+        row.addWidget(self.family_picker)
         row.addWidget(QLabel(tr("modem.profile")))
         row.addWidget(self.profile_picker, 1)
         row.addWidget(QLabel(tr("modem.mcs")))
@@ -210,6 +216,48 @@ class ModemWorkspace(QWidget):
         row.addWidget(QLabel(dual("Burst", "Dávka")))
         row.addWidget(self.burst_picker)
         return host
+
+    def selected_family(self) -> str:
+        return str(self.family_picker.currentData())
+
+    def _rebuild_waveform_choices(self, _index=None, *, render: bool = True) -> None:
+        family = self.selected_family()
+        self.profile_picker.blockSignals(True)
+        self.mcs_picker.blockSignals(True)
+        self.profile_picker.clear()
+        self.mcs_picker.clear()
+        if family == "ofdm":
+            for name in PROFILE_LADDER:
+                self.profile_picker.addItem(
+                    profile_rung_label(profile_or_default(name)), name
+                )
+            wanted_profile = self.runtime.config.ofdm_profile
+            schemes = MCS_TABLE
+            wanted_mcs = self.runtime.config.ofdm_mcs
+        else:
+            names = {
+                "sc_hs": "SC_HS_2K7",
+                "sc_ftn": "SC_FTN_2K7",
+                "sefdm": "SEFDM_2K7",
+            }
+            name = names[family]
+            profile = EXPERIMENTAL_PROFILES[name]
+            low, high = profile.occupied_band
+            self.profile_picker.addItem(
+                f"{name} · {low:.0f}–{high:.0f} Hz · {profile.occupied_bandwidth:.0f} Hz",
+                name,
+            )
+            wanted_profile = name
+            schemes = SC_MCS_TABLE
+            wanted_mcs = self.runtime.config.g2_mcs
+        for scheme in schemes:
+            self.mcs_picker.addItem(scheme.label, scheme.index)
+        self.profile_picker.setCurrentIndex(max(0, self.profile_picker.findData(wanted_profile)))
+        self.mcs_picker.setCurrentIndex(max(0, self.mcs_picker.findData(wanted_mcs)))
+        self.profile_picker.blockSignals(False)
+        self.mcs_picker.blockSignals(False)
+        if render:
+            self._render_facts()
 
     def _facts_panel(self) -> QWidget:
         # An existing panel identity rather than a new one: the theme already
@@ -257,8 +305,13 @@ class ModemWorkspace(QWidget):
         return host
 
     def selected_profile(self):
-        """The `OfdmProfile` the pickers currently name."""
-        return profile_or_default(str(self.profile_picker.currentData()))
+        """The selected OFDM or independent experimental profile."""
+        name = str(self.profile_picker.currentData())
+        return (profile_or_default(name) if self.selected_family() == "ofdm"
+                else EXPERIMENTAL_PROFILES[name])
+
+    def selected_bench(self):
+        return bench if self.selected_family() == "ofdm" else experimental_bench
 
     def selected_mcs(self) -> int:
         return int(self.mcs_picker.currentData())
@@ -274,7 +327,9 @@ class ModemWorkspace(QWidget):
         so it is derived from `bench.describe` and never from a stored copy.
         """
         entry = self.selected_profile()
-        facts = bench.describe(entry, self.selected_mcs(), self.selected_fec())
+        facts = self.selected_bench().describe(
+            entry, self.selected_mcs(), self.selected_fec()
+        )
         self.facts = facts
         fields = self.facts_fields
         fields["band"].setText(dual(
@@ -287,22 +342,37 @@ class ModemWorkspace(QWidget):
             f"{facts.sample_rate} Hz — this is not the bandwidth",
             f"{facts.sample_rate} Hz — to není šířka pásma",
         ))
-        fields["fft"].setText(dual(
-            f"{facts.fft_size} points · guard {facts.cp_length} samples "
-            f"({facts.cp_ms:.2f} ms)",
-            f"{facts.fft_size} bodů · ochranný interval {facts.cp_length} vzorků "
-            f"({facts.cp_ms:.2f} ms)",
-        ))
-        fields["spacing"].setText(dual(
-            f"{facts.subcarrier_spacing:.2f} Hz · symbol {facts.symbol_ms:.1f} ms",
-            f"{facts.subcarrier_spacing:.2f} Hz · symbol {facts.symbol_ms:.1f} ms",
-        ))
-        fields["carriers"].setText(dual(
-            f"{facts.carriers} ({facts.data_carriers} data + "
-            f"{facts.pilots} pilot)",
-            f"{facts.carriers} ({facts.data_carriers} datových + "
-            f"{facts.pilots} pilotních)",
-        ))
+        if self.selected_family() == "ofdm":
+            fields["fft"].setText(dual(
+                f"{facts.fft_size} points · guard {facts.cp_length} samples "
+                f"({facts.cp_ms:.2f} ms)",
+                f"{facts.fft_size} bodů · ochranný interval {facts.cp_length} vzorků "
+                f"({facts.cp_ms:.2f} ms)",
+            ))
+            fields["spacing"].setText(
+                f"{facts.subcarrier_spacing:.2f} Hz · symbol {facts.symbol_ms:.1f} ms"
+            )
+            fields["carriers"].setText(dual(
+                f"{facts.carriers} ({facts.data_carriers} data + {facts.pilots} pilot)",
+                f"{facts.carriers} ({facts.data_carriers} datových + {facts.pilots} pilotních)",
+            ))
+        else:
+            profile = entry
+            fields["fft"].setText(dual(
+                "RRC + LMMSE equalizer" if profile.is_single_carrier
+                else f"SEFDM matrix · FFT window {profile.fft_size} · guard {profile.cp_length}",
+                "RRC + ekvalizér LMMSE" if profile.is_single_carrier
+                else f"Matice SEFDM · okno {profile.fft_size} · ochrana {profile.cp_length}",
+            ))
+            fields["spacing"].setText(
+                (f"{profile.symbol_rate:.0f} symbol/s · τ={profile.ftn_tau:.2f}"
+                 if profile.is_single_carrier else
+                 f"{profile.carrier_spacing_hz:.2f} Hz · α={profile.sefdm_alpha:.2f}")
+            )
+            fields["carriers"].setText(dual(
+                f"{profile.points_per_block} data + {profile.num_pilots} pilot per block",
+                f"{profile.points_per_block} datových + {profile.num_pilots} pilotních v bloku",
+            ))
         fields["mcs"].setText(
             f"MCS{facts.mcs_index} — {facts.mcs_label} · payload FEC {facts.fec_label}"
         )
@@ -396,9 +466,10 @@ class ModemWorkspace(QWidget):
         selected_fec = self.selected_fec()
         self._submit(
             BURST_TASK,
-            lambda: bench.run_burst(entry, index, payload_bytes=payload,
-                                    snr_db=snr, seed=seed,
-                                    fec=selected_fec),
+            lambda: self.selected_bench().run_burst(
+                entry, index, payload_bytes=payload, snr_db=snr,
+                seed=seed, fec=selected_fec
+            ),
             self.burst_status,
             self._render_burst,
         )
@@ -906,7 +977,7 @@ class ModemWorkspace(QWidget):
         target = Path(chosen)
         self._submit(
             FILE_TASK,
-            lambda: bench.make_test_burst(
+            lambda: self.selected_bench().make_test_burst(
                 entry, index, payload_bytes=payload, repeats=repeats,
                 gap_seconds=gap, wav_path=target, fec=selected_fec,
             ),
@@ -949,7 +1020,7 @@ class ModemWorkspace(QWidget):
         """
         facts = self.facts
         if facts is None:
-            facts = bench.describe(
+            facts = self.selected_bench().describe(
                 self.selected_profile(), self.selected_mcs(), self.selected_fec()
             )
         repeats = max(1, int(repeats))
@@ -1018,10 +1089,8 @@ class ModemWorkspace(QWidget):
         # selected it here and has no reason to have saved it as the station's.
         if self._submit(
             TRANSMIT_TASK,
-            lambda: operations.transmit_test_burst(
-                profile_name=entry.name, mcs_index=index,
-                payload_bytes=payload, repeats=repeats,
-                fec=selected_fec,
+            lambda: self._transmit_selected(
+                operations, entry.name, index, payload, repeats, selected_fec
             ),
             self.transmit_status,
             self._render_transmitted,
@@ -1029,6 +1098,22 @@ class ModemWorkspace(QWidget):
             self._transmit_started = time.monotonic()
             self._transmit_expected = expected
             self._show_transmit_progress()
+
+    def _transmit_selected(self, operations, profile_name: str, mcs_index: int,
+                           payload_bytes: int, repeats: int, fec):
+        kwargs = dict(
+            profile_name=profile_name,
+            mcs_index=mcs_index,
+            payload_bytes=payload_bytes,
+            repeats=repeats,
+            fec=fec,
+        )
+        # Preserve the original OFDM call shape for callers/tests written before
+        # waveform families existed.  Only an experimental selection needs the
+        # additional discriminator.
+        if self.selected_family() != "ofdm":
+            kwargs["waveform_family"] = self.selected_family()
+        return operations.transmit_test_burst(**kwargs)
 
     def _show_transmit_progress(self) -> None:
         """Say on the page that the radio is live, and for how long so far."""
@@ -1074,7 +1159,7 @@ class ModemWorkspace(QWidget):
         path = Path(chosen)
         self._submit(
             DECODE_TASK,
-            lambda: bench.decode_capture(entry, path),
+            lambda: self.selected_bench().decode_capture(entry, path),
             self.capture_status,
             self._render_capture,
         )

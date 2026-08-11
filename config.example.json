@@ -14,6 +14,8 @@
   "audio_input": "USB Audio CODEC RX",
   "audio_output": "USB Audio CODEC TX",
   "payload_backend": "vara_p2p",
+  "g2_waveform": "ofdm",
+  "g2_mcs": 2,
   "ofdm_profile": "BENCH",
   "ofdm_mcs": 1,
   "ofdm_adaptive_fec": true,

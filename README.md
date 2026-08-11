@@ -400,19 +400,21 @@ Once the required software and map data are present, the core messaging system o
 
 ---
 
-# Guardian OFDM VHF — a modem of Guardian's own
+# Guardian G2 soundcard modem — waveforms of Guardian's own
 
-Guardian **2.0.1** adds an experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
+Guardian **2.3.0** expands the experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
 
-Select it in *Settings → Payload* as **Guardian OFDM VHF (Experimental)**. VARA P2P stays the default, and an OFDM station and a VARA station can talk to each other: the two peers agree on a transport during the ordinary control handshake, and unless *both* are configured for OFDM the pair falls back to VARA before anything is transmitted.
+Select it in *Settings → Payload* as **Guardian G2 soundcard modem (Experimental)**. VARA P2P stays the default, and a G2 modem station and a VARA station can talk to each other: the two peers agree on a transport during the ordinary control handshake, and unless *both* are configured for the built-in modem the pair falls back to VARA before anything is transmitted.
 
-It is a real OFDM modem — BPSK through 16-QAM for current radio work, punctured convolutional FEC rates from 1/2 through 7/8, interleaving, channel estimation, per-carrier equalisation, and multi-block selective-repeat ARQ. Several independently CRC-protected blocks share one PTT cycle and one bitmap ACK; only missing blocks are retried, with stronger FEC. A fixed version-1 stop-and-wait mode remains for comparison. It reports SNR, EVM, frequency offset, burst/FEC choices, retransmitted bytes, and measured goodput.
+The proven OFDM implementation is retained unchanged as the default. Version 2.3.0 adds three independently selectable experimental waveform modules: **SC-HS** (single-carrier Nyquist signaling with frequency-domain equalisation), **SC-FTN** (faster-than-Nyquist signaling at \(\tau=0.90\)), and **SEFDM** (compressed non-orthogonal multicarrier signaling at \(\alpha=0.95\)). The single-carrier modes add 256-QAM, 16-APSK and 32-APSK choices. All four families reuse the established framing, FEC, interleaving, CRC and selective-repeat ARQ; the existing control frames and transport negotiation stay unchanged.
+
+The reproducible software model transfers an 8 KiB payload at about **949 B/s** with the existing 2.7 kHz-class OFDM benchmark, **1,412 B/s** with SC-HS and **1,553 B/s** with SC-FTN, including framing, FEC, ACK and a 250 ms PTT turnaround. These are channel-model results, not an on-air guarantee. SEFDM is deliberately included as a lab waveform: it is decodable at high SNR, but its present detector is less robust and has markedly higher crest factor. The complete assumptions, failures and radio-test procedure are in [the Guardian G2 2.3 waveform report](docs/G2_WAVEFORM_LAB_2.3.0.md).
 
 **The PHY has been on the air; adaptive format 2 still needs its first flight.** Two IC-705s, 2026-08-09: messages moved, and the audio path turned out to pass about 3 kHz — which makes `BENCH` the profile to use and `WIDE_5K` and above unreachable on that radio. The run also proved that repeated 512-byte PTT/ACK cycles, not raw PHY speed, dominated transfer time. [docs/OFDM_AIR_RESULTS_2026-08-09.md](docs/OFDM_AIR_RESULTS_2026-08-09.md) is what those radios measured, [the adaptive/selective-repeat note](docs/OFDM_G2_ADAPTIVE_ARQ.md) describes this implementation and first-test parameters, [docs/ofdm-vhf.md](docs/ofdm-vhf.md) has the full design, and [docs/OFDM_AIR_TEST.md](docs/OFDM_AIR_TEST.md) is the procedure ([česky](docs/OFDM_AIR_TEST.cs.md)).
 
 ### Testing it without a radio
 
-**Tools ▸ Modem test** lets an operator pick one of six waveform profiles from 1.2 kHz to 40 kHz occupied, inspect a deterministic single burst, transmit a test burst through the configured radio, write a clean WAV, or decode a recorded WAV back to bytes. The simulator-only full-transfer and SNR-sweep reports remain available to developers through `tools/ofdm_bench.py`, but are no longer presented as operator tabs.
+**Tools ▸ Modem test** lets an operator select OFDM, SC-HS, SC-FTN or SEFDM, choose its profile and modulation, inspect a deterministic single burst, transmit a test burst through the configured radio, write a clean WAV, or decode a recorded WAV back to bytes. The original OFDM simulator remains at `tools/ofdm_bench.py`; the fair cross-family comparison is `tools/g2_waveform_bench.py`.
 
 No console, no scripts. (`tools/ofdm_bench.py` prints the same measurements for a developer who wants them in a terminal — it is a thin front end over the same engine.)
 
@@ -426,7 +428,7 @@ This is how the modem gets tuned: a capture lets the whole receiver be re-run ov
 
 # Current status
 
-Guardian **1.0.0** was the first release where the interface and documentation were consolidated around the radio functionality developed and tested throughout the 0.6 series. **2.0.1** adds the OFDM transport above.
+Guardian **1.0.0** was the first release where the interface and documentation were consolidated around the radio functionality developed and tested throughout the 0.6 series. **2.3.0** is the current Guardian G2 waveform-lab release.
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |

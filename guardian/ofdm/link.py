@@ -36,6 +36,41 @@ class HalfDuplexPipe(Protocol):
         """Wait up to `timeout` seconds for a burst. None means nothing came."""
 
 
+class BurstCodec(Protocol):
+    """Physical burst implementation consumed by the proven ARQ state machine.
+
+    OFDM remains the default.  Other Guardian G2 waveform families implement
+    this deliberately small boundary so framing/ARQ semantics do not get copied
+    or subtly changed with every modem experiment.
+    """
+
+    def build_burst(self, profile, header: PhyHeader, payload: bytes = b"", *,
+                    blocks: list[SubBlock] | None = None) -> np.ndarray: ...
+
+    def decode_burst(self, profile, samples): ...
+
+    def burst_duration(self, profile, header: PhyHeader,
+                       block_lengths: list[int] | None = None) -> float: ...
+
+
+class OfdmBurstCodec:
+    """Adapter preserving the original OFDM framing implementation verbatim."""
+
+    @staticmethod
+    def build_burst(profile, header: PhyHeader, payload: bytes = b"", *,
+                    blocks: list[SubBlock] | None = None) -> np.ndarray:
+        return build_burst(profile, header, payload, blocks=blocks)
+
+    @staticmethod
+    def decode_burst(profile, samples):
+        return decode_burst(profile, samples)
+
+    @staticmethod
+    def burst_duration(profile, header: PhyHeader,
+                       block_lengths: list[int] | None = None) -> float:
+        return burst_duration(profile, header, block_lengths)
+
+
 @dataclass
 class SimulatedDuplexPipe:
     outbound: queue.Queue
@@ -108,6 +143,7 @@ class OfdmLink:
     on_status: Callable[[OfdmStatus], None] | None = None
     controller: LinkAdaptationController | None = None
     legacy_mode: bool = False
+    codec: BurstCodec | None = None
 
     status: OfdmStatus = field(default_factory=OfdmStatus)
     adaptation: AdaptationState = field(default_factory=AdaptationState)
@@ -118,6 +154,8 @@ class OfdmLink:
     _started_at: float | None = None
 
     def __post_init__(self) -> None:
+        if self.codec is None:
+            self.codec = OfdmBurstCodec()
         if self.controller is None:
             self.controller = LinkAdaptationController(
                 AdaptationConfig(adaptive_fec=True, adaptive_burst=True),
@@ -128,6 +166,23 @@ class OfdmLink:
         self.status.profile = self.profile.name
         self.status.mcs = self.mcs_index
         self._publish_profile()
+
+    def _build_burst(self, header: PhyHeader, payload: bytes = b"", *,
+                     blocks: list[SubBlock] | None = None) -> np.ndarray:
+        return self.codec.build_burst(  # type: ignore[union-attr]
+            self.profile, header, payload, blocks=blocks
+        )
+
+    def _decode_burst(self, samples):
+        return self.codec.decode_burst(  # type: ignore[union-attr]
+            self.profile, samples
+        )
+
+    def _burst_duration(self, header: PhyHeader,
+                        block_lengths: list[int] | None = None) -> float:
+        return self.codec.burst_duration(  # type: ignore[union-attr]
+            self.profile, header, block_lengths
+        )
 
     # -- plumbing ---------------------------------------------------------
 
@@ -184,7 +239,7 @@ class OfdmLink:
             lengths = ([decoded.block_lengths[sequence]
                         for sequence in decoded.block_order]
                        if decoded.block_lengths else None)
-            airtime = burst_duration(self.profile, decoded.header, lengths)
+            airtime = self._burst_duration(decoded.header, lengths)
             self.channel_seconds += airtime
             self.channel_seconds += self.ptt_turnaround
             control = decoded.header.frame_type is not OfdmFrameType.DATA
@@ -207,7 +262,7 @@ class OfdmLink:
             OfdmFrameType.ACK, 0, block_count=max(1, int(total_blocks)),
             payload_len=len(bitmap),
         )
-        airtime = burst_duration(self.profile, header)
+        airtime = self._burst_duration(header)
         return ((airtime + 2.0 * self.ptt_turnaround + self.timeout_margin)
                 * max(0.5, float(self.timeout_multiplier)))
 
@@ -218,7 +273,7 @@ class OfdmLink:
                 payload_len=self.profile.block_size,
                 version=LEGACY_FRAME_VERSION,
             )
-            airtime = burst_duration(self.profile, header)
+            airtime = self._burst_duration(header)
         else:
             selected = self.controller.profile
             count = min(32, max(1, math.ceil(
@@ -230,7 +285,7 @@ class OfdmLink:
                 fec=selected.fec, payload_len=sum(lengths),
                 subblock_count=count,
             )
-            airtime = burst_duration(self.profile, header, lengths)
+            airtime = self._burst_duration(header, lengths)
         return ((airtime + 2.0 * self.ptt_turnaround + self.timeout_margin)
                 * max(0.5, float(self.timeout_multiplier)))
 
@@ -323,7 +378,7 @@ class OfdmLink:
                 payload_len=sum(len(block.payload) for block in members),
                 subblock_count=len(members), retransmission=attempt > 0,
             )
-            waveform = build_burst(self.profile, header, blocks=members)
+            waveform = self._build_burst(header, blocks=members)
             self.status.last_burst_blocks = len(members)
             self._log(
                 f"OFDM TX BURST #{state.burst_id}: payload={header.payload_len} B, "
@@ -394,7 +449,7 @@ class OfdmLink:
             if samples is None:
                 break
             heard += 1
-            decoded = decode_burst(self.profile, samples)
+            decoded = self._decode_burst(samples)
             self._record(decoded)
             header = decoded.header
             if header is None or not decoded.ok:
@@ -458,7 +513,7 @@ class OfdmLink:
                 self._log("OFDM: peer went quiet")
                 return None
             self._publish("receiving")
-            decoded = decode_burst(self.profile, samples)
+            decoded = self._decode_burst(samples)
             self._record(decoded)
             header = decoded.header
             if header is None:
@@ -529,7 +584,7 @@ class OfdmLink:
             block_count=state.total_blocks, payload_len=len(payload),
         )
         self._transmit(
-            build_burst(self.profile, reply, payload),
+            self._build_burst(reply, payload),
             header=reply, control=True,
         )
 
@@ -543,7 +598,7 @@ class OfdmLink:
             samples = self.pipe.receive(self.reply_timeout(state.total_blocks))
             if samples is None:
                 return
-            decoded = decode_burst(self.profile, samples)
+            decoded = self._decode_burst(samples)
             self._record(decoded)
             header = decoded.header
             if header is None:
@@ -596,7 +651,7 @@ class OfdmLink:
             mcs=self.mcs_index, payload_len=len(block),
             version=LEGACY_FRAME_VERSION,
         )
-        waveform = build_burst(self.profile, header, block)
+        waveform = self._build_burst(header, block)
         self.adaptation.blocks_sent += 1
         for attempt in range(self.max_retries + 1):
             if attempt:
@@ -618,7 +673,7 @@ class OfdmLink:
             samples = self.pipe.receive(deadline - time.monotonic())
             if samples is None:
                 return None
-            decoded = decode_burst(self.profile, samples)
+            decoded = self._decode_burst(samples)
             self._record(decoded)
             header = decoded.header
             if (header is not None and decoded.ok
@@ -655,7 +710,7 @@ class OfdmLink:
             if samples is None:
                 self._publish("failed")
                 return None
-            decoded = decode_burst(self.profile, samples)
+            decoded = self._decode_burst(samples)
             self._record(decoded)
 
     def _answer_legacy(self, kind: OfdmFrameType, header: PhyHeader) -> None:
@@ -663,7 +718,7 @@ class OfdmLink:
             kind, header.msg_id, block_seq=header.block_seq,
             block_count=header.block_count, version=LEGACY_FRAME_VERSION,
         )
-        self._transmit(build_burst(self.profile, reply),
+        self._transmit(self._build_burst(reply),
                        header=reply, control=True)
 
     def _squelch_note(self) -> str:

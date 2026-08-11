@@ -7,4 +7,4 @@ or simple VOX/serial PTT).
 
 from ._version import __version__
 
-__app_name__ = "Guardian"
+__app_name__ = "Guardian G2"

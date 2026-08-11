@@ -249,6 +249,11 @@ class StationConfig:
     ofdm_arq_block_bytes: int = 512
     ofdm_timeout_multiplier: float = 1.0
     ofdm_legacy_mode: bool = False      # version-1 512 B stop-and-wait comparison
+    # Physical waveform under the Guardian G2 soundcard transport.  "ofdm" is
+    # the verified default; the other families are explicit opt-in experiments
+    # which keep the same control handshake, framing and selective-repeat ARQ.
+    g2_waveform: str = "ofdm"           # ofdm | sc_hs | sc_ftn | sefdm
+    g2_mcs: int = 2                     # experimental-family modulation index
 
     # Control-burst channel: "off" (idle) | "audio" (real RF via the radio).
     control_channel: str = "off"
@@ -385,6 +390,14 @@ class StationConfig:
                 clean.pop(name, None)
         if clean.get("ofdm_arq_block_bytes") not in {256, 512, 1024}:
             clean.pop("ofdm_arq_block_bytes", None)
+        if clean.get("g2_waveform") not in {"ofdm", "sc_hs", "sc_ftn", "sefdm"}:
+            clean.pop("g2_waveform", None)
+        try:
+            experimental_mcs = int(clean.get("g2_mcs", 2))
+        except (TypeError, ValueError):
+            clean.pop("g2_mcs", None)
+        else:
+            clean["g2_mcs"] = min(6, max(0, experimental_mcs))
         arq_bytes = int(clean.get("ofdm_arq_block_bytes", 512))
         for name in ("ofdm_burst_bytes", "ofdm_min_burst_bytes",
                      "ofdm_max_burst_bytes"):

@@ -35,7 +35,8 @@ from ..modem.audio import match_device_name, scan_audio_devices
 from ..ofdm import MCS_TABLE
 from ..ofdm.adaptation import BURST_LADDER
 from ..ofdm.coding import FEC_SPECS
-from ..ofdm.config import PROFILE_LADDER, profile_or_default
+from ..ofdm.config import PROFILE_LADDER, SC_MCS_TABLE, profile_or_default
+from ..waveforms.config import PROFILES as EXPERIMENTAL_PROFILES
 from ..protocol import MAX_PTT_DELAY_MS, PTT_DELAY_STEP_MS
 from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.usb_serial import list_serial_ports, port_device
@@ -850,13 +851,15 @@ class SettingsDialog(QDialog):
             tr("settings.vara"),
             dual(
                 "Choose what carries the message payload. VARA P2P drives the "
-                "vendor modem over TCP; Guardian OFDM VHF is an experimental "
-                "built-in modem that uses the soundcard and Guardian's own "
+                "vendor modem over TCP; the Guardian G2 soundcard modem is an "
+                "experimental built-in modem with selectable OFDM, SC-HS, "
+                "SC-FTN and SEFDM waveforms and Guardian's own "
                 "keying. An empty executable field follows detection; the grey "
                 "text is the path Guardian uses.",
                 "Zvolte, co přenáší obsah zprávy. VARA P2P řídí modem "
-                "dodavatele přes TCP; Guardian OFDM VHF je experimentální "
-                "vestavěný modem, který používá zvukovou kartu a vlastní "
+                "dodavatele přes TCP; zvukový modem Guardian G2 je experimentální "
+                "vestavěný modem s volitelným OFDM, SC-HS, SC-FTN a SEFDM, který "
+                "používá zvukovou kartu a vlastní "
                 "klíčování Guardianu. Prázdné pole s programem se řídí "
                 "detekcí; šedý text je cesta, kterou Guardian používá.",
             ),
@@ -872,8 +875,8 @@ class SettingsDialog(QDialog):
         self.payload_backend.addItem("Guardian VARA P2P", "vara_p2p")
         self.payload_backend.addItem(
             dual(
-                "Guardian OFDM VHF (Experimental)",
-                "Guardian OFDM VHF (Experimentální)",
+                "Guardian G2 soundcard modem (Experimental)",
+                "Zvukový modem Guardian G2 (Experimentální)",
             ),
             "ofdm_vhf",
         )
@@ -963,6 +966,14 @@ class SettingsDialog(QDialog):
         self.vara_mode.currentTextChanged.connect(self._sync_bandwidth_row)
         self._ofdm_only_rows: list[tuple[QLabel | None, QWidget]] = []
         for text, widget in (
+            (
+                dual("Guardian G2 waveform", "Vlnový průběh Guardian G2"),
+                self.g2_waveform,
+            ),
+            (
+                dual("Experimental modulation", "Experimentální modulace"),
+                self.g2_mcs,
+            ),
             (
                 dual("OFDM waveform profile", "Profil vlnového průběhu OFDM"),
                 self.ofdm_profile,
@@ -1055,6 +1066,24 @@ class SettingsDialog(QDialog):
         picker offers is a set of such wholes; the summary below it says what the
         chosen one is.
         """
+        self.g2_waveform = QComboBox()
+        for english, czech, value in (
+            ("OFDM — verified baseline", "OFDM — ověřený základ", "ofdm"),
+            ("SC-HS — single carrier", "SC-HS — jedna nosná", "sc_hs"),
+            ("SC-FTN — faster than Nyquist", "SC-FTN — rychleji než Nyquist", "sc_ftn"),
+            ("SEFDM — compressed carriers", "SEFDM — stlačené nosné", "sefdm"),
+        ):
+            self.g2_waveform.addItem(dual(english, czech), value)
+        self.g2_waveform.setCurrentIndex(max(
+            0, self.g2_waveform.findData(self.config.g2_waveform)
+        ))
+        self.g2_mcs = QComboBox()
+        for scheme in SC_MCS_TABLE:
+            self.g2_mcs.addItem(scheme.label, scheme.index)
+        self.g2_mcs.setCurrentIndex(max(
+            0, self.g2_mcs.findData(self.config.g2_mcs)
+        ))
+
         self.ofdm_profile = QComboBox()
         # PROFILE_LADDER, not profile_names(): the ladder is ordered by occupied
         # bandwidth. Alphabetical order would list NARROW_1K2 between the WIDEs,
@@ -1155,6 +1184,8 @@ class SettingsDialog(QDialog):
         self.ofdm_adaptive_fec.toggled.connect(self._sync_ofdm_controls)
         self.ofdm_adaptive_burst.toggled.connect(self._sync_ofdm_controls)
         self.ofdm_legacy_mode.toggled.connect(self._sync_ofdm_controls)
+        self.g2_waveform.currentIndexChanged.connect(self._sync_ofdm_controls)
+        self.g2_mcs.currentIndexChanged.connect(self._sync_ofdm_summary)
         for picker in (
             self.ofdm_fec, self.ofdm_burst_bytes, self.ofdm_min_burst_bytes,
             self.ofdm_max_burst_bytes, self.ofdm_arq_block_bytes,
@@ -1164,6 +1195,10 @@ class SettingsDialog(QDialog):
 
     def _sync_ofdm_controls(self) -> None:
         legacy = self.ofdm_legacy_mode.isChecked()
+        classic = self.g2_waveform.currentData() == "ofdm"
+        self.ofdm_profile.setEnabled(classic)
+        self.ofdm_mcs.setEnabled(classic)
+        self.g2_mcs.setEnabled(not classic)
         self.ofdm_adaptive_fec.setEnabled(not legacy)
         self.ofdm_fec.setEnabled(not legacy and not self.ofdm_adaptive_fec.isChecked())
         self.ofdm_adaptive_burst.setEnabled(not legacy)
@@ -1186,7 +1221,15 @@ class SettingsDialog(QDialog):
         is worse than having no summary: it would contradict the picker sitting
         directly above it.
         """
-        waveform = profile_or_default(str(self.ofdm_profile.currentData()))
+        family = str(self.g2_waveform.currentData())
+        experimental_names = {
+            "sc_hs": "SC_HS_2K7",
+            "sc_ftn": "SC_FTN_2K7",
+            "sefdm": "SEFDM_2K7",
+        }
+        waveform = (profile_or_default(str(self.ofdm_profile.currentData()))
+                    if family == "ofdm"
+                    else EXPERIMENTAL_PROFILES[experimental_names[family]])
         if self.ofdm_legacy_mode.isChecked():
             mode = dual(
                 "Protocol v1 compatibility: 512 B stop-and-wait, FEC 1/2.",
@@ -1205,10 +1248,39 @@ class SettingsDialog(QDialog):
                 f"Protokol v2 se selektivním opakováním · FEC {fec} · dávka "
                 f"{burst} · ARQ {self.ofdm_arq_block_bytes.currentData()} B.",
             )
-        self.ofdm_summary.setText(f"{mode}\n{self._ofdm_summary_text(waveform)}")
+        if family == "ofdm":
+            physical = self._ofdm_summary_text(waveform)
+        else:
+            low, high = waveform.occupied_band
+            scheme = next(item for item in SC_MCS_TABLE
+                          if item.index == int(self.g2_mcs.currentData()))
+            if waveform.is_single_carrier:
+                detail = (
+                    f"{waveform.symbol_rate:.0f} symbol/s · RRC roll-off "
+                    f"{waveform.rolloff:.3f} · τ={waveform.ftn_tau:.2f}"
+                )
+            else:
+                detail = (
+                    f"{waveform.num_carriers} non-orthogonal carriers · "
+                    f"α={waveform.sefdm_alpha:.2f}"
+                )
+            physical = dual(
+                f"{waveform.name} (experimental) · {low:.0f}–{high:.0f} Hz "
+                f"({waveform.occupied_bandwidth:.0f} Hz) · {detail} · {scheme.label}.",
+                f"{waveform.name} (experimentální) · {low:.0f}–{high:.0f} Hz "
+                f"({waveform.occupied_bandwidth:.0f} Hz) · {detail} · {scheme.label}.",
+            )
+        self.ofdm_summary.setText(f"{mode}\n{physical}")
         # A rung that needs a faster sound card is a failure the operator can
         # anticipate at the moment of choosing rather than debug afterwards.
-        if waveform.sample_rate != 48000:
+        if family != "ofdm":
+            self.ofdm_profile_hint.setText(dual(
+                "Experimental waveform: both stations must select the same family "
+                "and MCS. Validate it in Modem Lab and on a recording before mail use.",
+                "Experimentální průběh: obě stanice musí zvolit stejnou rodinu i MCS. "
+                "Před přenosem zpráv jej ověřte v laboratoři modemu a na nahrávce.",
+            ))
+        elif waveform.sample_rate != 48000:
             self.ofdm_profile_hint.setText(dual(
                 f"{waveform.name} needs a sound card that will open at "
                 f"{waveform.sample_rate} Hz. If yours will not, the ladder "
@@ -1588,6 +1660,8 @@ class SettingsDialog(QDialog):
         cfg.ofdm_arq_block_bytes = int(self.ofdm_arq_block_bytes.currentData())
         cfg.ofdm_timeout_multiplier = self.ofdm_timeout_multiplier.value()
         cfg.ofdm_legacy_mode = self.ofdm_legacy_mode.isChecked()
+        cfg.g2_waveform = str(self.g2_waveform.currentData())
+        cfg.g2_mcs = int(self.g2_mcs.currentData())
         cfg.control_modem = self.control_modem.currentData()
         cfg.vara_hf_bandwidth = self.vara_hf_bandwidth.currentData()
         cfg.vara_host_ptt = self.vara_host_ptt.isChecked()

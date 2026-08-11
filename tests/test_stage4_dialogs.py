@@ -78,6 +78,27 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         dialog.close()
 
 
+def test_settings_persist_an_independent_g2_waveform_and_modulation() -> None:
+    _application()
+    config = StationConfig(callsign="OK7PS", payload_backend="ofdm_vhf")
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        assert {
+            dialog.g2_waveform.itemData(index)
+            for index in range(dialog.g2_waveform.count())
+        } == {"ofdm", "sc_hs", "sc_ftn", "sefdm"}
+        dialog.g2_waveform.setCurrentIndex(dialog.g2_waveform.findData("sc_ftn"))
+        dialog.g2_mcs.setCurrentIndex(dialog.g2_mcs.findData(6))
+        assert not dialog.ofdm_profile.isEnabled()
+        assert dialog.g2_mcs.isEnabled()
+        assert "SC_FTN_2K7" in dialog.ofdm_summary.text()
+        assert dialog.apply()
+        assert config.g2_waveform == "sc_ftn"
+        assert config.g2_mcs == 6
+    finally:
+        dialog.close()
+
+
 def test_network_behaviour_page_owns_the_discovery_limits_and_trust_lists() -> None:
     # The limits are station configuration, so they live beside relay and TTL
     # instead of stealing table space on the operational discovery page.

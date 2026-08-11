@@ -114,7 +114,7 @@ class PhyHeader:
         return body + _CRC.pack(crc16(body))
 
     @classmethod
-    def decode(cls, raw: bytes) -> "PhyHeader":
+    def decode(cls, raw: bytes, *, mcs_lookup=None) -> "PhyHeader":
         if len(raw) < HEADER_BYTES:
             raise OfdmFrameError(f"header is {len(raw)} bytes, need {HEADER_BYTES}")
         body = raw[: _HEADER.size]
@@ -151,7 +151,7 @@ class PhyHeader:
             if not 1 <= subblock_count <= 32:
                 raise OfdmFrameError(f"invalid sub-block count {subblock_count}")
         try:
-            mcs(index)
+            (mcs if mcs_lookup is None else mcs_lookup)(index)
         except OfdmConfigError as exc:
             raise OfdmFrameError(str(exc)) from None
         return cls(

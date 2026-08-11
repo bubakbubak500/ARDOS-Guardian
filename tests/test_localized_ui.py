@@ -152,7 +152,7 @@ def test_payload_page_is_bilingual_in_both_directions() -> None:
         assert dialog.payload_backend.itemText(0) == "Guardian VARA P2P"
         assert (
             dialog.payload_backend.itemText(1)
-            == "Guardian OFDM VHF (Experimental)"
+            == "Guardian G2 soundcard modem (Experimental)"
         )
         summary = dialog.ofdm_summary.text()
         assert "experimental" in summary
@@ -180,7 +180,7 @@ def test_payload_page_is_bilingual_in_both_directions() -> None:
         assert "Komprese a identifikace" in titles
         assert (
             dialog.payload_backend.itemText(1)
-            == "Guardian OFDM VHF (Experimentální)"
+            == "Zvukový modem Guardian G2 (Experimentální)"
         )
         summary = dialog.ofdm_summary.text()
         assert "experimentální" in summary

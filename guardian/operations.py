@@ -784,6 +784,7 @@ class Operations:
 
     def transmit_test_burst(self, *, profile_name: str | None = None,
                             mcs_index: int | None = None,
+                            waveform_family: str = "ofdm",
                             fec=None,
                             payload_bytes: int = 512, repeats: int = 3,
                             on_log=None):
@@ -803,6 +804,8 @@ class Operations:
         transmitter.
         """
         from .ofdm import bench
+        from .waveforms import bench as experimental_bench
+        from .waveforms.config import PROFILES as experimental_profiles
 
         report = on_log or (lambda value: self._log(value, source="payload"))
         if self.payload_active():
@@ -814,10 +817,23 @@ class Operations:
             ))
             return None
 
-        waveform_profile = profile_or_default(profile_name
-                                              or self.config.ofdm_profile)
-        index = self.config.ofdm_mcs if mcs_index is None else int(mcs_index)
-        samples, _ = bench.make_test_burst(
+        family = str(waveform_family or "ofdm").strip().lower()
+        if family == "ofdm":
+            waveform_profile = profile_or_default(profile_name or self.config.ofdm_profile)
+            selected_bench = bench
+            default_mcs = self.config.ofdm_mcs
+        else:
+            fallback_names = {
+                "sc_hs": "SC_HS_2K7", "sc_ftn": "SC_FTN_2K7",
+                "sefdm": "SEFDM_2K7",
+            }
+            selected_name = (profile_name if profile_name in experimental_profiles
+                             else fallback_names.get(family, "SC_HS_2K7"))
+            waveform_profile = experimental_profiles[selected_name]
+            selected_bench = experimental_bench
+            default_mcs = self.config.g2_mcs
+        index = default_mcs if mcs_index is None else int(mcs_index)
+        samples, _ = selected_bench.make_test_burst(
             waveform_profile, index, payload_bytes=payload_bytes,
             repeats=repeats,
             fec=self.config.ofdm_fec if fec is None else fec,
@@ -1370,6 +1386,8 @@ class Operations:
             ofdm_arq_block_bytes=self.config.ofdm_arq_block_bytes,
             ofdm_timeout_multiplier=self.config.ofdm_timeout_multiplier,
             ofdm_legacy_mode=self.config.ofdm_legacy_mode,
+            g2_waveform=self.config.g2_waveform,
+            g2_mcs=self.config.g2_mcs,
         )
 
     def _open_radio(self) -> list[str]:

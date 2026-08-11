@@ -34,9 +34,12 @@ from ..modem.audio import (PTT_LEAD_SECONDS, PTT_TAIL_SECONDS,
                            _import_sounddevice, resolve_device,
                            transmit_waveform)
 from ..ofdm import OfdmLink, OfdmStatus, PhyHeader, profile_or_default
+from ..ofdm.link import OfdmBurstCodec
 from ..ofdm.adaptation import AdaptationConfig, LinkAdaptationController
 from ..ofdm.coding import FecProfile, fec_profile, fec_spec
 from ..ofdm.framing import OfdmFrameType, burst_samples
+from ..waveforms.config import PROFILES as EXPERIMENTAL_PROFILES
+from ..waveforms.framing import ExperimentalBurstCodec
 from .base import DoneCb, PayloadBackend
 
 #: Extra silence appended after a burst, for the same reason the control modem
@@ -124,7 +127,8 @@ class RadioAudioPipe:
                  ptt: Callable[[bool], None],
                  tx_lead_ms: int = 300, tx_tail_ms: int = 100,
                  max_burst_bytes: int = 8192, arq_block_bytes: int = 512,
-                 on_log: Callable[[str], None] | None = None) -> None:
+                 on_log: Callable[[str], None] | None = None,
+                 codec=None) -> None:
         self.profile = profile
         self.input_device = input_device
         self.output_device = output_device
@@ -134,6 +138,7 @@ class RadioAudioPipe:
         self.max_burst_bytes = max(1, int(max_burst_bytes))
         self.arq_block_bytes = max(1, int(arq_block_bytes))
         self.on_log = on_log or (lambda message: None)
+        self.codec = codec or OfdmBurstCodec()
 
         self._sd = None
         self._stream = None
@@ -304,7 +309,9 @@ class RadioAudioPipe:
             payload_len=sum(lengths), subblock_count=count,
             fec=FecProfile.FEC_1_2,
         )
-        return burst_samples(self.profile, header, lengths)
+        if isinstance(self.codec, OfdmBurstCodec):
+            return burst_samples(self.profile, header, lengths)
+        return self.codec.burst_samples(self.profile, header, lengths)
 
     # -- transmit -----------------------------------------------------------
 
@@ -353,14 +360,27 @@ class OfdmVhfBackend(PayloadBackend):
                  ofdm_arq_block_bytes: int = 512,
                  ofdm_timeout_multiplier: float = 1.0,
                  ofdm_legacy_mode: bool = False,
+                 g2_waveform: str = "ofdm", g2_mcs: int = 2,
                  audio_input=None, audio_output=None,
                  ptt: Callable[[bool], None] | None = None,
                  ptt_turnaround_ms: int = 0,
                  on_log=None, on_qsy=None, on_receive_qsy=None, on_unqsy=None,
                  on_acquire=None, on_release=None, pipe_factory=None) -> None:
-        self.profile = profile_or_default(ofdm_profile)
+        self.waveform_family = str(g2_waveform or "ofdm").strip().lower()
+        experimental = {
+            "sc_hs": "SC_HS_2K7",
+            "sc_ftn": "SC_FTN_2K7",
+            "sefdm": "SEFDM_2K7",
+        }
+        if self.waveform_family in experimental:
+            self.profile = EXPERIMENTAL_PROFILES[experimental[self.waveform_family]]
+            self.codec = ExperimentalBurstCodec()
+        else:
+            self.waveform_family = "ofdm"
+            self.profile = profile_or_default(ofdm_profile)
+            self.codec = OfdmBurstCodec()
         self.requested_profile = ofdm_profile
-        self.mcs_index = int(ofdm_mcs)
+        self.mcs_index = int(ofdm_mcs if self.waveform_family == "ofdm" else g2_mcs)
         self.tx_lead_ms = int(ofdm_tx_lead_ms)
         self.tx_tail_ms = int(ofdm_tx_tail_ms)
         self.max_retries = int(ofdm_max_retries)
@@ -414,7 +434,7 @@ class OfdmVhfBackend(PayloadBackend):
             arq_block_bytes=selected.arq_block_bytes,
         )
 
-        if self.profile.name != ofdm_profile:
+        if self.waveform_family == "ofdm" and self.profile.name != ofdm_profile:
             self.on_log(
                 f"OFDM VHF: profile {ofdm_profile!r} is not known to this build; "
                 f"using {self.profile.name} instead"
@@ -438,6 +458,7 @@ class OfdmVhfBackend(PayloadBackend):
             ),
             arq_block_bytes=self.adaptation_config.arq_block_bytes,
             on_log=self.on_log,
+            codec=self.codec,
         )
 
     def _make_link(self, pipe) -> OfdmLink:
@@ -456,6 +477,7 @@ class OfdmVhfBackend(PayloadBackend):
             on_status=self._publish,
             controller=self.controller,
             legacy_mode=self.legacy_mode,
+            codec=self.codec,
         )
 
     def _publish(self, status: OfdmStatus) -> None:
@@ -502,7 +524,8 @@ class OfdmVhfBackend(PayloadBackend):
                 pipe = self._make_pipe()
                 pipe.start()
                 self.on_log(
-                    f"OFDM VHF: sending #{msg.msg_id} ({len(data)} bytes) on "
+                    f"Guardian G2 {self.waveform_family.upper()}: sending "
+                    f"#{msg.msg_id} ({len(data)} bytes) on "
                     f"profile {self.profile.name}, MCS{self.mcs_index}, "
                     f"{self.controller.summary()}, "
                     f"mode={'legacy v1' if self.legacy_mode else 'adaptive v2'}"

@@ -57,7 +57,11 @@ class Mcs:
 
     @property
     def label(self) -> str:
-        pretty = {"bpsk": "BPSK", "qpsk": "QPSK", "qam16": "16-QAM", "qam64": "64-QAM"}
+        pretty = {
+            "bpsk": "BPSK", "qpsk": "QPSK", "qam16": "16-QAM",
+            "qam64": "64-QAM", "qam256": "256-QAM",
+            "apsk16": "16-APSK", "apsk32": "32-APSK",
+        }
         rate = f"{self.code_rate.numerator}/{self.code_rate.denominator}"
         return f"MCS{self.index} {pretty[self.modulation]} r={rate}"
 
@@ -78,6 +82,17 @@ MCS_TABLE: tuple[Mcs, ...] = (
     Mcs(3, "qam64", 6, Fraction(1, 2), min_snr_db=15.5),
 )
 
+# High-speed single-carrier choices.  They are intentionally absent from
+# MCS_TABLE so the established OFDM pickers and defaults do not change.  The
+# five-bit on-air MCS field already has room for them.  A separate lookup keeps
+# the original OFDM decoder strict when it sees an experimental index on air.
+SC_MCS_TABLE: tuple[Mcs, ...] = (
+    *MCS_TABLE,
+    Mcs(4, "qam256", 8, Fraction(1, 2), min_snr_db=24.0),
+    Mcs(5, "apsk16", 4, Fraction(1, 2), min_snr_db=11.0),
+    Mcs(6, "apsk32", 5, Fraction(1, 2), min_snr_db=15.0),
+)
+
 #: The mode used for the PHY header and for ACK/NACK bursts.
 HEADER_MCS = MCS_TABLE[0]
 
@@ -86,11 +101,19 @@ DEFAULT_MCS_INDEX = 1
 
 
 def mcs(index: int) -> Mcs:
-    """Look up an MCS by index."""
+    """Look up an established OFDM MCS by index."""
     for entry in MCS_TABLE:
         if entry.index == int(index):
             return entry
     raise OfdmConfigError(f"unknown MCS index {index}")
+
+
+def sc_mcs(index: int) -> Mcs:
+    """Look up an MCS supported by the experimental single-carrier PHYs."""
+    for entry in SC_MCS_TABLE:
+        if entry.index == int(index):
+            return entry
+    raise OfdmConfigError(f"unknown experimental MCS index {index}")
 
 
 def best_mcs_for(snr_db: float | None) -> Mcs | None:
