@@ -79,6 +79,16 @@ class FrameType(IntEnum):
     # Experimental, bounded advertisement of one directly-heard neighbour.
     # Older releases reject the unknown type, creating a safe discovery gap.
     LINK_ADVERT = 16
+    # Guardian Pair AutoTune is a separate, opt-in station-lab session.  It
+    # never overloads the proven mail-transfer frame meanings; an older build
+    # rejects these values and consequently never keys for calibration.
+    CAL_OFFER = 17
+    CAL_ACCEPT = 18
+    CAL_BUSY = 19
+    CAL_CANCEL = 20
+    CAL_DONE = 21
+    CAL_PROBE = 22
+    CAL_REPORT = 23
 
     @property
     def label(self) -> str:

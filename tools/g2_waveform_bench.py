@@ -118,6 +118,7 @@ def measure_transfer(profile, engine, args) -> TransferRow:
             seed=args.seed,
             ptt_turnaround=args.turnaround,
             adaptation_config=fixed,
+            train_bursts=args.train_bursts,
         )
     else:
         result = engine.run_transfer(
@@ -130,6 +131,7 @@ def measure_transfer(profile, engine, args) -> TransferRow:
             fec=selected_fec,
             burst_bytes=args.burst_bytes,
             arq_block_bytes=args.arq_block_bytes,
+            train_bursts=args.train_bursts,
         )
     goodput = float(result.throughput_bps or 0.0)
     return TransferRow(
@@ -172,6 +174,10 @@ def parser() -> argparse.ArgumentParser:
         "--arq-block-bytes", type=int, default=512, choices=(256, 512, 1024),
     )
     result.add_argument("--turnaround", type=float, default=0.25)
+    result.add_argument(
+        "--train-bursts", type=int, default=1, choices=range(1, 9),
+        help="independently decoded microbursts sent under one PTT/ACK",
+    )
     result.add_argument("--json", type=Path)
     return result
 

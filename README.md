@@ -402,13 +402,17 @@ Once the required software and map data are present, the core messaging system o
 
 # Guardian G2 soundcard modem — waveforms of Guardian's own
 
-Guardian **2.3.1** expands the experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
+Guardian **2.3.2** expands the experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
 
 Select it in *Settings → Payload* as **Guardian G2 soundcard modem (Experimental)**. VARA P2P stays the default, and a G2 modem station and a VARA station can talk to each other: the two peers agree on a transport during the ordinary control handshake, and unless *both* are configured for the built-in modem the pair falls back to VARA before anything is transmitted.
 
 The proven OFDM implementation is retained unchanged as the default. Version 2.3 adds three independently selectable experimental waveform modules: **SC-HS** (single-carrier Nyquist signaling with frequency-domain equalisation), **SC-FTN** (faster-than-Nyquist signaling at \(\tau=0.90\)), and **SEFDM** (compressed non-orthogonal multicarrier signaling). Version 2.3.1 moves SEFDM to the measured robust point \(\alpha=0.985\), adds a joint time/carrier equalizer and uses denser pilots; MCS6 32-APSK passes the reproducible realistic-channel test. The single-carrier modes add 256-QAM, 16-APSK and 32-APSK choices. All four families reuse the established framing, FEC, interleaving, CRC and selective-repeat ARQ; the existing control frames and transport negotiation stay unchanged.
 
 The reproducible software model transfers an 8 KiB payload at about **949 B/s** with the existing 2.7 kHz-class OFDM benchmark, **1,412 B/s** with SC-HS and **1,553 B/s** with SC-FTN, including framing, FEC, ACK and a 250 ms PTT turnaround. SEFDM now completes the same transfer at 654 B/s with one selective retry; it is robust enough to test, but not the capacity winner. These are channel-model results, not an on-air guarantee. The complete assumptions and radio-test procedure are in [the Guardian G2 2.3.1 waveform report](docs/G2_WAVEFORM_LAB_2.3.1.md).
+
+Version 2.3.2 adds **Operation → Station test & AutoTune**. Two consenting Guardians exchange bounded measuring bursts in both directions, test the actual radio/audio path and propose a safe per-waveform digital drive. On Windows it can also sweep the selected radio output endpoint: an A/B measurement first proves whether that mixer really changes the remote level, and the original mixer state is restored after completion, cancellation, timeout or failure. Raw JSON/CSV evidence is always saved and no recommendation is applied until the operator reviews it.
+
+The payload link can now concatenate independently CRC-protected microbursts under one PTT and receive one cumulative selective-repeat ACK. A robust POLL recovers a lost final burst or ACK. The compatibility default remains one microburst; increase it only when both peers run 2.3.2. In the deterministic 8 KiB SC-FTN/FEC 7/8 test, four microbursts per train improved modeled channel goodput from 6,166 to 7,840 bit/s (**+27.1%**). A 64 KiB run reduced data/ACK PTT pairs from 8+8 to 4+4 and improved 8,541 to 9,058 bit/s (**+6.1%**); these are lab figures, not an RF guarantee. Details are in [the Guardian G2 2.3.2 station-lab report](docs/G2_STATION_LAB_2.3.2.md).
 
 **The PHY has been on the air; adaptive format 2 still needs its first flight.** Two IC-705s, 2026-08-09: messages moved, and the audio path turned out to pass about 3 kHz — which makes `BENCH` the profile to use and `WIDE_5K` and above unreachable on that radio. The run also proved that repeated 512-byte PTT/ACK cycles, not raw PHY speed, dominated transfer time. [docs/OFDM_AIR_RESULTS_2026-08-09.md](docs/OFDM_AIR_RESULTS_2026-08-09.md) is what those radios measured, [the adaptive/selective-repeat note](docs/OFDM_G2_ADAPTIVE_ARQ.md) describes this implementation and first-test parameters, [docs/ofdm-vhf.md](docs/ofdm-vhf.md) has the full design, and [docs/OFDM_AIR_TEST.md](docs/OFDM_AIR_TEST.md) is the procedure ([česky](docs/OFDM_AIR_TEST.cs.md)).
 
@@ -428,7 +432,7 @@ This is how the modem gets tuned: a capture lets the whole receiver be re-run ov
 
 # Current status
 
-Guardian **1.0.0** was the first release where the interface and documentation were consolidated around the radio functionality developed and tested throughout the 0.6 series. **2.3.1** is the current Guardian G2 waveform-lab release.
+Guardian **1.0.0** was the first release where the interface and documentation were consolidated around the radio functionality developed and tested throughout the 0.6 series. **2.3.2** is the current Guardian G2 station-lab release.
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |

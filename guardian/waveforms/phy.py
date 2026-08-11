@@ -109,6 +109,37 @@ def _fft_valid_correlation(signal: np.ndarray, reference: np.ndarray) -> tuple[i
     return index, float(score[index])
 
 
+def correlation_candidates(signal: np.ndarray, reference: np.ndarray, *,
+                           threshold: float, limit: int = 32) -> list[int]:
+    """Strong, well-separated reference starts, returned in time order."""
+    x = np.asarray(signal, dtype=np.float64)
+    ref = np.asarray(reference, dtype=np.float64)
+    if len(x) < len(ref) or not len(ref):
+        return []
+    total = len(x) + len(ref) - 1
+    size = 1 << (total - 1).bit_length()
+    convolution = np.fft.irfft(
+        np.fft.rfft(x, size) * np.fft.rfft(ref[::-1], size), size
+    )[:total]
+    correlation = convolution[len(ref) - 1: len(x)]
+    energy = np.cumsum(np.concatenate([[0.0], x * x]))
+    windows = energy[len(ref):] - energy[:-len(ref)]
+    ref_energy = float(np.sum(ref * ref))
+    score = np.abs(correlation) / np.sqrt(
+        np.maximum(windows * ref_energy, 1e-20)
+    )
+    available = score.copy()
+    starts: list[int] = []
+    separation = max(1, len(ref) // 2)
+    for _ in range(max(1, int(limit))):
+        index = int(np.argmax(available))
+        if float(available[index]) < float(threshold):
+            break
+        starts.append(index)
+        available[max(0, index - separation):index + separation + 1] = 0.0
+    return sorted(starts)
+
+
 @dataclass(frozen=True)
 class _ScKnown:
     preamble_half: np.ndarray
@@ -195,7 +226,8 @@ class SingleCarrierModulator:
 
 
 class SingleCarrierReceiver:
-    def __init__(self, profile: WaveformProfile, samples) -> None:
+    def __init__(self, profile: WaveformProfile, samples,
+                 start_hint: int | None = None) -> None:
         self.profile = profile
         self.modulator = SingleCarrierModulator(profile)
         self.known = self.modulator.known
@@ -207,7 +239,7 @@ class SingleCarrierReceiver:
         )
         self._data = np.zeros((0, profile.points_per_block), dtype=np.complex128)
         self._variance = 1.0
-        self._acquire()
+        self._acquire(start_hint)
 
     @property
     def snr_db(self) -> float | None:
@@ -218,10 +250,14 @@ class SingleCarrierReceiver:
         return (self.metrics.channel_response if self.metrics.channel_response is not None
                 else np.ones(1, dtype=np.complex128))
 
-    def _acquire(self) -> None:
-        start, confidence = _fft_valid_correlation(
-            self.samples, self.modulator.reference()
-        )
+    def _acquire(self, start_hint: int | None = None) -> None:
+        if start_hint is None:
+            start, confidence = _fft_valid_correlation(
+                self.samples, self.modulator.reference()
+            )
+        else:
+            start, confidence = int(start_hint), 1.0
+        self.burst_start = int(start)
         self.metrics.sync_confidence = confidence
         if confidence < 0.20:
             raise ValueError("no single-carrier burst detected")
@@ -394,7 +430,8 @@ class SefdmModulator:
 
 
 class SefdmReceiver:
-    def __init__(self, profile: WaveformProfile, samples) -> None:
+    def __init__(self, profile: WaveformProfile, samples,
+                 start_hint: int | None = None) -> None:
         self.profile = profile
         self.modulator = SefdmModulator(profile)
         self.known = self.modulator.known
@@ -410,7 +447,7 @@ class SefdmReceiver:
         self._data = np.zeros((0, profile.points_per_block), dtype=np.complex128)
         self._variance = np.ones(profile.points_per_block, dtype=np.float64)
         self._demod = self._real_demodulator(0.0)
-        self._acquire()
+        self._acquire(start_hint)
 
     @property
     def snr_db(self) -> float | None:
@@ -512,10 +549,14 @@ class SefdmReceiver:
         # blocks in the burst.
         return values * np.exp(-2j * np.pi * cfo_hz * offset / self.profile.sample_rate)
 
-    def _acquire(self) -> None:
-        start, confidence = _fft_valid_correlation(
-            self.samples, self.modulator.reference()
-        )
+    def _acquire(self, start_hint: int | None = None) -> None:
+        if start_hint is None:
+            start, confidence = _fft_valid_correlation(
+                self.samples, self.modulator.reference()
+            )
+        else:
+            start, confidence = int(start_hint), 1.0
+        self.burst_start = int(start)
         self.metrics.sync_confidence = confidence
         if confidence < 0.18:
             raise ValueError("no SEFDM burst detected")
@@ -600,6 +641,8 @@ def make_modulator(profile: WaveformProfile):
             else SefdmModulator(profile))
 
 
-def make_receiver(profile: WaveformProfile, samples):
-    return (SingleCarrierReceiver(profile, samples) if profile.is_single_carrier
-            else SefdmReceiver(profile, samples))
+def make_receiver(profile: WaveformProfile, samples,
+                  start_hint: int | None = None):
+    return (SingleCarrierReceiver(profile, samples, start_hint)
+            if profile.is_single_carrier
+            else SefdmReceiver(profile, samples, start_hint))

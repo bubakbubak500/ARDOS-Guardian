@@ -111,6 +111,19 @@ def test_bitmap_is_variable_length_and_carries_remote_quality() -> None:
     assert decoded.remote_evm_rms == pytest.approx(0.135, abs=0.003)
 
 
+def test_sparse_and_bitmap_ack_represent_identical_receiver_state() -> None:
+    state = AckBitmap(4096, frozenset(set(range(4096)) - {7, 29, 2048}))
+    dense = state.encode()
+    compact = state.encode_compact()
+    assert len(compact) < len(dense) / 10
+    assert AckBitmap.decode(dense) == AckBitmap.decode(compact)
+
+
+def test_compact_ack_keeps_dense_encoding_when_errors_are_not_sparse() -> None:
+    state = AckBitmap(32, frozenset(range(0, 32, 2)))
+    assert state.encode_compact() == state.encode()
+
+
 def test_protocol_overhead_counts_v2_manifests_crcs_and_control_payloads() -> None:
     data = PhyHeader(
         OfdmFrameType.DATA, 9, block_count=4, payload_len=1536,

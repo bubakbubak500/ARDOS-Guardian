@@ -993,6 +993,12 @@ class SettingsDialog(QDialog):
              self.ofdm_arq_block_bytes),
             (dual("Timeout scale", "Násobek časového limitu"),
              self.ofdm_timeout_multiplier),
+            (dual("Microbursts per PTT", "Mikrodávky na jedno PTT"),
+             self.ofdm_train_bursts),
+            (dual("Microburst gap", "Mezera mezi mikrodávkami"),
+             self.ofdm_train_gap),
+            (dual("Maximum continuous train", "Nejdelší souvislý vlak"),
+             self.ofdm_max_train),
             (dual("Legacy comparison mode", "Starší srovnávací režim"),
              self.ofdm_legacy_mode),
             (
@@ -1160,6 +1166,28 @@ class SettingsDialog(QDialog):
             "Násobí časové limity odvozené z délky rámce. Hodnotu 1,0 měňte "
             "jen pokud měření přepínání rádia vyžaduje větší rezervu.",
         ))
+        self.ofdm_train_bursts = QComboBox()
+        for count in (1, 2, 3, 4, 6, 8):
+            self.ofdm_train_bursts.addItem(
+                dual(f"{count} (one cumulative ACK)",
+                     f"{count} (jedno souhrnné ACK)"), count
+            )
+        self.ofdm_train_bursts.setCurrentIndex(max(
+            0, self.ofdm_train_bursts.findData(self.config.ofdm_train_bursts)
+        ))
+        self.ofdm_train_bursts.setToolTip(dual(
+            "Use 1 for peers older than 2.3.2. Higher values keep independently "
+            "protected bursts under one PTT and request one cumulative ACK.",
+            "Pro protistanice starší než 2.3.2 použijte 1. Vyšší hodnoty drží "
+            "samostatně chráněné dávky pod jedním PTT a žádají jedno souhrnné ACK.",
+        ))
+        self.ofdm_train_gap = _spin(10, 200, self.config.ofdm_train_gap_ms)
+        self.ofdm_train_gap.setSuffix(" ms")
+        self.ofdm_max_train = QDoubleSpinBox()
+        self.ofdm_max_train.setRange(1.0, 60.0)
+        self.ofdm_max_train.setDecimals(1)
+        self.ofdm_max_train.setSuffix(" s")
+        self.ofdm_max_train.setValue(self.config.ofdm_max_train_seconds)
         self.ofdm_legacy_mode = QCheckBox(dual(
             "Use version-1 512 B stop-and-wait for comparison/debugging",
             "Použít verzi 1 s 512 B a potvrzením každého bloku pro srovnání",
@@ -1184,6 +1212,7 @@ class SettingsDialog(QDialog):
         self.ofdm_adaptive_fec.toggled.connect(self._sync_ofdm_controls)
         self.ofdm_adaptive_burst.toggled.connect(self._sync_ofdm_controls)
         self.ofdm_legacy_mode.toggled.connect(self._sync_ofdm_controls)
+        self.ofdm_train_bursts.currentIndexChanged.connect(self._sync_ofdm_controls)
         self.g2_waveform.currentIndexChanged.connect(self._sync_ofdm_controls)
         self.g2_mcs.currentIndexChanged.connect(self._sync_ofdm_summary)
         for picker in (
@@ -1212,6 +1241,13 @@ class SettingsDialog(QDialog):
             not legacy and self.ofdm_adaptive_burst.isChecked()
         )
         self.ofdm_arq_block_bytes.setEnabled(not legacy)
+        self.ofdm_train_bursts.setEnabled(not legacy)
+        self.ofdm_train_gap.setEnabled(
+            not legacy and int(self.ofdm_train_bursts.currentData()) > 1
+        )
+        self.ofdm_max_train.setEnabled(
+            not legacy and int(self.ofdm_train_bursts.currentData()) > 1
+        )
         self._sync_ofdm_summary()
 
     def _sync_ofdm_summary(self) -> None:
@@ -1244,9 +1280,11 @@ class SettingsDialog(QDialog):
                      else f"fixed {self.ofdm_burst_bytes.currentData()} B")
             mode = dual(
                 f"Protocol v2 selective repeat · FEC {fec} · burst {burst} · "
-                f"ARQ {self.ofdm_arq_block_bytes.currentData()} B.",
+                f"ARQ {self.ofdm_arq_block_bytes.currentData()} B · "
+                f"{self.ofdm_train_bursts.currentData()} microburst(s)/PTT.",
                 f"Protokol v2 se selektivním opakováním · FEC {fec} · dávka "
-                f"{burst} · ARQ {self.ofdm_arq_block_bytes.currentData()} B.",
+                f"{burst} · ARQ {self.ofdm_arq_block_bytes.currentData()} B · "
+                f"{self.ofdm_train_bursts.currentData()} mikrodávek/PTT.",
             )
         if family == "ofdm":
             physical = self._ofdm_summary_text(waveform)
@@ -1669,6 +1707,9 @@ class SettingsDialog(QDialog):
         cfg.ofdm_arq_block_bytes = int(self.ofdm_arq_block_bytes.currentData())
         cfg.ofdm_timeout_multiplier = self.ofdm_timeout_multiplier.value()
         cfg.ofdm_legacy_mode = self.ofdm_legacy_mode.isChecked()
+        cfg.ofdm_train_bursts = int(self.ofdm_train_bursts.currentData())
+        cfg.ofdm_train_gap_ms = self.ofdm_train_gap.value()
+        cfg.ofdm_max_train_seconds = self.ofdm_max_train.value()
         cfg.g2_waveform = str(self.g2_waveform.currentData())
         cfg.g2_mcs = int(self.g2_mcs.currentData())
         cfg.control_modem = self.control_modem.currentData()

@@ -24,7 +24,7 @@ from ..ofdm.interleaving import deinterleave, interleave
 from ..protocol import crc16
 from .config import WaveformProfile
 from .constellation import bits_per_symbol, demap_llr, map_bits
-from .phy import make_modulator, make_receiver
+from .phy import correlation_candidates, make_modulator, make_receiver
 
 
 def section_blocks(profile: WaveformProfile, byte_count: int, modulation: str,
@@ -153,9 +153,10 @@ class ExperimentalBurstCodec:
         return cls.burst_samples(profile, header, block_lengths) / profile.sample_rate
 
     @staticmethod
-    def decode_burst(profile: WaveformProfile, samples) -> DecodedBurst:
+    def decode_burst(profile: WaveformProfile, samples,
+                     start_hint: int | None = None) -> DecodedBurst:
         try:
-            receiver = make_receiver(profile, samples)
+            receiver = make_receiver(profile, samples, start_hint)
         except (ValueError, IndexError, np.linalg.LinAlgError) as exc:
             from ..ofdm.metrics import LinkMetrics
             return DecodedBurst(metrics=LinkMetrics(error=str(exc)))
@@ -295,6 +296,34 @@ class ExperimentalBurstCodec:
             failed_blocks=failed | (set(order) - set(decoded)),
             block_order=order, block_lengths=lengths, metrics=metrics,
         )
+
+    @classmethod
+    def decode_many(cls, profile: WaveformProfile, samples, *, limit: int = 32
+                    ) -> list[DecodedBurst]:
+        """Decode each independently synchronised microburst in one RX window."""
+        raw = np.asarray(samples, dtype=np.float64)
+        result: list[DecodedBurst] = []
+        modulator = make_modulator(profile)
+        threshold = 0.20 if profile.is_single_carrier else 0.18
+        starts = correlation_candidates(
+            raw, modulator.reference(), threshold=threshold, limit=limit
+        )
+        consumed_until = -1
+        for start in starts:
+            if start < consumed_until:
+                continue
+            decoded = cls.decode_burst(profile, raw[start:], start_hint=0)
+            if decoded.header is None:
+                continue
+            lengths = ([decoded.block_lengths[sequence]
+                        for sequence in decoded.block_order]
+                       if decoded.block_lengths else None)
+            span = cls.burst_samples(profile, decoded.header, lengths)
+            decoded.sample_start = start
+            decoded.sample_end = min(len(raw), start + span)
+            result.append(decoded)
+            consumed_until = decoded.sample_end
+        return result
 
 
 __all__ = [

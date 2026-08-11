@@ -15,7 +15,7 @@ datas = []
 binaries = []
 hiddenimports = []
 
-for package in ("sounddevice",):
+for package in ("sounddevice", "pycaw", "comtypes"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries

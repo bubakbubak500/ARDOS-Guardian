@@ -323,11 +323,18 @@ def test_keying_strictly_brackets_the_playback(monkeypatch) -> None:
 
     pipe = _pipe(sd, keying, monkeypatch)
     pipe.start()
-    pipe.send(np.zeros(1000))
+    timing = pipe.send(np.zeros(1000))
     pipe.stop()
 
     assert events == ["key", "play", "unkey"]
     assert not ptt.keyed
+    assert timing.waveform == pytest.approx(1000 / BENCH.sample_rate)
+    assert timing.lead >= 0.15
+    assert timing.guard == pytest.approx(0.4)
+    assert timing.tail >= 0.25
+    assert timing.keyed_total == pytest.approx(
+        timing.lead + timing.waveform + timing.guard + timing.tail
+    )
 
 
 def test_the_transmitter_is_released_when_playback_raises(monkeypatch) -> None:

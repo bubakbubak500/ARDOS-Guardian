@@ -368,6 +368,9 @@ class Orchestrator:
         self.working_channel_accept: Callable[
             [str, str], tuple[int, str] | None
         ] | None = None
+        # Station-lab frames are directed and isolated from normal message
+        # state. Operations owns their explicit operator-consent workflow.
+        self.on_calibration_frame: Callable[[ControlFrame], None] | None = None
         # Optional persistence bridge: after a restart Operations can recover
         # the reverse hop from the stored mail history and mark it delivered.
         self.delivery_receipt_route: Callable[[int, str], str] | None = None
@@ -888,6 +891,15 @@ class Orchestrator:
             return None
 
     def _dispatch(self, frame: ControlFrame) -> None:
+        if frame.type in {
+            FrameType.CAL_OFFER, FrameType.CAL_ACCEPT, FrameType.CAL_BUSY,
+            FrameType.CAL_CANCEL, FrameType.CAL_DONE, FrameType.CAL_PROBE,
+            FrameType.CAL_REPORT,
+        }:
+            if (frame.destination.strip().upper() == self.callsign
+                    and self.on_calibration_frame is not None):
+                self.on_calibration_frame(frame)
+            return
         handler = {
             FrameType.HAVE_MSG: self._rx_have_msg,
             FrameType.ACK_HAVE: self._rx_ack,
@@ -904,6 +916,24 @@ class Orchestrator:
         }.get(frame.type)
         if handler:
             handler(frame)
+
+    def send_calibration_frame(
+        self, kind: FrameType, peer: str, session_id: int, token: str = "",
+    ) -> ControlFrame:
+        """Queue one direct station-lab frame without creating a mail session."""
+        if kind not in {
+            FrameType.CAL_OFFER, FrameType.CAL_ACCEPT, FrameType.CAL_BUSY,
+            FrameType.CAL_CANCEL, FrameType.CAL_DONE, FrameType.CAL_PROBE,
+            FrameType.CAL_REPORT,
+        }:
+            raise ValueError("not a calibration frame type")
+        frame = ControlFrame(
+            type=kind, source=self.callsign,
+            destination=peer.strip().upper(), next_hop=str(token),
+            message_id=int(session_id) & 0xFFFFFFFF, ttl=1,
+        )
+        self.transport.send(frame)
+        return frame
 
     # ------------------------------------------------------------------ #
     #  Alerts (net-wide broadcast, flooded)                               #

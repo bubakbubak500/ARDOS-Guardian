@@ -388,6 +388,48 @@ def help_topics() -> list[HelpTopic]:
             "vara fm hf p2p winlink payload afsk mfsk přenos",
         ),
         _topic(
+            "6a. Station test and AutoTune",
+            "6a. Test stanice a AutoTune",
+            """
+            <h2>Station test and AutoTune</h2>
+            <p>Open <b>Operation → Station test &amp; AutoTune</b>, enter one
+            directly reachable Guardian callsign and choose Quick Tune or Full
+            characterizer. The peer sees an offer and must accept it locally.
+            Guardian then sends bounded measuring bursts in both directions and
+            records frame validity, SNR, EVM, level, clipping and goodput.</p>
+            <p>Quick Tune varies the modem's digital drive. On Windows it may
+            also vary the selected dedicated radio output, but first performs an
+            A/B check to prove that this mixer really changes the remote level.
+            The original mixer state is restored on completion, cancel, timeout
+            and failure. AutoTune cannot certify RF occupied bandwidth; verify
+            final deviation and adjacent-channel emissions with appropriate
+            radio or measurement equipment.</p>
+            <p>Every result is saved as JSON and CSV. Unsafe or unreliable rows
+            cannot become the recommendation, and nothing is permanently
+            applied until you review the report and press <b>Apply measured
+            profile</b>.</p>
+            """,
+            """
+            <h2>Test stanice a AutoTune</h2>
+            <p>Otevřete <b>Provoz → Test stanice a AutoTune</b>, zadejte značku
+            přímo dostupného Guardianu a vyberte Rychlé ladění nebo Úplný test.
+            Protistanice uvidí nabídku a musí ji místně přijmout. Guardian pak
+            vyšle omezenou sadu měřicích burstů v obou směrech a zaznamená
+            platnost rámce, SNR, EVM, úroveň, clipping a goodput.</p>
+            <p>Rychlé ladění mění digitální úroveň modemu. Ve Windows může měnit
+            i vyhrazený výstup rádia, nejprve však A/B testem ověří, že tento
+            mixer opravdu mění vzdálenou úroveň. Původní stav mixeru obnoví po
+            dokončení, zrušení, timeoutu i chybě. AutoTune neumí certifikovat
+            obsazenou RF šířku; konečný zdvih a emise do sousedního kanálu ověřte
+            rádiem nebo vhodným měřidlem.</p>
+            <p>Každý výsledek se uloží do JSON a CSV. Nebezpečný nebo
+            nespolehlivý bod se nemůže stát doporučením a trvale se nic nezmění,
+            dokud report nezkontrolujete a nestisknete <b>Použít změřený
+            profil</b>.</p>
+            """,
+            "autotune station lab calibration windows volume deviation clipping kalibrace hlasitost zdvih",
+        ),
+        _topic(
             "7. Mail and standardized templates",
             "7. Pošta a normované šablony",
             """

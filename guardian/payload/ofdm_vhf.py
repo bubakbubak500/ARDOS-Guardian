@@ -40,6 +40,7 @@ from ..ofdm.coding import FecProfile, fec_profile, fec_spec
 from ..ofdm.framing import OfdmFrameType, burst_samples
 from ..waveforms.config import PROFILES as EXPERIMENTAL_PROFILES
 from ..waveforms.framing import ExperimentalBurstCodec
+from ..timing import RxTiming, TxTiming
 from .base import DoneCb, PayloadBackend
 
 #: Extra silence appended after a burst, for the same reason the control modem
@@ -126,6 +127,8 @@ class RadioAudioPipe:
     def __init__(self, profile, *, input_device, output_device,
                  ptt: Callable[[bool], None],
                  tx_lead_ms: int = 300, tx_tail_ms: int = 100,
+                 tx_scale: float = 1.0,
+                 train_bursts: int = 1, train_gap_ms: int = 30,
                  max_burst_bytes: int = 8192, arq_block_bytes: int = 512,
                  on_log: Callable[[str], None] | None = None,
                  codec=None) -> None:
@@ -135,6 +138,9 @@ class RadioAudioPipe:
         self.ptt = ptt
         self.tx_lead = max(0.0, tx_lead_ms / 1000.0)
         self.tx_tail = max(0.0, tx_tail_ms / 1000.0)
+        self.tx_scale = min(1.0, max(0.05, float(tx_scale)))
+        self.train_bursts = max(1, min(8, int(train_bursts)))
+        self.train_gap = max(0.01, min(0.20, int(train_gap_ms) / 1000.0))
         self.max_burst_bytes = max(1, int(max_burst_bytes))
         self.arq_block_bytes = max(1, int(arq_block_bytes))
         self.on_log = on_log or (lambda message: None)
@@ -149,6 +155,7 @@ class RadioAudioPipe:
         self._buffer: list[np.ndarray] = []
         self._floor = 0.0
         self._floor_seen = 0.0
+        self.last_rx_timing: RxTiming | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -215,6 +222,7 @@ class RadioAudioPipe:
         the ARQ gives an answer, so the link would have stalled on every block.
         """
         rate = self.profile.sample_rate
+        wait_started = time.monotonic()
         block = max(1, int(rate * ANALYSIS_BLOCK_SECONDS))
         longest = self.longest_burst_samples() + int(rate * (HANGOVER_SECONDS + 0.5))
         hangover = int(rate * HANGOVER_SECONDS)
@@ -240,7 +248,15 @@ class RadioAudioPipe:
                     collected = np.concatenate([collected, chunk])
                     quiet = quiet + block if level <= self._trigger_level() else 0
                     if quiet >= hangover or len(collected) >= longest:
-                        return np.concatenate([history, collected])
+                        result = np.concatenate([history, collected])
+                        wall = time.monotonic() - wait_started
+                        self.last_rx_timing = RxTiming(
+                            trigger_wait=max(0.0, wall - len(result) / rate),
+                            capture=len(result) / rate,
+                            hangover=min(HANGOVER_SECONDS, quiet / rate),
+                            ready_wall_clock=wall,
+                        )
+                        return result
                 else:
                     # Track the floor first, and every block -- deciding whether
                     # this one is loud is meaningless until there is something to
@@ -254,8 +270,20 @@ class RadioAudioPipe:
                         history = np.concatenate([history, chunk])[-pretrigger:]
             if triggered:
                 if time.monotonic() - last_audio >= STREAM_STALL_SECONDS:
-                    return np.concatenate([history, collected])
+                    result = np.concatenate([history, collected])
+                    wall = time.monotonic() - wait_started
+                    self.last_rx_timing = RxTiming(
+                        trigger_wait=max(0.0, wall - len(result) / rate),
+                        capture=len(result) / rate,
+                        hangover=min(HANGOVER_SECONDS, quiet / rate),
+                        ready_wall_clock=wall,
+                    )
+                    return result
             elif time.monotonic() >= deadline:
+                self.last_rx_timing = RxTiming(
+                    trigger_wait=time.monotonic() - wait_started,
+                    ready_wall_clock=time.monotonic() - wait_started,
+                )
                 return None
             time.sleep(0.005)
 
@@ -311,11 +339,14 @@ class RadioAudioPipe:
         )
         if isinstance(self.codec, OfdmBurstCodec):
             return burst_samples(self.profile, header, lengths)
-        return self.codec.burst_samples(self.profile, header, lengths)
+        one = self.codec.burst_samples(self.profile, header, lengths)
+        return (one * self.train_bursts
+                + int(self.profile.sample_rate * self.train_gap)
+                * max(0, self.train_bursts - 1))
 
     # -- transmit -----------------------------------------------------------
 
-    def send(self, samples: np.ndarray) -> None:
+    def send(self, samples: np.ndarray) -> TxTiming:
         """Key the radio, play the burst, unkey. PTT is released on every path.
 
         The keying itself is `modem.audio.transmit_waveform`, which is also what
@@ -331,18 +362,30 @@ class RadioAudioPipe:
             with self._buffer_lock:
                 self._buffer = []
 
+        lead = max(self.tx_lead, PTT_LEAD_SECONDS)
+        tail = max(self.tx_tail, PTT_TAIL_SECONDS)
+        started = time.monotonic()
         with self._tx_lock:
             transmit_waveform(
-                self._sd, samples,
+                self._sd, np.asarray(samples, dtype=np.float64) * self.tx_scale,
                 device=self.output_device,
                 sample_rate=self.profile.sample_rate,
                 ptt=self.ptt,
-                lead_seconds=max(self.tx_lead, PTT_LEAD_SECONDS),
-                tail_seconds=max(self.tx_tail, PTT_TAIL_SECONDS),
+                lead_seconds=lead,
+                tail_seconds=tail,
                 guard_seconds=TX_GUARD_SECONDS,
                 before_play=clear_receive_buffer,
                 after_release=clear_receive_buffer,
             )
+        return TxTiming(
+            lead=lead,
+            waveform=len(samples) / self.profile.sample_rate,
+            guard=TX_GUARD_SECONDS,
+            tail=tail,
+            keyed_total=lead + len(samples) / self.profile.sample_rate
+                        + TX_GUARD_SECONDS + tail,
+            wall_clock=time.monotonic() - started,
+        )
 
 
 class OfdmVhfBackend(PayloadBackend):
@@ -360,7 +403,10 @@ class OfdmVhfBackend(PayloadBackend):
                  ofdm_arq_block_bytes: int = 512,
                  ofdm_timeout_multiplier: float = 1.0,
                  ofdm_legacy_mode: bool = False,
+                 ofdm_train_bursts: int = 1, ofdm_train_gap_ms: int = 30,
+                 ofdm_max_train_seconds: float = 20.0,
                  g2_waveform: str = "ofdm", g2_mcs: int = 2,
+                 g2_tx_scale: float = 1.0,
                  audio_input=None, audio_output=None,
                  ptt: Callable[[bool], None] | None = None,
                  ptt_turnaround_ms: int = 0,
@@ -381,6 +427,7 @@ class OfdmVhfBackend(PayloadBackend):
             self.codec = OfdmBurstCodec()
         self.requested_profile = ofdm_profile
         self.mcs_index = int(ofdm_mcs if self.waveform_family == "ofdm" else g2_mcs)
+        self.tx_scale = min(1.0, max(0.05, float(g2_tx_scale)))
         self.tx_lead_ms = int(ofdm_tx_lead_ms)
         self.tx_tail_ms = int(ofdm_tx_tail_ms)
         self.max_retries = int(ofdm_max_retries)
@@ -409,6 +456,11 @@ class OfdmVhfBackend(PayloadBackend):
         )
         self.timeout_multiplier = max(0.5, min(4.0, float(ofdm_timeout_multiplier)))
         self.legacy_mode = bool(ofdm_legacy_mode)
+        self.train_bursts = max(1, min(8, int(ofdm_train_bursts)))
+        self.train_gap_ms = max(10, min(200, int(ofdm_train_gap_ms)))
+        self.max_train_seconds = max(
+            1.0, min(60.0, float(ofdm_max_train_seconds))
+        )
         self.audio_input = audio_input
         self.audio_output = audio_output
         self.ptt = ptt or (lambda enabled: None)
@@ -452,6 +504,9 @@ class OfdmVhfBackend(PayloadBackend):
             ptt=self.ptt,
             tx_lead_ms=self.tx_lead_ms,
             tx_tail_ms=self.tx_tail_ms,
+            tx_scale=self.tx_scale,
+            train_bursts=self.train_bursts,
+            train_gap_ms=self.train_gap_ms,
             max_burst_bytes=max(
                 self.adaptation_config.max_burst_bytes,
                 self.adaptation_config.fixed_burst_bytes,
@@ -477,6 +532,9 @@ class OfdmVhfBackend(PayloadBackend):
             on_status=self._publish,
             controller=self.controller,
             legacy_mode=self.legacy_mode,
+            train_bursts=self.train_bursts,
+            train_gap_seconds=self.train_gap_ms / 1000.0,
+            max_train_seconds=self.max_train_seconds,
             codec=self.codec,
         )
 

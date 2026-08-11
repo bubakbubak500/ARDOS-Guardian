@@ -40,7 +40,8 @@ from .config import (BENCH, DEFAULT_MCS_INDEX, DEFAULT_PROFILE_NAME, HEADER_MCS,
 from .framing import (AckBitmap, DecodedBurst, FRAME_VERSION, HEADER_BYTES,
                       LEGACY_FRAME_VERSION, OfdmFrameError, OfdmFrameType,
                       PhyHeader, SubBlock, build_burst, burst_duration,
-                      decode_burst, protocol_overhead_bytes, split_blocks)
+                      decode_burst, decode_many, protocol_overhead_bytes,
+                      split_blocks)
 from .link import HalfDuplexPipe, OfdmLink, SimulatedDuplexPipe, simulated_pair
 from .metrics import AdaptationState, LinkMetrics, OfdmStatus
 from .phy import BurstReceiver, OfdmModulator
@@ -83,6 +84,7 @@ __all__ = [
     "build_burst",
     "burst_duration",
     "decode_burst",
+    "decode_many",
     "effective_rate",
     "encoded_bits",
     "fec_profile",

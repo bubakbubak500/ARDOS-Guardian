@@ -149,6 +149,77 @@ def test_a_message_of_any_size_arrives_intact(size: int, blocks: int) -> None:
     assert receiver.status.rx_bytes == size
 
 
+def test_fast_selective_repeat_sends_two_microbursts_under_one_ptt_and_ack():
+    payload = _payload(8192)
+    near, far = simulated_pair(
+        BENCH, ChannelSpec(snr_db=20.0, delay=300, trailing=800), seed=SEED
+    )
+    sender = OfdmLink(
+        BENCH, near, mcs_index=1, train_bursts=2,
+        ptt_turnaround=TURNAROUND, timeout_margin=MARGIN,
+    )
+    receiver = OfdmLink(
+        BENCH, far, mcs_index=1, train_bursts=2,
+        ptt_turnaround=TURNAROUND, timeout_margin=MARGIN,
+    )
+    got = {}
+    listener = threading.Thread(
+        target=lambda: got.__setitem__("data", receiver.receive_message(msg_id=808)),
+        daemon=True,
+    )
+    listener.start()
+    assert sender.send_message(808, payload)
+    listener.join(timeout=180)
+    assert not listener.is_alive()
+    assert got["data"] == payload
+    assert sender.status.data_bursts == 4
+    assert near.transmissions == 2       # four microbursts, two PTT cycles
+    assert far.transmissions == 2        # one cumulative ACK per train
+
+
+def test_lost_final_microburst_is_recovered_by_poll_then_sparse_retry():
+    payload = _payload(4096)
+    near, far = simulated_pair(
+        BENCH, ChannelSpec(snr_db=22.0, delay=300, trailing=800), seed=SEED
+    )
+
+    def lose_final_microburst(count, samples):
+        if count != 1:
+            return samples
+        damaged = samples.copy()
+        header = PhyHeader(
+            OfdmFrameType.DATA, 809, block_count=8, mcs=1,
+            payload_len=2048, subblock_count=4,
+        )
+        one = int(burst_duration(BENCH, header, [512] * 4) * BENCH.sample_rate)
+        second = 300 + one + int(0.03 * BENCH.sample_rate)
+        damaged[second:] = 0.0
+        return damaged
+
+    near.damage = lose_final_microburst
+    sender = OfdmLink(
+        BENCH, near, mcs_index=1, train_bursts=2,
+        ptt_turnaround=TURNAROUND, timeout_margin=8.0,
+    )
+    receiver = OfdmLink(
+        BENCH, far, mcs_index=1, train_bursts=2,
+        ptt_turnaround=TURNAROUND, timeout_margin=8.0,
+    )
+    got = {}
+    listener = threading.Thread(
+        target=lambda: got.__setitem__("data", receiver.receive_message(msg_id=809)),
+        daemon=True,
+    )
+    listener.start()
+    assert sender.send_message(809, payload)
+    listener.join(timeout=180)
+    assert not listener.is_alive()
+    assert got["data"] == payload
+    assert sender.status.retries == 1
+    assert near.transmissions == 3       # train, POLL, missing microburst
+    assert far.transmissions == 2        # POLL state and final complete ACK
+
+
 def test_a_duplicate_block_is_reacknowledged_and_dropped() -> None:
     # A lost ACK makes the sender repeat a block the receiver already has. It must
     # answer again -- silence would strand the sender -- and must not append the

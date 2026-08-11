@@ -329,7 +329,8 @@ def run_transfer(profile: OfdmProfile, mcs_index: int = 1, *,
                  payload_bytes: int = 4096, snr_db: float = 15.0,
                  seed: int = 0xA5, ptt_turnaround: float = 0.25,
                  timeout: float = 600.0, on_log=None,
-                 adaptation_config: AdaptationConfig | None = None) -> TransferResult:
+                 adaptation_config: AdaptationConfig | None = None,
+                 train_bursts: int = 1) -> TransferResult:
     """Move a whole message over the simulated duplex link and report the outcome."""
     config = adaptation_config or AdaptationConfig()
     sender_controller = LinkAdaptationController(config, mcs_index=mcs_index)
@@ -356,10 +357,12 @@ def run_transfer(profile: OfdmProfile, mcs_index: int = 1, *,
 
     sender = OfdmLink(profile, near, mcs_index=mcs_index,
                       ptt_turnaround=ptt_turnaround, timeout_margin=0.5,
-                      on_log=record("tx"), controller=sender_controller)
+                      on_log=record("tx"), controller=sender_controller,
+                      train_bursts=train_bursts)
     receiver = OfdmLink(profile, far, mcs_index=mcs_index,
                         ptt_turnaround=ptt_turnaround, timeout_margin=0.5,
-                        on_log=record("rx"), controller=receiver_controller)
+                        on_log=record("rx"), controller=receiver_controller,
+                        train_bursts=train_bursts)
 
     received: dict[str, bytes | None] = {}
     listener = threading.Thread(

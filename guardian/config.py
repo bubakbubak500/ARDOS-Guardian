@@ -249,11 +249,27 @@ class StationConfig:
     ofdm_arq_block_bytes: int = 512
     ofdm_timeout_multiplier: float = 1.0
     ofdm_legacy_mode: bool = False      # version-1 512 B stop-and-wait comparison
+    # Version-2 fast selective repeat. Values above one concatenate this many
+    # independently protected microbursts under a single PTT and defer the
+    # cumulative ACK until the train ends. Keep one for mixed older peers.
+    ofdm_train_bursts: int = 1
+    ofdm_train_gap_ms: int = 30
+    ofdm_max_train_seconds: float = 20.0
     # Physical waveform under the Guardian G2 soundcard transport.  "ofdm" is
     # the verified default; the other families are explicit opt-in experiments
     # which keep the same control handshake, framing and selective-repeat ARQ.
     g2_waveform: str = "ofdm"           # ofdm | sc_hs | sc_ftn | sefdm
     g2_mcs: int = 2                     # experimental-family modulation index
+    # Calibrated digital drive is deliberately per waveform: their crest
+    # factors differ enough that one safe RMS value would waste SC-FTN headroom
+    # or clip SEFDM. Values are linear full-scale multipliers.
+    g2_tx_scales: dict[str, float] = field(default_factory=lambda: {
+        "ofdm": 1.0, "sc_hs": 1.0, "sc_ftn": 1.0, "sefdm": 1.0,
+    })
+    calibration_allowlist: list[str] = field(default_factory=list)
+    calibration_auto_accept: bool = False
+    calibration_windows_gain: bool = False
+    calibration_max_seconds: int = 180
 
     # Control-burst channel: "off" (idle) | "audio" (real RF via the radio).
     control_channel: str = "off"
@@ -392,6 +408,31 @@ class StationConfig:
             clean.pop("ofdm_arq_block_bytes", None)
         if clean.get("g2_waveform") not in {"ofdm", "sc_hs", "sc_ftn", "sefdm"}:
             clean.pop("g2_waveform", None)
+        scales = clean.get("g2_tx_scales")
+        if isinstance(scales, dict):
+            try:
+                clean["g2_tx_scales"] = {
+                    name: min(1.0, max(0.05, float(scales.get(name, 1.0))))
+                    for name in ("ofdm", "sc_hs", "sc_ftn", "sefdm")
+                }
+            except (TypeError, ValueError):
+                clean.pop("g2_tx_scales", None)
+        else:
+            clean.pop("g2_tx_scales", None)
+        values = clean.get("calibration_allowlist")
+        if isinstance(values, list):
+            clean["calibration_allowlist"] = [
+                str(value).strip().upper() for value in values
+                if str(value).strip()
+            ]
+        else:
+            clean.pop("calibration_allowlist", None)
+        try:
+            clean["calibration_max_seconds"] = min(
+                900, max(30, int(clean.get("calibration_max_seconds", 180)))
+            )
+        except (TypeError, ValueError):
+            clean.pop("calibration_max_seconds", None)
         try:
             experimental_mcs = int(clean.get("g2_mcs", 2))
         except (TypeError, ValueError):
@@ -409,6 +450,20 @@ class StationConfig:
             clean.pop("ofdm_timeout_multiplier", None)
         else:
             clean["ofdm_timeout_multiplier"] = min(4.0, max(0.5, timeout_multiplier))
+        try:
+            clean["ofdm_train_bursts"] = min(
+                8, max(1, int(clean.get("ofdm_train_bursts", 1)))
+            )
+            clean["ofdm_train_gap_ms"] = min(
+                200, max(10, int(clean.get("ofdm_train_gap_ms", 30)))
+            )
+            clean["ofdm_max_train_seconds"] = min(
+                60.0, max(1.0, float(clean.get("ofdm_max_train_seconds", 20.0)))
+            )
+        except (TypeError, ValueError):
+            for name in ("ofdm_train_bursts", "ofdm_train_gap_ms",
+                         "ofdm_max_train_seconds"):
+                clean.pop(name, None)
         return cls(**clean)
 
     def save(self, path: Path | str | None = None) -> Path:

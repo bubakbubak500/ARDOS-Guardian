@@ -49,9 +49,12 @@ _CRC = struct.Struct(">H")
 HEADER_BYTES = _HEADER.size + _CRC.size
 
 _SUBBLOCK_MASK = 0x3F
+DEFER_ACK_FLAG = 0x40
 _RETRANSMISSION_FLAG = 0x80
 _MANIFEST_ENTRY = struct.Struct(">HH")
 _ACK_PREFIX = struct.Struct(">HbB")
+_ACK_SPARSE = 0x53
+_ACK_SPARSE_COUNT = struct.Struct(">H")
 MAX_ARQ_BLOCK_BYTES = 1024
 
 
@@ -63,6 +66,7 @@ class OfdmFrameType(IntEnum):
     DATA = 1
     ACK = 2
     NACK = 3
+    POLL = 4
 
     @property
     def label(self) -> str:
@@ -180,6 +184,11 @@ class PhyHeader:
             parts.append(f"burst {self.block_seq}")
         return " ".join(parts)
 
+    @property
+    def defer_ack(self) -> bool:
+        """This DATA burst is followed by another under the same PTT."""
+        return bool(self.flags & DEFER_ACK_FLAG)
+
 
 @dataclass(frozen=True)
 class SubBlock:
@@ -212,11 +221,41 @@ class AckBitmap:
                max(0, min(254, round(float(self.remote_evm_rms) * 200.0))))
         return _ACK_PREFIX.pack(self.total_blocks, snr, evm) + bytes(bitmap)
 
+    def encode_compact(self) -> bytes:
+        """Use a sparse missing-list only when it is shorter than the bitmap."""
+        dense = self.encode()
+        missing = sorted(set(range(self.total_blocks)) - set(self.received))
+        prefix = dense[:_ACK_PREFIX.size]
+        sparse = (prefix + bytes([_ACK_SPARSE])
+                  + _ACK_SPARSE_COUNT.pack(len(missing))
+                  + b"".join(struct.pack(">H", value) for value in missing))
+        return sparse if len(sparse) < len(dense) else dense
+
     @classmethod
     def decode(cls, raw: bytes) -> "AckBitmap":
         if len(raw) < _ACK_PREFIX.size:
             raise OfdmFrameError("ACK bitmap is truncated")
         total, snr, evm = _ACK_PREFIX.unpack_from(raw)
+        if len(raw) > _ACK_PREFIX.size and raw[_ACK_PREFIX.size] == _ACK_SPARSE:
+            pos = _ACK_PREFIX.size + 1
+            if len(raw) < pos + _ACK_SPARSE_COUNT.size:
+                raise OfdmFrameError("sparse ACK is truncated")
+            count = _ACK_SPARSE_COUNT.unpack_from(raw, pos)[0]
+            pos += _ACK_SPARSE_COUNT.size
+            if total < 1 or len(raw) != pos + count * 2:
+                raise OfdmFrameError("sparse ACK has the wrong length")
+            missing = {
+                struct.unpack_from(">H", raw, pos + index * 2)[0]
+                for index in range(count)
+            }
+            if any(value >= total for value in missing) or len(missing) != count:
+                raise OfdmFrameError("sparse ACK contains an invalid block")
+            return cls(
+                total_blocks=total,
+                received=frozenset(set(range(total)) - missing),
+                remote_snr_db=None if snr == -128 else snr / 2.0,
+                remote_evm_rms=None if evm == 255 else evm / 200.0,
+            )
         expected = _ACK_PREFIX.size + (total + 7) // 8
         if total < 1 or len(raw) != expected:
             raise OfdmFrameError(
@@ -465,6 +504,8 @@ class DecodedBurst:
     block_order: tuple[int, ...] = ()
     block_lengths: dict[int, int] = None  # type: ignore[assignment]
     metrics: LinkMetrics = None  # type: ignore[assignment]
+    sample_start: int | None = None
+    sample_end: int | None = None
 
     def __post_init__(self) -> None:
         if self.metrics is None:
@@ -520,6 +561,29 @@ def decode_burst(profile: OfdmProfile, samples) -> DecodedBurst:
     return fallback if fallback is not None else DecodedBurst(
         metrics=LinkMetrics(error="no burst detected")
     )
+
+
+def decode_many(profile: OfdmProfile, samples, *, limit: int = 32) -> list[DecodedBurst]:
+    """Decode every independently synchronised burst in one capture window."""
+    modulator = OfdmModulator(profile)
+    found = candidates(samples, profile, modulator, limit=max(1, int(limit)))
+    decoded: list[DecodedBurst] = []
+    consumed_until = -1
+    for sync in found:
+        if sync.burst_start < consumed_until:
+            continue
+        attempt = _decode_at(profile, sync)
+        if attempt.header is None:
+            continue
+        lengths = ([attempt.block_lengths[sequence]
+                    for sequence in attempt.block_order]
+                   if attempt.block_lengths else None)
+        span = burst_samples(profile, attempt.header, lengths)
+        attempt.sample_start = sync.burst_start
+        attempt.sample_end = sync.burst_start + span
+        decoded.append(attempt)
+        consumed_until = attempt.sample_end
+    return decoded
 
 
 def _decode_at(profile: OfdmProfile, sync) -> DecodedBurst:

@@ -48,6 +48,7 @@ from .inputs import FrequencySpinBox
 from .log_workspace import LogWorkspace
 from .mail_workspace import MailWorkspace
 from .modem_workspace import ModemWorkspace
+from .station_lab_workspace import StationLabWorkspace
 from .network_workspace import NetworkWorkspace
 from .readiness_dialog import ReadinessDialog
 from .runtime import ShellRuntime
@@ -236,6 +237,9 @@ class GuardianMainWindow(QMainWindow):
         modem_test = QAction(tr("menu.modem"), self)
         modem_test.triggered.connect(lambda: self._show_workspace("modem"))
         tools_menu.addAction(modem_test)
+        station_lab = QAction(tr("menu.station_lab"), self)
+        station_lab.triggered.connect(lambda: self._show_workspace("station_lab"))
+        tools_menu.addAction(station_lab)
         tools_menu.addSeparator()
         updates = QAction(tr("menu.updates"), self)
         updates.triggered.connect(self._check_for_updates)
@@ -300,6 +304,7 @@ class GuardianMainWindow(QMainWindow):
             "network": NetworkWorkspace(self.runtime),
             "log": LogWorkspace(self.runtime),
             "modem": ModemWorkspace(self.runtime),
+            "station_lab": StationLabWorkspace(self.runtime),
         }
         for workspace in self.workspace_names.values():
             self.workspace_stack.addWidget(workspace)
@@ -624,7 +629,9 @@ class GuardianMainWindow(QMainWindow):
         if workspace is None:
             return
         self.workspace_stack.setCurrentWidget(workspace)
-        self.workspace_actions[name].setChecked(True)
+        action = self.workspace_actions.get(name)
+        if action is not None:
+            action.setChecked(True)
         refresh = getattr(workspace, "refresh", None)
         if callable(refresh):
             refresh()
@@ -634,6 +641,7 @@ class GuardianMainWindow(QMainWindow):
             "network": tr("menu.network"),
             "log": tr("menu.log"),
             "modem": tr("menu.modem"),
+            "station_lab": tr("menu.station_lab"),
         }
         self.statusBar().showMessage(
             tr("workspace.status", name=display_names[name])

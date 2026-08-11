@@ -117,9 +117,18 @@ class OfdmStatus:
     protocol_overhead_bytes: int = 0
     data_bursts: int = 0
     ack_bursts: int = 0
+    ptt_cycles: int = 0
     data_airtime_seconds: float = 0.0
     ack_airtime_seconds: float = 0.0
     turnaround_seconds: float = 0.0
+    tx_lead_seconds: float = 0.0
+    tx_guard_seconds: float = 0.0
+    tx_tail_seconds: float = 0.0
+    keyed_seconds: float = 0.0
+    rx_trigger_wait_seconds: float = 0.0
+    rx_capture_seconds: float = 0.0
+    rx_hangover_seconds: float = 0.0
+    rx_decode_seconds: float = 0.0
     elapsed_seconds: float = 0.0
     goodput_bps: float | None = None
     tx_bytes: int = 0
@@ -131,6 +140,12 @@ class OfdmStatus:
     #: Measured from acknowledged bytes over elapsed time. `None` until enough
     #: has moved to divide by -- never a nominal figure from the profile.
     est_bitrate_bps: float | None = None
+
+    @property
+    def keyed_duty_cycle(self) -> float | None:
+        if self.elapsed_seconds <= 0.0:
+            return None
+        return min(1.0, max(0.0, self.keyed_seconds / self.elapsed_seconds))
 
     @property
     def percent(self) -> int:

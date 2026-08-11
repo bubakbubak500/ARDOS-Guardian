@@ -141,7 +141,27 @@ def test_ofdm_panel_renders_profile_retry_and_goodput_details() -> None:
     assert "6/8" in text
     assert "1024 B" in text
     assert "1995 bit/s" in text
-    assert "2440 bit/s" not in text
+    assert "channel 2440 bit/s" in text
+
+
+def test_ofdm_panel_separates_phy_channel_wall_and_ptt_metrics() -> None:
+    _application()
+    panel = TransferPanel()
+    status = OfdmStatus(
+        direction="send", tx_bytes=4000, total_bytes=8000,
+        goodput_bps=1600.0, est_bitrate_bps=2400.0,
+        data_airtime_seconds=10.0, keyed_seconds=12.0,
+        elapsed_seconds=20.0, ptt_cycles=3,
+    )
+
+    panel.apply(transfer_state(_snapshot(), True, status))
+
+    text = panel.detail.text()
+    assert "Transfer speed: 1600 bit/s" in text
+    assert "PHY payload 3200 bit/s" in text
+    assert "channel 2400 bit/s" in text
+    assert "TX duty 60%" in text
+    assert "PTT 3" in text
 
 
 def test_vara_send_panel_is_visible_with_send_title_and_speed() -> None:

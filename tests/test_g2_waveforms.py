@@ -12,7 +12,8 @@ from guardian.ofdm.channel import Channel, ChannelSpec
 from guardian.ofdm.coding import FecProfile
 from guardian.ofdm.config import (BENCH, SC_MCS_TABLE, OfdmConfigError, mcs,
                                   sc_mcs)
-from guardian.ofdm.framing import OfdmFrameError, OfdmFrameType, PhyHeader
+from guardian.ofdm.framing import (OfdmFrameError, OfdmFrameType, PhyHeader,
+                                   SubBlock)
 from guardian.ofdm.link import OfdmLink, simulated_pair
 from guardian.payload import make_backend
 from guardian.waveforms.config import SC_FTN_2K7, SC_HS_2K7, SEFDM_2K7
@@ -33,6 +34,25 @@ def test_profiles_are_independent_and_fit_the_voice_channel() -> None:
         assert profile.occupied_bandwidth <= 2_700.0
         assert profile.sample_rate == 48_000
     assert SC_HS_2K7.ftn_tau == pytest.approx(1.0)
+
+
+def test_experimental_decode_many_recovers_sc_ftn_train():
+    codec = ExperimentalBurstCodec()
+    payloads = [bytes([17 + index]) * 72 for index in range(2)]
+    bursts = []
+    for index, payload in enumerate(payloads):
+        header = PhyHeader(
+            OfdmFrameType.DATA, 33, index, 2, 1, len(payload),
+            subblock_count=1,
+        )
+        bursts.append(codec.build_burst(
+            SC_FTN_2K7, header, blocks=[SubBlock(index, payload)]
+        ))
+    gap = np.zeros(int(SC_FTN_2K7.sample_rate * 0.03))
+    decoded = codec.decode_many(
+        SC_FTN_2K7, np.concatenate([gap, bursts[0], gap, bursts[1], gap])
+    )
+    assert [item.blocks[index] for index, item in enumerate(decoded)] == payloads
     assert SC_FTN_2K7.ftn_tau == pytest.approx(0.9)
     assert SC_FTN_2K7.symbol_rate > SC_HS_2K7.symbol_rate
     assert SEFDM_2K7.sefdm_alpha < 1.0

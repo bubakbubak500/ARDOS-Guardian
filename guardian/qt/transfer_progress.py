@@ -46,6 +46,10 @@ class TransferState:
     retries: int = 0
     retransmitted_bytes: int = 0
     goodput_bps: float | None = None
+    channel_goodput_bps: float | None = None
+    phy_payload_bps: float | None = None
+    keyed_duty_cycle: float | None = None
+    ptt_cycles: int = 0
     last_burst_blocks: int = 0
     last_first_pass_ok: int = 0
 
@@ -96,6 +100,14 @@ def transfer_state(snapshot, payload_active: bool, ofdm_status=None) -> Transfer
             goodput_bps=(getattr(ofdm_status, "goodput_bps", None)
                          if getattr(ofdm_status, "goodput_bps", None) is not None
                          else getattr(ofdm_status, "est_bitrate_bps", None)),
+            channel_goodput_bps=getattr(ofdm_status, "est_bitrate_bps", None),
+            phy_payload_bps=(
+                moved * 8.0 / float(getattr(ofdm_status, "data_airtime_seconds", 0.0))
+                if moved and float(getattr(ofdm_status, "data_airtime_seconds", 0.0)) > 0
+                else None
+            ),
+            keyed_duty_cycle=getattr(ofdm_status, "keyed_duty_cycle", None),
+            ptt_cycles=int(getattr(ofdm_status, "ptt_cycles", 0) or 0),
             last_burst_blocks=int(
                 getattr(ofdm_status, "last_burst_blocks", 0) or 0
             ),
@@ -257,4 +269,24 @@ class TransferPanel(QWidget):
                 f"{state.retries} opakování / {state.retransmitted_bytes} B",
             )
             lines.append(live)
+            rates = []
+            if state.phy_payload_bps is not None:
+                rates.append(dual(
+                    f"PHY payload {state.phy_payload_bps:.0f} bit/s",
+                    f"PHY payload {state.phy_payload_bps:.0f} bit/s",
+                ))
+            if state.channel_goodput_bps is not None:
+                rates.append(dual(
+                    f"channel {state.channel_goodput_bps:.0f} bit/s",
+                    f"kanál {state.channel_goodput_bps:.0f} bit/s",
+                ))
+            if state.keyed_duty_cycle is not None:
+                rates.append(dual(
+                    f"TX duty {state.keyed_duty_cycle * 100:.0f}%",
+                    f"TX duty {state.keyed_duty_cycle * 100:.0f} %",
+                ))
+            if state.ptt_cycles:
+                rates.append(f"PTT {state.ptt_cycles}")
+            if rates:
+                lines.append(" · ".join(rates))
         self.detail.setText("\n".join(lines))

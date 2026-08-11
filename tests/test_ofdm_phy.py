@@ -11,7 +11,8 @@ from guardian.ofdm import (BENCH, MCS_TABLE, FecProfile, PhyHeader, mcs,
                            profile, profile_names)
 from guardian.ofdm.config import DEFAULT_MCS_INDEX, HEADER_MCS, OfdmConfigError
 from guardian.ofdm.framing import (HEADER_BYTES, OfdmFrameError, OfdmFrameType,
-                                   build_burst, burst_duration, decode_burst,
+                                   SubBlock, build_burst, burst_duration, decode_burst,
+                                   decode_many,
                                    header_symbols, section_symbols, split_blocks)
 from guardian.ofdm.phy import BurstReceiver, OfdmModulator, analytic, band_analytic
 
@@ -20,6 +21,24 @@ SEED = 0xA5
 
 def _payload(count: int, seed: int = SEED) -> bytes:
     return np.random.default_rng(seed).integers(0, 256, count, dtype=np.uint8).tobytes()
+
+
+def test_decode_many_recovers_two_independent_microbursts():
+    payloads = [_payload(96, SEED + index) for index in range(2)]
+    bursts = [
+        build_burst(
+            BENCH,
+            PhyHeader(OfdmFrameType.DATA, 91, index, 2, 1, len(payload),
+                      subblock_count=1),
+            blocks=[SubBlock(index, payload)],
+        )
+        for index, payload in enumerate(payloads)
+    ]
+    gap = np.zeros(int(BENCH.sample_rate * 0.03))
+    capture = np.concatenate([gap, bursts[0], gap, bursts[1], gap])
+    decoded = decode_many(BENCH, capture)
+    assert [item.header.block_seq for item in decoded] == [0, 1]
+    assert [item.blocks[index] for index, item in enumerate(decoded)] == payloads
 
 
 # -- the profile object ----------------------------------------------------- #
@@ -344,7 +363,7 @@ def test_airtime_follows_the_profile_rather_than_a_stored_constant() -> None:
     overhead = BENCH.preamble_symbols + BENCH.training_symbols
     assert burst_duration(BENCH, header) == pytest.approx(
         (symbols + overhead) * BENCH.symbol_duration
-    )
+                                   )
 
 
 # -- segmentation ----------------------------------------------------------- #

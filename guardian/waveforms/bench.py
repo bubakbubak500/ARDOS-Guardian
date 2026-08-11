@@ -126,7 +126,8 @@ def run_transfer(profile: WaveformProfile, mcs_index: int = 2, *,
                  timeout: float = 120.0,
                  fec: FecProfile | int | str = FecProfile.FEC_7_8,
                  burst_bytes: int = 8192, arq_block_bytes: int = 512,
-                 spec: ChannelSpec | None = None) -> TransferResult:
+                 spec: ChannelSpec | None = None,
+                 train_bursts: int = 1) -> TransferResult:
     selected_fec = fec_profile(fec)
     config = AdaptationConfig(
         adaptive_fec=False,
@@ -156,10 +157,12 @@ def run_transfer(profile: WaveformProfile, mcs_index: int = 2, *,
     sender = OfdmLink(
         profile, near, mcs_index=mcs_index, ptt_turnaround=ptt_turnaround,
         timeout_margin=0.5, controller=sender_controller, codec=codec,
+        train_bursts=train_bursts,
     )
     receiver = OfdmLink(
         profile, far, mcs_index=mcs_index, ptt_turnaround=ptt_turnaround,
         timeout_margin=0.5, controller=receiver_controller, codec=codec,
+        train_bursts=train_bursts,
     )
     received: dict[str, bytes | None] = {}
     listener = threading.Thread(

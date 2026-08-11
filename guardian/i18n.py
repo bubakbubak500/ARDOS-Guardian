@@ -63,6 +63,7 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "menu.network": ("Network", "Síť"),
     "menu.log": ("Log", "Provozní log"),
     "menu.tools": ("&Tools", "&Provoz"),
+    "menu.station_lab": ("Station test && AutoTune", "Test stanice && AutoTune"),
     "menu.radio_toggle": (
         "Connect / disconnect radio",
         "Připojit / odpojit rádio",
