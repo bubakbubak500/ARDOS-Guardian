@@ -45,6 +45,72 @@ def test_direct_session_reaches_delivered_without_changing_payload_contract() ->
     assert sender.learned_paths["OK1AAA"] == "OK1AAA"
 
 
+def test_high_ratio_bundle_falls_back_when_receiver_does_not_advertise_decoder() -> None:
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    receiver = Orchestrator(
+        "OK1AAA", bus.endpoint("receiver"), auto_complete=True, auto_route=False
+    )
+
+    message = sender.send_message(
+        "OK1AAA",
+        "compressed",
+        msg_id=105,
+        next_hop="OK1AAA",
+        flags=Flags.COMPRESSED,
+        payload_bytes=b"GCP1-high-ratio",
+        fallback_payload_bytes=b"PK-standard-zip",
+    )
+    _drain(bus, sender, receiver)
+
+    assert message.payload_bytes == b"PK-standard-zip"
+    assert message.fallback_payload_bytes is None
+    assert not message.flags & Flags.COMPRESSED
+    assert not message.flags & Flags.GUARDIAN_CODEC
+
+
+def test_high_ratio_bundle_is_kept_only_after_active_decoder_advertisement() -> None:
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    receiver = Orchestrator(
+        "OK1AAA", bus.endpoint("receiver"), auto_complete=True, auto_route=False
+    )
+    receiver.guardian_codec_request = lambda: True
+
+    message = sender.send_message(
+        "OK1AAA",
+        "compressed",
+        msg_id=106,
+        next_hop="OK1AAA",
+        flags=Flags.COMPRESSED,
+        payload_bytes=b"GCP1-high-ratio",
+        fallback_payload_bytes=b"PK-standard-zip",
+    )
+    _drain(bus, sender, receiver)
+
+    assert message.payload_bytes == b"GCP1-high-ratio"
+    assert message.fallback_payload_bytes is None
+    assert message.flags & Flags.COMPRESSED
+    assert message.flags & Flags.GUARDIAN_CODEC
+
+
+def test_only_final_destination_gets_the_post_ack_identification_hook() -> None:
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    receiver = Orchestrator(
+        "OK1AAA", bus.endpoint("receiver"), auto_complete=True, auto_route=False
+    )
+    callbacks = []
+    receiver.on_final_ack_sent = callbacks.append
+
+    sender.send_message("OK1AAA", "hello", msg_id=104, next_hop="OK1AAA")
+    _drain(bus, sender, receiver)
+
+    assert len(callbacks) == 1
+    assert callbacks[0].source == "OK7PS"
+    assert callbacks[0].final_dest == "OK1AAA"
+
+
 def test_default_session_emits_no_working_channel_negotiation() -> None:
     bus = LoopbackBus()
     sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
@@ -848,7 +914,7 @@ def test_the_capability_bit_rides_the_existing_flags_byte() -> None:
     assert decode_ptt_delay(decoded.flags) == 300
     assert decoded.flags & Flags.ACK_REQUIRED
     assert decoded.flags & Flags.COMPRESSED
-    # Bit 7 stays free for whatever comes next.
+    # The responder-only Guardian codec bit stays clear in an initiator frame.
     assert not int(decoded.flags) & 0x80
 
 

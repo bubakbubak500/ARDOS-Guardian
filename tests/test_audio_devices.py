@@ -172,6 +172,52 @@ def test_control_transport_reports_pending_tx_until_playback_finishes() -> None:
     assert transport.wait_tx_idle(timeout=1.0)
 
 
+def test_morse_identifier_waits_until_queued_control_frame_has_finished(
+    monkeypatch,
+) -> None:
+    frame_started = threading.Event()
+    release_frame = threading.Event()
+    played: list[int] = []
+    ptt: list[bool] = []
+
+    class SoundDevice:
+        @staticmethod
+        def play(samples, **_kwargs):
+            played.append(len(samples))
+            if len(played) == 1:
+                frame_started.set()
+
+        @staticmethod
+        def wait():
+            if len(played) == 1:
+                release_frame.wait(2.0)
+
+    monkeypatch.setattr(audio_module.time, "sleep", lambda _seconds: None)
+    modem = SimpleNamespace(
+        name="afsk1200",
+        modulate=lambda _payload: np.zeros(32, dtype=np.float32),
+    )
+    transport = AudioControlTransport(
+        modem=modem,
+        ptt=ptt.append,
+        input_device=4,
+        output_device=7,
+    )
+    transport._sd = SoundDevice()
+
+    transport.send(ControlFrame(FrameType.RECEIVED, source="OK1AAA"))
+    assert frame_started.wait(1.0)
+    assert transport.send_morse_after_pending("OK7PS DE OK1AAA", wpm=50)
+    assert not transport.wait_tx_idle(timeout=0.01)
+    assert len(played) == 1
+
+    release_frame.set()
+    assert transport.wait_tx_idle(timeout=1.0)
+    assert len(played) == 2
+    assert played[1] > played[0]
+    assert ptt == [True, False, True, False]
+
+
 def test_control_transport_keeps_ptt_keyed_for_usb_audio_tail(monkeypatch) -> None:
     sleeps: list[float] = []
     ptt: list[bool] = []

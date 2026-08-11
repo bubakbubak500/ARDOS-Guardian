@@ -39,6 +39,9 @@ version = {attr = "guardian._version.__version__"}
 [tool.setuptools.packages.find]
 include = ["guardian*"]
 
+[tool.setuptools.package-data]
+"guardian.codecs" = ["vendor/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

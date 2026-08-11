@@ -1037,6 +1037,8 @@ class GuardianMainWindow(QMainWindow):
                     operations.disconnect_vara()
                     operations.connect_vara()
                 elif tuning != applied_vara[1]:
+                    if tuning[2:] != applied_vara[1][2:]:
+                        operations.apply_vara_encryption_setting()
                     if operations.apply_vara_session_settings():
                         self.runtime.events.publish(
                             tr("vara.settings_applied", bandwidth=tuning[0]),

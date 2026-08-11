@@ -181,6 +181,29 @@ Alerts can be received, displayed and relayed by other Guardian stations and can
 
 Guardian supports both **VARA FM** and **VARA HF**.
 
+### Compression, VARA encryption and final Morse ID
+
+* VARA keeps its native `COMPRESSION TEXT` baseline. The optional **VARA
+  FILES compression** setting switches the modem to its file-transfer codec
+  for Guardian's complete binary message bundle.
+* **Adaptive Guardian compression** works before the selected payload modem,
+  so it behaves the same over VARA and Guardian OFDM VHF. Its own selection
+  engine losslessly compares stored ZIP, DEFLATE, BZIP2 and LZMA, a Guardian
+  mixed strategy that chooses per entry, and bundled ZPAQ 7.15, PAQ8PX v187 and
+  LPAQ8 high-ratio candidates. Each external candidate must pass a bounded
+  decode plus SHA-256 round-trip before it may win. A small `GCP1` envelope is
+  used only after the next hop actively advertises the matching decoder;
+  otherwise the sender falls back to standard ZIP before payload transfer.
+  No LLM or online service is used. Native VARA FILES and Guardian compression
+  are mutually exclusive to avoid a counterproductive double-compression pass.
+* VARA's optional **AES-256 encryption** can be configured for authorised
+  non-amateur/commercial service. Both peers need the same fixed key. Observe
+  the rules of the radio service and frequency in use; encrypted amateur-radio
+  traffic is prohibited in many jurisdictions.
+* A disabled-by-default option makes the final receiving station append
+  `SENDER DE RECEIVER` once in Morse at **50 WPM**, after its final control
+  acknowledgements have left the radio.
+
 The same mailbox and routing model can therefore be used for local VHF/UHF networks and longer-distance HF communication.
 
 |               | FM               | HF                       |

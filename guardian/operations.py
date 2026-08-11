@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import StationConfig, config_dir
+from .compression import external_codecs_available, is_guardian_envelope
 from .install.dependencies import find_vara_fm, find_vara_hf
 from .i18n import dual
 from .message import Folder, MessageStore, Status
@@ -25,6 +26,7 @@ from .payload.negotiated import NegotiatedPayload
 from .protocol import (
     MAX_CONTROL_FRAME_BYTES,
     MAX_PTT_DELAY_MS,
+    Flags,
     Priority,
     alert_kind,
     decode_alert,
@@ -49,6 +51,7 @@ from .services import (
 from .session import NullTransport, Orchestrator, SessionState
 from .session.orchestrator import parse_working_channel_token, working_channel_token
 from .vara import VaraClient
+from .vara.settings import configure_encryption, read_encryption_status
 
 
 @dataclass(frozen=True)
@@ -236,6 +239,8 @@ class Operations:
         net.channel_frequency = self.current_frequency
         net.ptt_delay_request = self._vara_keying_delay_request
         net.ofdm_payload_request = self._ofdm_payload_configured
+        net.guardian_codec_request = external_codecs_available
+        net.on_final_ack_sent = self._on_final_ack_sent
         net.position = self.beacon_position
         net.working_channel_offer = self._working_channel_offer
         net.working_channel_accept = self._working_channel_accept
@@ -366,6 +371,35 @@ class Operations:
         Settings takes effect on the next announcement without rebuilding the net.
         """
         return self.config.payload_backend == "ofdm_vhf"
+
+    def _on_final_ack_sent(self, message) -> None:
+        """Append one 50 WPM CW ID after the final destination's ACK frames."""
+        if not self.config.morse_id_after_ack:
+            return
+        transport = self.audio_transport
+        sender = getattr(message, "source", "").strip().upper()
+        mine = self.config.callsign.strip().upper()
+        if transport is None or not sender or not mine or mine == "NOCALL":
+            self._log(
+                dual(
+                    "Post-transfer Morse ID skipped: the live control audio "
+                    "channel and both callsigns are required.",
+                    "Morse identifikace po přenosu byla přeskočena: je nutný "
+                    "živý zvukový řídicí kanál a obě volací značky.",
+                ),
+                LogLevel.WARNING,
+                source="session",
+            )
+            return
+        text = f"{sender} DE {mine}"
+        if transport.send_morse_after_pending(text, wpm=50.0):
+            self._log(
+                dual(
+                    f"Queued final Morse ID: {text} (50 WPM).",
+                    f"Zařazena závěrečná Morse identifikace: {text} (50 WPM).",
+                ),
+                source="session",
+            )
 
     # ----- net-wide alerts ------------------------------------------------
 
@@ -1123,9 +1157,9 @@ class Operations:
         Guardian's config, so before 0.6.33 changing the HF bandwidth left the
         modem on whatever it was given at connect time.
 
-        `CHAT OFF` bounds VARA's idle loops. Compression stays on: Guardian
-        pads every envelope to MIN_WIRE_SIZE and that padding is otherwise
-        pure airtime. Bandwidth and `P2P SESSION` are HF/SAT only -- the
+        `CHAT OFF` bounds VARA's idle loops. TEXT compression remains the
+        baseline; the opt-in FILES mode is selected for binary bundles only
+        when the operator asks for it. Bandwidth and `P2P SESSION` are HF/SAT only -- the
         reference is explicit that P2P "must be used for P2P connections, not
         for Gateways connections", and FM answers WRONG to a BW command.
         """
@@ -1144,7 +1178,11 @@ class Operations:
             )
             return False
         self.vara.send_command("PUBLIC ON")
-        self.vara.send_command("COMPRESSION TEXT")
+        self.vara.send_command(
+            "COMPRESSION FILES"
+            if self.config.vara_file_compression
+            else "COMPRESSION TEXT"
+        )
         self.vara.send_command("CHAT OFF")
         if self.config.vara_mode.upper() == "HF":
             self.vara.send_command(self.config.vara_hf_bandwidth)
@@ -1204,7 +1242,72 @@ class Operations:
 
     def vara_tuning(self) -> tuple:
         """Settings VARA holds per session. A change here can be re-sent."""
-        return (self.config.vara_hf_bandwidth,)
+        return (
+            self.config.vara_hf_bandwidth,
+            self.config.vara_file_compression,
+            self.config.vara_encryption,
+            self.config.vara_encryption_password,
+        )
+
+    def _configure_vara_encryption(self) -> bool:
+        """Persist Guardian's AES choice into the selected local VARA INI.
+
+        VARA does not expose encryption on its TCP command channel.  A remote
+        modem therefore remains the remote operator's responsibility; a local
+        modem is edited narrowly before Guardian starts/connects to it.
+        """
+        executable = self._selected_vara_executable()
+        if executable is None:
+            if self.config.vara_encryption:
+                self._log(
+                    dual(
+                        "VARA encryption is enabled in Guardian, but a remote "
+                        "VARA instance must be configured in its own Encryption dialog.",
+                        "Šifrování VARA je v Guardianu zapnuté, ale vzdálenou "
+                        "instanci VARA je nutné nastavit v jejím dialogu Encryption.",
+                    ),
+                    LogLevel.WARNING,
+                    source="vara",
+                )
+            return False
+        encryption = read_encryption_status(executable)
+        if (
+            encryption.enabled != bool(self.config.vara_encryption)
+            or self.config.vara_encryption_password.strip()
+        ):
+            configure_encryption(
+                executable,
+                enabled=self.config.vara_encryption,
+                password=self.config.vara_encryption_password,
+            )
+        return True
+
+    def apply_vara_encryption_setting(self) -> bool:
+        """Apply a Settings-dialog AES edit and report restart requirements."""
+        try:
+            local = self._configure_vara_encryption()
+        except (OSError, ValueError) as exc:
+            self._log(
+                dual(
+                    f"VARA encryption setting failed: {exc}",
+                    f"Nastavení šifrování VARA selhalo: {exc}",
+                ),
+                LogLevel.ERROR,
+                source="vara",
+            )
+            return False
+        if local and self.vara.connected:
+            self._log(
+                dual(
+                    "VARA encryption was saved. Restart VARA before the next "
+                    "encrypted connection so the modem reloads its INI.",
+                    "Šifrování VARA bylo uloženo. Před dalším šifrovaným spojením "
+                    "restartujte VARA, aby modem znovu načetl svůj INI soubor.",
+                ),
+                LogLevel.WARNING,
+                source="vara",
+            )
+        return local
 
     def _make_payload_backend(self):
         """Build the payload transport for the sessions that come next.
@@ -1510,10 +1613,11 @@ class Operations:
             self.vara.cmd_port = self.config.vara_cmd_port
             self.vara.data_port = self.config.vara_data_port
             started = None
+            executable = self._selected_vara_executable()
+            self._configure_vara_encryption()
             try:
                 self.vara.connect(timeout=0.5)
             except OSError as first_error:
-                executable = self._selected_vara_executable()
                 if executable is None:
                     mode = self.config.vara_mode.upper()
                     raise RuntimeError(
@@ -1722,6 +1826,34 @@ class Operations:
         ), source="control")
         self._update_network_snapshot()
 
+    def _announce_prepared_mail(
+        self,
+        mail,
+        bundle: bytes,
+        *,
+        flags: Flags = Flags.NONE,
+        fallback_payload_bytes: bytes | None = None,
+    ) -> None:
+        self.net.send_message(
+            final_dest=mail.final_dest,
+            body=mail.subject,
+            msg_id=mail.msg_id,
+            priority=Priority(mail.priority),
+            ttl=self.config.default_ttl,
+            flags=flags,
+            payload_bytes=bundle,
+            fallback_payload_bytes=fallback_payload_bytes,
+        )
+        self._log(
+            dual(
+                f"Message #{mail.msg_id} to {mail.final_dest} announced "
+                f"({mail.content_size()} B payload).",
+                f"Zpráva #{mail.msg_id} pro {mail.final_dest} oznámena "
+                f"(datový obsah {mail.content_size()} B).",
+            ),
+            source="mail",
+        )
+
     def send_queued(self, message_id: int) -> bool:
         if self.audio_transport is None:
             self._log(
@@ -1767,23 +1899,71 @@ class Operations:
                 )
                 return False
         self.mailstore.set_status(message_id, status=Status.SENDING)
-        self.net.send_message(
-            final_dest=mail.final_dest,
-            body=mail.subject,
-            msg_id=mail.msg_id,
-            priority=Priority(mail.priority),
-            ttl=self.config.default_ttl,
-            payload_bytes=mail.to_bundle(),
-        )
-        self._log(
-            dual(
-                f"Message #{mail.msg_id} to {mail.final_dest} announced "
-                f"({mail.content_size()} B payload).",
-                f"Zpráva #{mail.msg_id} pro {mail.final_dest} oznámena "
-                f"(datový obsah {mail.content_size()} B).",
-            ),
-            source="mail",
-        )
+        baseline = mail.to_bundle()
+        if self.config.guardian_compression and not self.config.vara_file_compression:
+            task_name = f"mail-compress-{mail.msg_id}"
+
+            def compressed(result: TaskResult) -> None:
+                if result.error:
+                    self._log(
+                        dual(
+                            f"Guardian compression failed for message #{mail.msg_id}; "
+                            "sending the standard ZIP bundle.",
+                            f"Komprese Guardian pro zprávu #{mail.msg_id} selhala; "
+                            "odesílám standardní ZIP balíček.",
+                        ),
+                        LogLevel.WARNING,
+                        source="payload",
+                    )
+                    self._announce_prepared_mail(mail, baseline)
+                    return
+                encoding = result.value
+                flags = Flags.COMPRESSED if encoding.method != "stored" else Flags.NONE
+                high_ratio = is_guardian_envelope(encoding.data)
+                self._log(
+                    dual(
+                        f"Guardian compression selected {encoding.method} for "
+                        f"message #{mail.msg_id}: {encoding.baseline_size} → "
+                        f"{len(encoding.data)} B ({encoding.saved_percent:.1f}% saved).",
+                        f"Komprese Guardian zvolila {encoding.method} pro zprávu "
+                        f"#{mail.msg_id}: {encoding.baseline_size} → "
+                        f"{len(encoding.data)} B (úspora {encoding.saved_percent:.1f} %).",
+                    ),
+                    source="payload",
+                )
+                self._announce_prepared_mail(
+                    mail,
+                    encoding.data,
+                    flags=flags,
+                    fallback_payload_bytes=baseline if high_ratio else None,
+                )
+
+            queued = self.workers.submit(
+                task_name,
+                mail.to_adaptive_bundle,
+                compressed,
+            )
+            if not queued:
+                self.mailstore.set_status(message_id, status=Status.QUEUED)
+                return False
+            self._log(
+                dual(
+                    f"Testing lossless Guardian codecs for message #{mail.msg_id}…",
+                    f"Testuji bezeztrátové kodeky Guardian pro zprávu #{mail.msg_id}…",
+                ),
+                source="payload",
+            )
+            return True
+        elif self.config.guardian_compression:
+            self._log(
+                dual(
+                    "Guardian compression was not stacked with VARA FILES compression.",
+                    "Komprese Guardian nebyla vrstvena přes kompresi VARA FILES.",
+                ),
+                LogLevel.WARNING,
+                source="payload",
+            )
+        self._announce_prepared_mail(mail, baseline)
         return True
 
     def tick(self) -> None:

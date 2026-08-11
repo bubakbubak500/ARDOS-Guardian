@@ -800,7 +800,8 @@ def test_the_keying_primitive_releases_the_transmitter_when_playback_raises() ->
 
 
 def test_every_transmit_path_goes_through_the_one_primitive() -> None:
-    # Three callers, one implementation. A fourth copy of "always unkey" is the
+    # Four callers (control frame, Morse ID, OFDM payload and recorder test TX),
+    # one implementation. A second copy of "always unkey" is the
     # kind of thing that gets it wrong and leaves a station keyed.
     import pathlib
     import re
@@ -815,4 +816,4 @@ def test_every_transmit_path_goes_through_the_one_primitive() -> None:
         # Nobody keys around a play() of their own -- the primitive is the only
         # code in Guardian that reaches the output device.
         assert ".play(" not in body, f"{name} plays audio outside the primitive"
-    assert calls == 3
+    assert calls == 4

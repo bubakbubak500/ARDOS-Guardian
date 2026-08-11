@@ -160,6 +160,7 @@ class SettingsDialog(QDialog):
         self._build_radio()
         self._build_audio()
         self._build_vara()
+        self._build_payload_options()
         self._build_network()
         self._build_appearance(theme)
 
@@ -1255,6 +1256,113 @@ class SettingsDialog(QDialog):
         self.vara_hf_bandwidth.setVisible(visible)
         self.vara_hf_bandwidth_label.setVisible(visible)
 
+    def _build_payload_options(self) -> None:
+        form = self._page(
+            dual("Compression & identification", "Komprese a identifikace"),
+            dual(
+                "Choose one lossless compression layer. VARA FILES belongs to "
+                "the vendor modem; Guardian compression works identically over "
+                "VARA and OFDM and keeps the smallest safely decodable candidate. "
+                "Encryption is VARA's commercial/non-amateur AES mode.",
+                "Zvolte jednu bezeztrátovou kompresní vrstvu. VARA FILES patří "
+                "modemu dodavatele; komprese Guardian funguje shodně přes VARA i "
+                "OFDM a ponechá nejmenší bezpečně rozbalitelnou variantu. "
+                "Šifrování je komerční/neamatérský režim AES modemu VARA.",
+            ),
+        )
+        self.vara_file_compression = QCheckBox(dual(
+            "Use native VARA FILES compression",
+            "Použít nativní kompresi VARA FILES",
+        ))
+        self.vara_file_compression.setChecked(self.config.vara_file_compression)
+        self.vara_file_compression.setToolTip(dual(
+            "Switches VARA from its permanent COMPRESSION TEXT baseline to "
+            "COMPRESSION FILES for Guardian bundles.",
+            "Přepne VARA ze stálého základu COMPRESSION TEXT na COMPRESSION "
+            "FILES pro balíčky Guardianu.",
+        ))
+        self.guardian_compression = QCheckBox(dual(
+            "Use adaptive Guardian compression (VARA and OFDM)",
+            "Použít adaptivní kompresi Guardian (VARA i OFDM)",
+        ))
+        self.guardian_compression.setChecked(self.config.guardian_compression)
+        self.guardian_compression.setToolTip(dual(
+            "Losslessly compares stored, DEFLATE, BZIP2, LZMA, Guardian's "
+            "per-entry mix, ZPAQ, PAQ8PX and LPAQ8. High-ratio codecs must pass "
+            "a timed verification decode; no LLM, cloud or lossy conversion.",
+            "Bezeztrátově porovná ZIP varianty bez komprese, DEFLATE, BZIP2 a "
+            "LZMA, vlastní smíšenou strategii, ZPAQ, PAQ8PX a LPAQ8. Vysoce účinné "
+            "kodeky musí projít časově omezeným ověřovacím rozbalením; bez LLM, "
+            "cloudu a ztrátového převodu.",
+        ))
+
+        self.vara_encryption = QCheckBox(dual(
+            "Enable VARA AES-256 encryption",
+            "Zapnout šifrování VARA AES-256",
+        ))
+        self.vara_encryption.setChecked(self.config.vara_encryption)
+        self.vara_encryption_password = QLineEdit(self.config.vara_encryption_password)
+        self.vara_encryption_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.vara_encryption_password.setMaxLength(32)
+        self.vara_encryption_password.setPlaceholderText(
+            dual("1–32 letters or digits", "1–32 písmen nebo číslic")
+        )
+        self.vara_encryption_password.setToolTip(dual(
+            "VARA stores the same fixed key in its own INI file. Both stations "
+            "must use the same key.",
+            "VARA ukládá stejný pevný klíč do svého INI souboru. Obě stanice "
+            "musí použít shodný klíč.",
+        ))
+        encryption_warning = QLabel(dual(
+            "Use encryption only on services and frequencies where it is "
+            "authorised. VARA restricts this feature to non-amateur/commercial use.",
+            "Šifrování používejte pouze ve službách a na kmitočtech, kde je "
+            "povoleno. VARA tuto funkci omezuje na neamatérské/komerční použití.",
+        ))
+        encryption_warning.setObjectName("Metadata")
+        encryption_warning.setWordWrap(True)
+
+        self.morse_id_after_ack = QCheckBox(dual(
+            "After the final ACK, send both callsigns in Morse at 50 WPM",
+            "Po posledním ACK odvysílat obě značky Morse rychlostí 50 WPM",
+        ))
+        self.morse_id_after_ack.setChecked(self.config.morse_id_after_ack)
+        self.morse_id_after_ack.setToolTip(dual(
+            "Only the final destination transmits once, after its RECEIVED and "
+            "DELIVERED control frames: SENDER DE RECEIVER.",
+            "Pouze cílová stanice odvysílá jednou po rámcích RECEIVED a "
+            "DELIVERED: ODESÍLATEL DE PŘÍJEMCE.",
+        ))
+
+        form.addRow(self.vara_file_compression)
+        form.addRow(self.guardian_compression)
+        form.addRow(self.vara_encryption)
+        form.addRow(dual("VARA fixed encryption key", "Pevný šifrovací klíč VARA"),
+                    self.vara_encryption_password)
+        form.addRow(encryption_warning)
+        form.addRow(self.morse_id_after_ack)
+
+        self.vara_file_compression.toggled.connect(self._native_compression_toggled)
+        self.guardian_compression.toggled.connect(self._guardian_compression_toggled)
+        self.vara_encryption.toggled.connect(
+            self.vara_encryption_password.setEnabled
+        )
+        if self.vara_file_compression.isChecked():
+            self._native_compression_toggled(True)
+        elif self.guardian_compression.isChecked():
+            self._guardian_compression_toggled(True)
+        self.vara_encryption_password.setEnabled(self.vara_encryption.isChecked())
+
+    def _native_compression_toggled(self, checked: bool) -> None:
+        if checked:
+            self.guardian_compression.setChecked(False)
+        self.guardian_compression.setEnabled(not checked)
+
+    def _guardian_compression_toggled(self, checked: bool) -> None:
+        if checked:
+            self.vara_file_compression.setChecked(False)
+        self.vara_file_compression.setEnabled(not checked)
+
     def _build_network(self) -> None:
         form = self._page(
             tr("settings.network"),
@@ -1418,6 +1526,17 @@ class SettingsDialog(QDialog):
                     "An OFDM burst must be large enough to hold one ARQ sub-block.",
                     "Dávka OFDM musí pojmout alespoň jeden podblok ARQ.",
                 ))
+        password = self.vara_encryption_password.text().strip()
+        if self.vara_encryption.isChecked() and not re.fullmatch(r"[A-Za-z0-9]{1,32}", password):
+            errors.append(dual(
+                "VARA encryption requires a 1–32 character key containing only letters and digits.",
+                "Šifrování VARA vyžaduje klíč o 1–32 znacích tvořený pouze písmeny a číslicemi.",
+            ))
+        if self.vara_file_compression.isChecked() and self.guardian_compression.isChecked():
+            errors.append(dual(
+                "Choose VARA FILES compression or Guardian compression, not both.",
+                "Zvolte kompresi VARA FILES, nebo kompresi Guardian, nikoli obě.",
+            ))
         for label, field in checked_paths:
             value = field.text()
             if value and Path(value).suffix.lower() == ".exe" and not Path(value).is_file():
@@ -1472,6 +1591,11 @@ class SettingsDialog(QDialog):
         cfg.control_modem = self.control_modem.currentData()
         cfg.vara_hf_bandwidth = self.vara_hf_bandwidth.currentData()
         cfg.vara_host_ptt = self.vara_host_ptt.isChecked()
+        cfg.vara_file_compression = self.vara_file_compression.isChecked()
+        cfg.vara_encryption = self.vara_encryption.isChecked()
+        cfg.vara_encryption_password = self.vara_encryption_password.text().strip()
+        cfg.guardian_compression = self.guardian_compression.isChecked()
+        cfg.morse_id_after_ack = self.morse_id_after_ack.isChecked()
         cfg.apply_vara_mode(self.vara_mode.currentText())
         cfg.default_ttl = self.default_ttl.value()
         cfg.auto_route = self.auto_route.isChecked()

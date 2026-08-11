@@ -148,6 +148,7 @@ def test_payload_page_is_bilingual_in_both_directions() -> None:
     try:
         titles = [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())]
         assert "Payload & data modem" in titles
+        assert "Compression & identification" in titles
         assert dialog.payload_backend.itemText(0) == "Guardian VARA P2P"
         assert (
             dialog.payload_backend.itemText(1)
@@ -159,6 +160,15 @@ def test_payload_page_is_bilingual_in_both_directions() -> None:
         captions = {label.text() for label in dialog.findChildren(QLabel)}
         assert "OFDM modulation (MCS)" in captions
         assert "Keying lead before transmit" in captions
+        assert not dialog.vara_file_compression.isChecked()
+        assert not dialog.vara_encryption.isChecked()
+        assert not dialog.guardian_compression.isChecked()
+        assert not dialog.morse_id_after_ack.isChecked()
+        dialog.guardian_compression.setChecked(True)
+        assert not dialog.vara_file_compression.isEnabled()
+        dialog.guardian_compression.setChecked(False)
+        dialog.vara_file_compression.setChecked(True)
+        assert not dialog.guardian_compression.isEnabled()
     finally:
         dialog.close()
 
@@ -167,6 +177,7 @@ def test_payload_page_is_bilingual_in_both_directions() -> None:
     try:
         titles = [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())]
         assert "Přenos a datový modem" in titles
+        assert "Komprese a identifikace" in titles
         assert (
             dialog.payload_backend.itemText(1)
             == "Guardian OFDM VHF (Experimentální)"

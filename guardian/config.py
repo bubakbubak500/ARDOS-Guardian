@@ -198,6 +198,27 @@ class StationConfig:
     # poor conditions, BW2750 the tactical one. Both stations must agree.
     vara_hf_bandwidth: str = "BW2300"   # "BW500" | "BW2300" | "BW2750"
 
+    # VARA's native TEXT compression remains the baseline. This switch selects
+    # the separate FILES codec documented by VARA for binary/file transfers.
+    # It is deliberately opt-in because both stations need compatible modem
+    # versions and Guardian's own adaptive bundle compression is usually the
+    # better transport-independent choice.
+    vara_file_compression: bool = False
+    # VARA's proprietary AES-256 option is intended for authorised non-amateur
+    # services. VARA itself stores this password in its INI file; keeping the
+    # value here lets Guardian configure either FM or HF consistently.
+    vara_encryption: bool = False
+    vara_encryption_password: str = ""
+
+    # Content-aware ZIP encoding of Guardian message bundles. The smallest of
+    # stored, DEFLATE, BZIP2 and LZMA is selected before either VARA or OFDM is
+    # handed the payload. No LLM or external service is involved.
+    guardian_compression: bool = False
+
+    # After the final destination has queued its last control acknowledgement,
+    # identify the two stations once in 50 WPM Morse. Off by default.
+    morse_id_after_ack: bool = False
+
     # Control-burst modem: "auto" picks AFSK1200 for FM, MFSK16 for HF.
     control_modem: str = "auto"       # "auto" | "afsk1200" | "mfsk16"
 

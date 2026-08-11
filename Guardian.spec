@@ -26,6 +26,11 @@ for package in ("sounddevice",):
 hiddenimports += collect_submodules("winrt")
 binaries += collect_dynamic_libs("winrt")
 
+# Exact upstream archives include the helper binaries, source and licence
+# notices for Guardian's optional ZPAQ/PAQ8PX/LPAQ8 compression candidates.
+datas.append((str(root / "guardian" / "codecs" / "vendor"),
+              "guardian/codecs/vendor"))
+
 analysis = Analysis(
     [str(root / "guardian_launch.py")],
     pathex=[str(root)],

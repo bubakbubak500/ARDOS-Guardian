@@ -30,6 +30,7 @@ import numpy as np
 from ..protocol import MAX_CONTROL_FRAME_BYTES, ControlFrame, FrameError
 from ..session.transport import ControlTransport
 from .afsk import AFSKModem
+from .morse import modulate_morse, normalise_morse_text
 
 
 _PSEUDO_DEVICE_PREFIXES = (
@@ -571,6 +572,7 @@ class AudioControlTransport(ControlTransport):
         self._tx_lock = threading.Lock()
         self._tx_condition = threading.Condition()
         self._pending_tx = 0
+        self._post_tx_pending = 0
         # The rolling window must hold one whole frame however slow the modem
         # is. A fixed 4 s was ample for AFSK's 1.2 s frames but silently swallowed
         # MFSK-16 once its geometry was corrected: a 6.9 s frame never fitted, so
@@ -686,6 +688,57 @@ class AudioControlTransport(ControlTransport):
             with self._tx_condition:
                 self._pending_tx -= 1
                 self._tx_condition.notify_all()
+
+    def send_morse_after_pending(self, text: str, *, wpm: float = 50.0) -> bool:
+        """Queue a CW identifier after all control frames already in flight.
+
+        The final RECEIVED/DELIVERED frames are asynchronous. Counting this as
+        a post-TX item lets it wait for those frames without making
+        ``wait_tx_idle`` return early, and the shared TX lock keeps one radio
+        carrier active at a time.
+        """
+        clean = normalise_morse_text(text)
+        if not clean:
+            return False
+        with self._tx_condition:
+            self._pending_tx += 1
+            self._post_tx_pending += 1
+        threading.Thread(
+            target=self._morse_pending,
+            args=(clean, float(wpm)),
+            name="morse-id-tx",
+            daemon=True,
+        ).start()
+        return True
+
+    def _morse_pending(self, text: str, wpm: float) -> None:
+        try:
+            with self._tx_condition:
+                while self._pending_tx > self._post_tx_pending:
+                    self._tx_condition.wait()
+            self._tx_morse(text, wpm)
+        finally:
+            with self._tx_condition:
+                self._pending_tx -= 1
+                self._post_tx_pending -= 1
+                self._tx_condition.notify_all()
+
+    def _tx_morse(self, text: str, wpm: float) -> None:
+        if self._sd is None:
+            self.on_log("Morse ID skipped — control channel not started")
+            return
+        samples = modulate_morse(text, sample_rate=self.fs, wpm=wpm)
+        with self._tx_lock:
+            transmit_waveform(
+                self._sd,
+                samples,
+                device=self.output_device,
+                sample_rate=self.fs,
+                ptt=self.ptt,
+                before_play=self._rx_buf.clear,
+                after_release=self._rx_buf.clear,
+            )
+        self.on_log(f"TX Morse ID {text} ({wpm:g} WPM)")
 
     def wait_tx_idle(self, timeout: float = 5.0) -> bool:
         """Wait until every already-queued control burst has left the radio."""

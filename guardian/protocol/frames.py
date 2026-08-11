@@ -98,8 +98,11 @@ class Flags(IntFlag):
     COMPRESSED = 0x02
     ACK_REQUIRED = 0x04
     # Bit 6: "I am configured for the Guardian OFDM VHF payload transport."
-    # See OFDM_PAYLOAD below. Bit 7 (0x80) remains free.
+    # Bit 7 is set actively by a responder that can decode GCP1 high-ratio
+    # bundles. The initiator leaves it clear, so a legacy echo cannot be
+    # mistaken for support.
     OFDM_PAYLOAD = 0x40
+    GUARDIAN_CODEC = 0x80
 
 
 # Bits 3-5 of the flags byte: a slow-keying request for the VARA FM payload
@@ -164,6 +167,16 @@ def encode_ofdm_capable(flags: Flags | int, capable: bool) -> Flags:
 def decode_ofdm_capable(flags: Flags | int) -> bool:
     """Whether `flags` claims the Guardian OFDM VHF transport."""
     return bool(int(flags) & int(Flags.OFDM_PAYLOAD))
+
+
+def encode_guardian_codec_capable(flags: Flags | int, capable: bool) -> Flags:
+    """Set/clear the receiver-advertised GCP1 decoder capability bit."""
+    cleared = int(flags) & ~int(Flags.GUARDIAN_CODEC)
+    return Flags(cleared | (int(Flags.GUARDIAN_CODEC) if capable else 0))
+
+
+def decode_guardian_codec_capable(flags: Flags | int) -> bool:
+    return bool(int(flags) & int(Flags.GUARDIAN_CODEC))
 
 
 def crc16(data: bytes) -> int:

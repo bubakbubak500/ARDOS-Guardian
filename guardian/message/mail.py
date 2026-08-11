@@ -16,12 +16,37 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+from ..compression import (
+    decompress_guardian_envelope,
+    external_candidates,
+    is_guardian_envelope,
+)
+
 BUNDLE_VERSION = 1
 
 # Rough on-air throughput (payload bytes/sec) for an estimate shown to the user.
 # VARA FM ~ a few hundred B/s effective; HF much less. A conservative single
 # number keeps the warning honest without pretending to be exact.
 _EST_BYTES_PER_SEC = 250.0
+
+
+@dataclass(frozen=True)
+class BundleEncoding:
+    """A bundle plus the lossless ZIP method chosen for it."""
+
+    data: bytes
+    method: str
+    baseline_size: int
+
+    @property
+    def saved_bytes(self) -> int:
+        return max(0, self.baseline_size - len(self.data))
+
+    @property
+    def saved_percent(self) -> float:
+        if not self.baseline_size:
+            return 0.0
+        return 100.0 * self.saved_bytes / self.baseline_size
 
 
 class Folder:
@@ -113,7 +138,7 @@ class MailMessage:
         return f"#{self.msg_id} {self.source}->{self.final_dest} \"{self.subject}\"{a}"
 
     # ------------------------------------------------------------------ #
-    def to_bundle(self) -> bytes:
+    def _bundle_entries(self) -> list[tuple[str, bytes]]:
         taken: set[str] = set()
         names = [
             _unique_name(safe_attachment_name(a.name), taken)
@@ -130,16 +155,90 @@ class MailMessage:
             "hops": self.hops,
             "attachments": names,
         }
+        entries = [
+            ("manifest.json", json.dumps(manifest).encode("utf-8")),
+            ("body.txt", self.body.encode("utf-8")),
+        ]
+        entries.extend(
+            (f"att/{name}", attachment.data)
+            for name, attachment in zip(names, self.attachments)
+        )
+        return entries
+
+    def _bundle_with(self, compression: int, *, compresslevel: int | None = None) -> bytes:
         buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("manifest.json", json.dumps(manifest))
-            zf.writestr("body.txt", self.body.encode("utf-8"))
-            for name, a in zip(names, self.attachments):
-                zf.writestr(f"att/{name}", a.data)
+        options = {"compression": compression}
+        if compresslevel is not None:
+            options["compresslevel"] = compresslevel
+        with zipfile.ZipFile(buf, "w", **options) as zf:
+            for name, data in self._bundle_entries():
+                zf.writestr(name, data)
         return buf.getvalue()
+
+    @staticmethod
+    def _best_zip_method(data: bytes) -> tuple[int, int | None]:
+        """Return the ZIP method with the smallest exact compressed payload."""
+        methods = (
+            (zipfile.ZIP_STORED, None),
+            (zipfile.ZIP_DEFLATED, 9),
+            (zipfile.ZIP_BZIP2, 9),
+            (zipfile.ZIP_LZMA, None),
+        )
+        scored: list[tuple[int, int, int | None]] = []
+        for method, level in methods:
+            probe = io.BytesIO()
+            with zipfile.ZipFile(probe, "w") as zf:
+                options = {"compress_type": method}
+                if level is not None:
+                    options["compresslevel"] = level
+                zf.writestr("entry", data, **options)
+                compressed_size = zf.getinfo("entry").compress_size
+            scored.append((compressed_size, method, level))
+        _, method, level = min(scored, key=lambda item: item[0])
+        return method, level
+
+    def _adaptive_mixed_bundle(self) -> bytes:
+        """Build a Guardian bundle selecting a codec independently per entry."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, data in self._bundle_entries():
+                method, level = self._best_zip_method(data)
+                options = {"compress_type": method}
+                if level is not None:
+                    options["compresslevel"] = level
+                zf.writestr(name, data, **options)
+        return buf.getvalue()
+
+    def to_bundle(self) -> bytes:
+        """Return the stable baseline bundle used for local mailbox storage."""
+        return self._bundle_with(zipfile.ZIP_DEFLATED)
+
+    def to_adaptive_bundle(self, *, include_high_ratio: bool = True) -> BundleEncoding:
+        """Choose the smallest interoperable lossless ZIP representation.
+
+        Python's ZIP reader already understands every candidate, so an older
+        Guardian can receive and open the result without a new envelope or
+        on-air negotiation. That is important for relays and for a station that
+        falls back from OFDM to VARA after the message was announced.
+        """
+        baseline = self.to_bundle()
+        candidates = [
+            ("stored", self._bundle_with(zipfile.ZIP_STORED)),
+            ("deflate", baseline),
+            ("deflate-max", self._bundle_with(zipfile.ZIP_DEFLATED, compresslevel=9)),
+            ("bzip2", self._bundle_with(zipfile.ZIP_BZIP2, compresslevel=9)),
+            ("lzma", self._bundle_with(zipfile.ZIP_LZMA)),
+            ("adaptive-mixed", self._adaptive_mixed_bundle()),
+        ]
+        if include_high_ratio:
+            candidates.extend(external_candidates(baseline))
+        method, data = min(candidates, key=lambda item: len(item[1]))
+        return BundleEncoding(data=data, method=method, baseline_size=len(baseline))
 
     @classmethod
     def from_bundle(cls, data: bytes) -> "MailMessage":
+        if is_guardian_envelope(data):
+            data = decompress_guardian_envelope(data)
         with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
             manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
             body = zf.read("body.txt").decode("utf-8", errors="replace") if "body.txt" in zf.namelist() else ""

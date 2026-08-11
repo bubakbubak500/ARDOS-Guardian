@@ -33,6 +33,50 @@ def test_mail_bundle_round_trip_preserves_transferred_content() -> None:
     assert restored.attachments == original.attachments
 
 
+def test_adaptive_bundle_is_lossless_and_chooses_the_smallest_zip_method() -> None:
+    original = MailMessage(
+        msg_id=99,
+        source="OK7PS",
+        final_dest="OK1AAA",
+        subject="Repeated field report",
+        body=("SITUATION NORMAL\n" * 20_000),
+        attachments=[Attachment("report.txt", b"A" * 150_000)],
+    )
+
+    encoding = original.to_adaptive_bundle(include_high_ratio=False)
+    restored = MailMessage.from_bundle(encoding.data)
+
+    assert encoding.method in {
+        "stored",
+        "deflate",
+        "deflate-max",
+        "bzip2",
+        "lzma",
+        "adaptive-mixed",
+    }
+    assert len(encoding.data) <= encoding.baseline_size
+    assert encoding.saved_bytes == encoding.baseline_size - len(encoding.data)
+    assert restored.body == original.body
+    assert restored.attachments == original.attachments
+
+
+def test_adaptive_bundle_can_mix_methods_per_entry() -> None:
+    original = MailMessage(
+        msg_id=100,
+        source="OK7PS",
+        final_dest="OK1AAA",
+        body="WEATHER REPORT\n" * 10_000,
+        attachments=[Attachment("already-packed.bin", bytes(range(256)) * 500)],
+    )
+
+    bundle = original._adaptive_mixed_bundle()
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        methods = {entry.compress_type for entry in archive.infolist()}
+    assert len(methods) >= 2
+    assert MailMessage.from_bundle(bundle).attachments == original.attachments
+
+
 def test_a_failed_message_is_not_counted_as_waiting_to_send(tmp_path: Path) -> None:
     # A failed send parks the message in the outbox for a retry. Counting it
     # as pending left the station context reading "waiting to send: 1"

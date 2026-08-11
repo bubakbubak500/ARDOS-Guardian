@@ -67,6 +67,28 @@ def test_experimental_network_flags_default_off_and_round_trip(tmp_path: Path) -
     assert loaded.link_advert_interval == 600.0
 
 
+def test_new_payload_options_are_opt_in_and_round_trip(tmp_path: Path) -> None:
+    defaults = StationConfig()
+    assert defaults.vara_file_compression is False
+    assert defaults.vara_encryption is False
+    assert defaults.guardian_compression is False
+    assert defaults.morse_id_after_ack is False
+
+    path = tmp_path / "config.json"
+    configured = StationConfig(
+        vara_file_compression=True,
+        vara_encryption=True,
+        vara_encryption_password="SharedKey2026",
+        morse_id_after_ack=True,
+    )
+    configured.save(path)
+    loaded = StationConfig.load(path)
+    assert loaded.vara_file_compression is True
+    assert loaded.vara_encryption is True
+    assert loaded.vara_encryption_password == "SharedKey2026"
+    assert loaded.morse_id_after_ack is True
+
+
 def test_discovery_has_two_modes_and_a_monitor_profile_is_migrated(
     tmp_path: Path,
 ) -> None:
