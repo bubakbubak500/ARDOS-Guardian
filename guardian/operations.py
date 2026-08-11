@@ -373,7 +373,7 @@ class Operations:
         return self.config.payload_backend == "ofdm_vhf"
 
     def _on_final_ack_sent(self, message) -> None:
-        """Append one 50 WPM CW ID after the final destination's ACK frames."""
+        """Append one 40 WPM CW ID after the final destination's ACK frames."""
         if not self.config.morse_id_after_ack:
             return
         transport = self.audio_transport
@@ -392,11 +392,11 @@ class Operations:
             )
             return
         text = f"{sender} DE {mine}"
-        if transport.send_morse_after_pending(text, wpm=50.0):
+        if transport.send_morse_after_pending(text, wpm=40.0):
             self._log(
                 dual(
-                    f"Queued final Morse ID: {text} (50 WPM).",
-                    f"Zařazena závěrečná Morse identifikace: {text} (50 WPM).",
+                    f"Queued final Morse ID: {text} (40 WPM).",
+                    f"Zařazena závěrečná Morse identifikace: {text} (40 WPM).",
                 ),
                 source="session",
             )

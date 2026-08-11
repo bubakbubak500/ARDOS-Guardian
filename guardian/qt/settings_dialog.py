@@ -1262,7 +1262,7 @@ class SettingsDialog(QDialog):
             else:
                 detail = (
                     f"{waveform.num_carriers} non-orthogonal carriers · "
-                    f"α={waveform.sefdm_alpha:.2f}"
+                    f"α={waveform.sefdm_alpha:.3f}"
                 )
             physical = dual(
                 f"{waveform.name} (experimental) · {low:.0f}–{high:.0f} Hz "
@@ -1273,7 +1273,16 @@ class SettingsDialog(QDialog):
         self.ofdm_summary.setText(f"{mode}\n{physical}")
         # A rung that needs a faster sound card is a failure the operator can
         # anticipate at the moment of choosing rather than debug afterwards.
-        if family != "ofdm":
+        if family == "sefdm":
+            self.ofdm_profile_hint.setText(dual(
+                "SEFDM: select MCS6 32-APSK for the measured robust mode. "
+                "MCS4 256-QAM does not pass the realistic channel yet. Both "
+                "stations must use the same family and MCS.",
+                "SEFDM: pro ověřený robustní režim zvolte MCS6 32-APSK. "
+                "MCS4 256-QAM zatím realistickým kanálem neprojde. Obě "
+                "stanice musí použít stejnou rodinu a MCS.",
+            ))
+        elif family != "ofdm":
             self.ofdm_profile_hint.setText(dual(
                 "Experimental waveform: both stations must select the same family "
                 "and MCS. Validate it in Modem Lab and on a recording before mail use.",
@@ -1395,8 +1404,8 @@ class SettingsDialog(QDialog):
         encryption_warning.setWordWrap(True)
 
         self.morse_id_after_ack = QCheckBox(dual(
-            "After the final ACK, send both callsigns in Morse at 50 WPM",
-            "Po posledním ACK odvysílat obě značky Morse rychlostí 50 WPM",
+            "After the final ACK, send both callsigns in Morse at 40 WPM",
+            "Po posledním ACK odvysílat obě značky Morse rychlostí 40 WPM",
         ))
         self.morse_id_after_ack.setChecked(self.config.morse_id_after_ack)
         self.morse_id_after_ack.setToolTip(dual(

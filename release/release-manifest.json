@@ -1,6 +1,6 @@
 {
-    "version":  "2.3.0",
-    "installer_url":  "https://github.com/bubakbubak500/ARDOS-Guardian-G2/releases/latest/download/Guardian-G2-2.3.0-setup-win-x64.exe",
-    "sha256":  "6862f809ddcff859d09bd1117602826737d5012e143019f00d69a30eb60a7ea4",
-    "notes_url":  "https://github.com/bubakbubak500/ARDOS-Guardian-G2/releases/tag/v2.3.0"
+    "version":  "2.3.1",
+    "installer_url":  "https://github.com/bubakbubak500/ARDOS-Guardian-G2/releases/latest/download/Guardian-G2-2.3.1-setup-win-x64.exe",
+    "sha256":  "7e0def9ecb6718f9e6b16b60bd23c749766f622e01ee1bd4223c5752c757fc83",
+    "notes_url":  "https://github.com/bubakbubak500/ARDOS-Guardian-G2/releases/tag/v2.3.1"
 }

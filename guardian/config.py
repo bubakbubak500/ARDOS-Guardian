@@ -216,7 +216,7 @@ class StationConfig:
     guardian_compression: bool = False
 
     # After the final destination has queued its last control acknowledgement,
-    # identify the two stations once in 50 WPM Morse. Off by default.
+    # identify the two stations once in 40 WPM Morse. Off by default.
     morse_id_after_ack: bool = False
 
     # Control-burst modem: "auto" picks AFSK1200 for FM, MFSK16 for HF.

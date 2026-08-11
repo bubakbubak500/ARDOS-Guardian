@@ -31,7 +31,7 @@ def modulate_morse(
     text: str,
     *,
     sample_rate: int = 48_000,
-    wpm: float = 50.0,
+    wpm: float = 40.0,
     tone_hz: float = 800.0,
     amplitude: float = 0.55,
 ) -> np.ndarray:
@@ -39,7 +39,7 @@ def modulate_morse(
 
     One dot is 1.2/WPM seconds; dashes are three dots, gaps within a letter one,
     between letters three and between words seven. A short raised-cosine edge
-    prevents key clicks without changing the requested 50 WPM cadence.
+    prevents key clicks without changing the requested 40 WPM cadence.
     """
     clean = normalise_morse_text(text)
     if not clean:

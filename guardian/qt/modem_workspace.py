@@ -249,7 +249,10 @@ class ModemWorkspace(QWidget):
             )
             wanted_profile = name
             schemes = SC_MCS_TABLE
-            wanted_mcs = self.runtime.config.g2_mcs
+            # The lab should open SEFDM on the measured robust operating point,
+            # not repeat the 2.3.0 256-QAM failure by inheriting an unrelated
+            # single-carrier MCS selection.
+            wanted_mcs = 6 if family == "sefdm" else self.runtime.config.g2_mcs
         for scheme in schemes:
             self.mcs_picker.addItem(scheme.label, scheme.index)
         self.profile_picker.setCurrentIndex(max(0, self.profile_picker.findData(wanted_profile)))
@@ -367,7 +370,7 @@ class ModemWorkspace(QWidget):
             fields["spacing"].setText(
                 (f"{profile.symbol_rate:.0f} symbol/s · τ={profile.ftn_tau:.2f}"
                  if profile.is_single_carrier else
-                 f"{profile.carrier_spacing_hz:.2f} Hz · α={profile.sefdm_alpha:.2f}")
+                 f"{profile.carrier_spacing_hz:.2f} Hz · α={profile.sefdm_alpha:.3f}")
             )
             fields["carriers"].setText(dual(
                 f"{profile.points_per_block} data + {profile.num_pilots} pilot per block",
@@ -396,7 +399,15 @@ class ModemWorkspace(QWidget):
             f"{facts.full_block_seconds:.2f} s of air for {facts.block_size} B",
             f"{facts.full_block_seconds:.2f} s vysílání na {facts.block_size} B",
         ))
-        if facts.sample_rate != 48000:
+        if self.selected_family() == "sefdm":
+            self.facts_note.setText(dual(
+                "Measured robust choice: MCS6 32-APSK. MCS4 256-QAM remains "
+                "above the present detector's nonlinear limit.",
+                "Ověřená robustní volba: MCS6 32-APSK. MCS4 256-QAM zůstává "
+                "nad nelineární hranicí současného detektoru.",
+            ))
+            self.facts_note.setProperty("statusRole", "info")
+        elif facts.sample_rate != 48000:
             self.facts_note.setText(tr("modem.needs_fast_card",
                                        rate=facts.sample_rate))
             self.facts_note.setProperty("statusRole", "warning")

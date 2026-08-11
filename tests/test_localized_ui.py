@@ -164,6 +164,7 @@ def test_payload_page_is_bilingual_in_both_directions() -> None:
         assert not dialog.vara_encryption.isChecked()
         assert not dialog.guardian_compression.isChecked()
         assert not dialog.morse_id_after_ack.isChecked()
+        assert "40 WPM" in dialog.morse_id_after_ack.text()
         dialog.guardian_compression.setChecked(True)
         assert not dialog.vara_file_compression.isEnabled()
         dialog.guardian_compression.setChecked(False)
@@ -186,6 +187,7 @@ def test_payload_page_is_bilingual_in_both_directions() -> None:
         assert "experimentální" in summary
         assert "vzorkování" in summary
         assert "nosných" in summary
+        assert "40 WPM" in dialog.morse_id_after_ack.text()
         captions = {label.text() for label in dialog.findChildren(QLabel)}
         assert "Modulace OFDM (MCS)" in captions
         assert "Předstih klíčování" in captions

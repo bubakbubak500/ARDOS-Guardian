@@ -909,7 +909,9 @@ def test_modem_lab_exposes_all_g2_waveform_families() -> None:
             workspace.family_picker.findData("sefdm")
         )
         assert workspace.selected_profile().name == "SEFDM_2K7"
-        assert "α=0.95" in workspace.facts_fields["spacing"].text()
+        assert "α=0.985" in workspace.facts_fields["spacing"].text()
+        assert workspace.selected_mcs() == 6
+        assert "32-APSK" in workspace.facts_note.text()
     finally:
         runtime.close()
 

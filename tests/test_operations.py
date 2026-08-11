@@ -148,7 +148,7 @@ def test_final_ack_queues_one_sender_de_receiver_morse_id(tmp_path) -> None:
     )
     try:
         operations._on_final_ack_sent(SimpleNamespace(source="ok2xxx"))
-        assert queued == [("OK2XXX DE OK7PS", 50.0)]
+        assert queued == [("OK2XXX DE OK7PS", 40.0)]
     finally:
         operations.audio_transport = None
         operations.close()

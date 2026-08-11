@@ -201,7 +201,7 @@ Guardian supports both **VARA FM** and **VARA HF**.
   the rules of the radio service and frequency in use; encrypted amateur-radio
   traffic is prohibited in many jurisdictions.
 * A disabled-by-default option makes the final receiving station append
-  `SENDER DE RECEIVER` once in Morse at **50 WPM**, after its final control
+  `SENDER DE RECEIVER` once in Morse at **40 WPM**, after its final control
   acknowledgements have left the radio.
 
 The same mailbox and routing model can therefore be used for local VHF/UHF networks and longer-distance HF communication.
@@ -402,13 +402,13 @@ Once the required software and map data are present, the core messaging system o
 
 # Guardian G2 soundcard modem — waveforms of Guardian's own
 
-Guardian **2.3.0** expands the experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
+Guardian **2.3.1** expands the experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
 
 Select it in *Settings → Payload* as **Guardian G2 soundcard modem (Experimental)**. VARA P2P stays the default, and a G2 modem station and a VARA station can talk to each other: the two peers agree on a transport during the ordinary control handshake, and unless *both* are configured for the built-in modem the pair falls back to VARA before anything is transmitted.
 
-The proven OFDM implementation is retained unchanged as the default. Version 2.3.0 adds three independently selectable experimental waveform modules: **SC-HS** (single-carrier Nyquist signaling with frequency-domain equalisation), **SC-FTN** (faster-than-Nyquist signaling at \(\tau=0.90\)), and **SEFDM** (compressed non-orthogonal multicarrier signaling at \(\alpha=0.95\)). The single-carrier modes add 256-QAM, 16-APSK and 32-APSK choices. All four families reuse the established framing, FEC, interleaving, CRC and selective-repeat ARQ; the existing control frames and transport negotiation stay unchanged.
+The proven OFDM implementation is retained unchanged as the default. Version 2.3 adds three independently selectable experimental waveform modules: **SC-HS** (single-carrier Nyquist signaling with frequency-domain equalisation), **SC-FTN** (faster-than-Nyquist signaling at \(\tau=0.90\)), and **SEFDM** (compressed non-orthogonal multicarrier signaling). Version 2.3.1 moves SEFDM to the measured robust point \(\alpha=0.985\), adds a joint time/carrier equalizer and uses denser pilots; MCS6 32-APSK passes the reproducible realistic-channel test. The single-carrier modes add 256-QAM, 16-APSK and 32-APSK choices. All four families reuse the established framing, FEC, interleaving, CRC and selective-repeat ARQ; the existing control frames and transport negotiation stay unchanged.
 
-The reproducible software model transfers an 8 KiB payload at about **949 B/s** with the existing 2.7 kHz-class OFDM benchmark, **1,412 B/s** with SC-HS and **1,553 B/s** with SC-FTN, including framing, FEC, ACK and a 250 ms PTT turnaround. These are channel-model results, not an on-air guarantee. SEFDM is deliberately included as a lab waveform: it is decodable at high SNR, but its present detector is less robust and has markedly higher crest factor. The complete assumptions, failures and radio-test procedure are in [the Guardian G2 2.3 waveform report](docs/G2_WAVEFORM_LAB_2.3.0.md).
+The reproducible software model transfers an 8 KiB payload at about **949 B/s** with the existing 2.7 kHz-class OFDM benchmark, **1,412 B/s** with SC-HS and **1,553 B/s** with SC-FTN, including framing, FEC, ACK and a 250 ms PTT turnaround. SEFDM now completes the same transfer at 654 B/s with one selective retry; it is robust enough to test, but not the capacity winner. These are channel-model results, not an on-air guarantee. The complete assumptions and radio-test procedure are in [the Guardian G2 2.3.1 waveform report](docs/G2_WAVEFORM_LAB_2.3.1.md).
 
 **The PHY has been on the air; adaptive format 2 still needs its first flight.** Two IC-705s, 2026-08-09: messages moved, and the audio path turned out to pass about 3 kHz — which makes `BENCH` the profile to use and `WIDE_5K` and above unreachable on that radio. The run also proved that repeated 512-byte PTT/ACK cycles, not raw PHY speed, dominated transfer time. [docs/OFDM_AIR_RESULTS_2026-08-09.md](docs/OFDM_AIR_RESULTS_2026-08-09.md) is what those radios measured, [the adaptive/selective-repeat note](docs/OFDM_G2_ADAPTIVE_ARQ.md) describes this implementation and first-test parameters, [docs/ofdm-vhf.md](docs/ofdm-vhf.md) has the full design, and [docs/OFDM_AIR_TEST.md](docs/OFDM_AIR_TEST.md) is the procedure ([česky](docs/OFDM_AIR_TEST.cs.md)).
 
@@ -428,7 +428,7 @@ This is how the modem gets tuned: a capture lets the whole receiver be re-run ov
 
 # Current status
 
-Guardian **1.0.0** was the first release where the interface and documentation were consolidated around the radio functionality developed and tested throughout the 0.6 series. **2.3.0** is the current Guardian G2 waveform-lab release.
+Guardian **1.0.0** was the first release where the interface and documentation were consolidated around the radio functionality developed and tested throughout the 0.6 series. **2.3.1** is the current Guardian G2 waveform-lab release.
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |

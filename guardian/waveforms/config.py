@@ -153,6 +153,7 @@ SC_FTN_2K7 = WaveformProfile(
 )
 SEFDM_2K7 = WaveformProfile(
     name="SEFDM_2K7", family="sefdm", tx_rms=0.08,
+    num_carriers=58, pilot_spacing=6, sefdm_alpha=0.985,
 )
 
 PROFILE_LADDER = (SC_HS_2K7.name, SC_FTN_2K7.name, SEFDM_2K7.name)

@@ -22,6 +22,8 @@ _SC_TRAINING = 96
 _SC_GUARD = 8
 _SEFDM_PREAMBLE = 2
 _SEFDM_TRAINING = 2
+_SEFDM_EQUALIZER_TAPS = 97
+_SEFDM_EQUALIZER_RIDGE = 1e-4
 
 
 def _bpsk(rng: np.random.Generator, count: int) -> np.ndarray:
@@ -45,6 +47,23 @@ def _crest_db(samples) -> float | None:
     if rms <= 0.0 or peak <= 0.0:
         return None
     return float(20.0 * np.log10(peak / rms))
+
+
+def _occupied_analytic(samples, profile: WaveformProfile) -> np.ndarray:
+    """Analytic audio restricted to the SEFDM occupied band plus one carrier."""
+    values = np.asarray(samples, dtype=np.float64)
+    count = len(values)
+    if count == 0:
+        return np.zeros(0, dtype=np.complex128)
+    low, high = profile.occupied_band
+    margin = profile.carrier_spacing_hz
+    scale = count / profile.sample_rate
+    first = max(1, int(np.floor((low - margin) * scale)))
+    last = min(count // 2, int(np.ceil((high + margin) * scale)))
+    spectrum = np.fft.fft(values)
+    kept = np.zeros(count, dtype=np.complex128)
+    kept[first:last + 1] = 2.0 * spectrum[first:last + 1]
+    return np.fft.ifft(kept)
 
 
 def _rrc(beta: float, samples_per_symbol: int, span: int = 12) -> np.ndarray:
@@ -385,6 +404,9 @@ class SefdmReceiver:
                        if len(self.samples) else 0.0),
             crest_factor_db=_crest_db(self.samples),
         )
+        self._analytic = analytic(self.samples)
+        self._band_analytic = _occupied_analytic(self.samples, profile)
+        self._equalized = self.samples.copy()
         self._data = np.zeros((0, profile.points_per_block), dtype=np.complex128)
         self._variance = np.ones(profile.points_per_block, dtype=np.float64)
         self._demod = self._real_demodulator(0.0)
@@ -399,27 +421,87 @@ class SefdmReceiver:
         return (self.metrics.channel_response if self.metrics.channel_response is not None
                 else np.ones(self.profile.num_carriers, dtype=np.complex128))
 
-    def _real_demodulator(self, cfo_hz: float) -> np.ndarray:
-        """Real least-squares detector for I/Q coefficients.
-
-        Demodulating the analytic signal would be simpler, but a finite burst's
-        Hilbert-transform edge error is magnified by the intentionally
-        ill-conditioned SEFDM carrier matrix.  Solving the exact real synthesis
-        equation avoids that artificial error and remains deterministic.
-        """
+    def _carrier_basis(self, cfo_hz: float) -> np.ndarray:
         n = np.arange(self.profile.fft_size, dtype=np.float64)
-        basis = np.exp(
+        return np.exp(
             2j * np.pi * n[:, None]
             * (self.modulator.frequencies[None, :] + cfo_hz)
             / self.profile.sample_rate
         ) / np.sqrt(self.profile.fft_size)
+
+    def _real_demodulator(self, cfo_hz: float) -> np.ndarray:
+        """Exact real I/Q least-squares detector for the SEFDM carrier basis."""
+        basis = self._carrier_basis(cfo_hz)
         real_basis = np.concatenate([basis.real, -basis.imag], axis=1)
         return np.linalg.pinv(real_basis, rcond=1e-10)
+
+    def _time_equalizer(self, start: int, cfo_hz: float) -> tuple[np.ndarray, np.ndarray]:
+        """Learn one passband FIR inverse from the complete known prefix.
+
+        The SSB-like radio path is linear in real audio but is not diagonal in a
+        compressed carrier basis.  Removing CFO first and equalising the time
+        waveform therefore restores the condition under which the exact SEFDM
+        matrix was derived.
+        """
+        n = np.arange(len(self.samples), dtype=np.float64)
+        reference = self.modulator.reference()
+        corrected_complex = (
+            self._analytic
+            * np.exp(-2j * np.pi * cfo_hz * n / self.profile.sample_rate)
+        )
+        observed_known = corrected_complex[start:start + len(reference)]
+        if len(observed_known) < len(reference):
+            raise ValueError("SEFDM burst is truncated during phase estimation")
+        provisional = self._real_demodulator(0.0)
+        correlations = []
+        cfo_real = np.real(corrected_complex)
+        count = self.profile.num_carriers
+        for index, known in enumerate(self.known.training):
+            block = _SEFDM_PREAMBLE + index
+            offset = (
+                start + block * self.profile.symbol_samples
+                + self.profile.cp_length
+            )
+            body = cfo_real[offset:offset + self.profile.fft_size]
+            if len(body) < self.profile.fft_size:
+                raise ValueError("SEFDM burst is truncated during phase estimation")
+            coefficients = provisional @ body
+            values = coefficients[:count] + 1j * coefficients[count:]
+            correlations.append(np.vdot(known, values))
+        common_phase = float(np.angle(np.sum(correlations)))
+        corrected = np.real(corrected_complex * np.exp(-1j * common_phase))
+        observed = corrected[start:start + len(reference)]
+        taps = min(
+            _SEFDM_EQUALIZER_TAPS,
+            self.profile.cp_length + 1,
+            len(reference) // 4 * 2 + 1,
+        )
+        if taps % 2 == 0:
+            taps -= 1
+        if len(observed) < len(reference) or taps < 3:
+            raise ValueError("SEFDM burst is truncated during time equalisation")
+        radius = taps // 2
+        windows = np.lib.stride_tricks.sliding_window_view(observed, taps)
+        target = reference[radius:radius + len(windows)]
+        gram = windows.T @ windows
+        identity = np.zeros(taps, dtype=np.float64)
+        identity[radius] = 1.0
+        ridge = np.eye(taps, dtype=np.float64) * (
+            max(float(np.trace(gram)), 1.0) * _SEFDM_EQUALIZER_RIDGE
+        )
+        coefficients = identity + np.linalg.solve(
+            gram + ridge,
+            windows.T @ (target - windows @ identity),
+        )
+        padded = np.pad(corrected, (radius, radius))
+        all_windows = np.lib.stride_tricks.sliding_window_view(padded, taps)
+        equalized = all_windows @ coefficients
+        return equalized, coefficients
 
     def _block(self, samples: np.ndarray, start: int, index: int,
                cfo_hz: float = 0.0) -> np.ndarray:
         offset = start + index * self.profile.symbol_samples + self.profile.cp_length
-        body = samples[offset:offset + self.profile.fft_size]
+        body = self._equalized[offset:offset + self.profile.fft_size]
         if len(body) < self.profile.fft_size:
             raise IndexError("SEFDM burst is truncated")
         coefficients = self._demod @ body
@@ -437,7 +519,7 @@ class SefdmReceiver:
         self.metrics.sync_confidence = confidence
         if confidence < 0.18:
             raise ValueError("no SEFDM burst detected")
-        complex_audio = analytic(self.samples)
+        complex_audio = self._band_analytic
         symbol = self.profile.symbol_samples
         body0 = complex_audio[
             start + self.profile.cp_length:start + symbol
@@ -456,18 +538,19 @@ class SefdmReceiver:
         if abs(cfo) < 0.05:
             cfo = 0.0
         self.metrics.cfo_hz = cfo
-        self._demod = self._real_demodulator(cfo)
+        self._equalized, equalizer = self._time_equalizer(start, cfo)
+        self._demod = self._real_demodulator(0.0)
 
         observed_training = np.asarray([
-            self._block(self.samples, start, _SEFDM_PREAMBLE + index, cfo)
+            self._block(self.samples, start, _SEFDM_PREAMBLE + index, 0.0)
             for index in range(_SEFDM_TRAINING)
         ])
         estimates = observed_training / self.known.training
-        channel = estimates.mean(axis=0)
+        residual_channel = estimates.mean(axis=0)
         difference = (estimates[0] - estimates[1]) / 2.0
         noise = np.maximum(np.abs(difference) ** 2, 1e-9)
-        self.metrics.channel_response = channel
-        signal = max(float(np.mean(np.abs(channel) ** 2)), 1e-12)
+        self.metrics.channel_response = equalizer.astype(np.complex128)
+        signal = max(float(np.mean(np.abs(estimates) ** 2)), 1e-12)
         noise_mean = max(float(np.mean(noise)), 1e-12)
         self.metrics.snr_db = float(10.0 * np.log10(signal / noise_mean))
 
@@ -476,7 +559,10 @@ class SefdmReceiver:
         slopes = []
         positions = np.arange(self.profile.num_carriers, dtype=np.float64)
         for index in range(_SEFDM_PREAMBLE + _SEFDM_TRAINING, total):
-            observed = self._block(self.samples, start, index, cfo) / channel
+            observed = (
+                self._block(self.samples, start, index, 0.0)
+                / residual_channel
+            )
             residual = (
                 observed[self.modulator.pilot_positions] * np.conj(self.known.pilots)
             )
@@ -485,12 +571,18 @@ class SefdmReceiver:
                 np.unwrap(np.angle(residual)), 1,
             )
             slopes.append(float(slope))
-            corrected = observed * np.exp(-1j * (intercept + slope * positions))
+            amplitude = max(float(np.mean(np.abs(residual))), 1e-9)
+            corrected = (
+                observed * np.exp(-1j * (intercept + slope * positions))
+                / amplitude
+            )
             rows.append(corrected[self.modulator.data_positions])
         if rows:
             self._data = np.asarray(rows, dtype=np.complex128)
-        gain = np.abs(channel[self.modulator.data_positions]) ** 2
-        self._variance = noise[self.modulator.data_positions] / np.maximum(gain, 1e-12)
+        gain = np.abs(residual_channel[self.modulator.data_positions]) ** 2
+        self._variance = (
+            noise[self.modulator.data_positions] / np.maximum(gain, 1e-12)
+        )
         self.metrics.phase_slope = float(np.mean(slopes)) if slopes else 0.0
 
     def available_data_symbols(self) -> int:

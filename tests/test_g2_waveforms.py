@@ -19,6 +19,7 @@ from guardian.waveforms.config import SC_FTN_2K7, SC_HS_2K7, SEFDM_2K7
 from guardian.waveforms.constellation import (BITS_PER_SYMBOL, demap_llr,
                                               map_bits)
 from guardian.waveforms.framing import ExperimentalBurstCodec
+from guardian.waveforms import bench as waveform_bench
 
 
 PROFILES = (SC_HS_2K7, SC_FTN_2K7, SEFDM_2K7)
@@ -35,6 +36,8 @@ def test_profiles_are_independent_and_fit_the_voice_channel() -> None:
     assert SC_FTN_2K7.ftn_tau == pytest.approx(0.9)
     assert SC_FTN_2K7.symbol_rate > SC_HS_2K7.symbol_rate
     assert SEFDM_2K7.sefdm_alpha < 1.0
+    assert SEFDM_2K7.sefdm_alpha == pytest.approx(0.985)
+    assert SEFDM_2K7.pilot_spacing == 6
     assert SEFDM_2K7.points_per_block > BENCH.num_data_carriers
 
 
@@ -94,6 +97,18 @@ def test_each_new_phy_decodes_in_its_measured_awgn_region(profile, snr_db) -> No
     )
     aired = Channel(profile, spec, seed=7)(clean)
     assert codec.decode_burst(profile, aired).payload == payload
+
+
+def test_sefdm_apsk32_survives_the_full_realistic_channel() -> None:
+    results = [
+        waveform_bench.run_burst(
+            SEFDM_2K7, 6, payload_bytes=512, snr_db=35.0,
+            seed=0x213 + index, fec="7/8",
+        )
+        for index in range(8)
+    ]
+    assert all(result.passed for result in results)
+    assert all(result.metrics.error is None for result in results)
 
 
 @pytest.mark.parametrize(

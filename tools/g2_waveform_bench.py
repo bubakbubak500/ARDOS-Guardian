@@ -55,7 +55,10 @@ class TransferRow:
 
 
 def measure(profile, engine, args) -> Row:
-    selected_mcs = min(args.mcs, 3) if engine is ofdm_bench else args.mcs
+    if getattr(profile, "family", "ofdm") == "sefdm" and args.sefdm_mcs is not None:
+        selected_mcs = args.sefdm_mcs
+    else:
+        selected_mcs = min(args.mcs, 3) if engine is ofdm_bench else args.mcs
     results = []
     for run in range(args.runs):
         spec = None
@@ -92,7 +95,10 @@ def measure(profile, engine, args) -> Row:
 
 
 def measure_transfer(profile, engine, args) -> TransferRow:
-    selected_mcs = min(args.mcs, 3) if engine is ofdm_bench else args.mcs
+    if getattr(profile, "family", "ofdm") == "sefdm" and args.sefdm_mcs is not None:
+        selected_mcs = args.sefdm_mcs
+    else:
+        selected_mcs = min(args.mcs, 3) if engine is ofdm_bench else args.mcs
     selected_fec = fec_profile(args.fec)
     if engine is ofdm_bench:
         fixed = AdaptationConfig(
@@ -145,6 +151,10 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--snr", type=float, default=30.0)
     result.add_argument("--mcs", type=int, default=3)
+    result.add_argument(
+        "--sefdm-mcs", type=int, choices=range(7),
+        help="override MCS for SEFDM (MCS6/32-APSK is the robust 2.3.1 choice)",
+    )
     result.add_argument("--fec", default="7/8", choices=("1/2", "2/3", "3/4", "5/6", "7/8"))
     result.add_argument("--payload", type=int, default=512)
     result.add_argument("--runs", type=int, default=8)

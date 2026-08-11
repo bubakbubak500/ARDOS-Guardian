@@ -689,7 +689,7 @@ class AudioControlTransport(ControlTransport):
                 self._pending_tx -= 1
                 self._tx_condition.notify_all()
 
-    def send_morse_after_pending(self, text: str, *, wpm: float = 50.0) -> bool:
+    def send_morse_after_pending(self, text: str, *, wpm: float = 40.0) -> bool:
         """Queue a CW identifier after all control frames already in flight.
 
         The final RECEIVED/DELIVERED frames are asynchronous. Counting this as
