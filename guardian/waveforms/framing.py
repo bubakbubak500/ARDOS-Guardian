@@ -11,7 +11,8 @@ import math
 
 import numpy as np
 
-from ..ofdm.coding import (FecProfile, decode_soft, encode_bits, encoded_bits,
+from ..ofdm.coding import (FecProfile, combine_harq_soft, decode_soft, encode_bits, encoded_bits,
+                           iterative_decode_candidates,
                            fec_profile)
 from ..ofdm.config import HEADER_MCS, sc_mcs
 from ..ofdm.framing import (
@@ -23,13 +24,17 @@ from ..ofdm.framing import (
 from ..ofdm.interleaving import deinterleave, interleave
 from ..protocol import crc16
 from .config import WaveformProfile
-from .constellation import bits_per_symbol, demap_llr, map_bits
+from .constellation import (bits_per_symbol, coded_capacity, demap_llr,
+                            map_bits,
+                            reliability_gated_refine)
 from .phy import correlation_candidates, make_modulator, make_receiver
 
 
 def section_blocks(profile: WaveformProfile, byte_count: int, modulation: str,
                    fec: FecProfile | int = FecProfile.FEC_1_2) -> int:
-    per_block = profile.points_per_block * bits_per_symbol(modulation)
+    per_block = coded_capacity(profile.points_per_block, modulation)
+    if per_block < 1:
+        raise ValueError(f"profile block is too short for {modulation}")
     return int(math.ceil(encoded_bits(byte_count, fec) / per_block))
 
 
@@ -37,33 +42,83 @@ def header_blocks(profile: WaveformProfile) -> int:
     return section_blocks(profile, HEADER_BYTES, HEADER_MCS.modulation)
 
 
+def _noise_prefix(noise_var, count: int):
+    variance = np.asarray(noise_var, dtype=np.float64)
+    return variance.reshape(-1)[:count] if variance.ndim else noise_var
+
+
 def encode_section(profile: WaveformProfile, data: bytes, modulation: str,
                    fec: FecProfile | int = FecProfile.FEC_1_2) -> np.ndarray:
     bits = np.unpackbits(np.frombuffer(data, dtype=np.uint8))
     coded = encode_bits(bits, fec)
-    per_block = profile.points_per_block * bits_per_symbol(modulation)
+    per_block = coded_capacity(profile.points_per_block, modulation)
     blocks = int(math.ceil(len(coded) / per_block))
     padded = np.zeros(blocks * per_block, dtype=np.int8)
     padded[:len(coded)] = coded
-    return map_bits(interleave(padded), modulation).reshape(
-        blocks, profile.points_per_block
-    )
+    mapped = map_bits(interleave(padded), modulation)
+    grid = np.zeros(blocks * profile.points_per_block, dtype=np.complex128)
+    grid[:len(mapped)] = mapped
+    return grid.reshape(blocks, profile.points_per_block)
 
 
-def decode_section(symbols, noise_var, byte_count: int, modulation: str,
+def decode_section(profile: WaveformProfile, symbols, noise_var,
+                   byte_count: int, modulation: str,
                    fec: FecProfile | int = FecProfile.FEC_1_2) -> bytes:
-    llr = demap_llr(symbols, modulation, noise_var)
+    refined = reliability_gated_refine(symbols, modulation)
+    wanted_symbols = (
+        (refined.size // profile.points_per_block)
+        * (profile.points_per_block // 16) * 16
+        if modulation == "pas64" else refined.size
+    )
+    llr = demap_llr(
+        refined.reshape(-1)[:wanted_symbols], modulation,
+        _noise_prefix(noise_var, wanted_symbols),
+    )
     soft = deinterleave(llr)
     count = encoded_bits(byte_count, fec)
     bits = decode_soft(soft[:count], byte_count, fec)
     return np.packbits(bits[:byte_count * 8].astype(np.uint8)).tobytes()
 
 
+def decode_section_with_soft(profile: WaveformProfile, symbols, noise_var,
+                             byte_count: int, modulation: str,
+                             fec: FecProfile | int = FecProfile.FEC_1_2,
+                             prior_soft=None) -> tuple[list[bytes], np.ndarray]:
+    refined = reliability_gated_refine(symbols, modulation)
+    wanted_symbols = (
+        (refined.size // profile.points_per_block)
+        * (profile.points_per_block // 16) * 16
+        if modulation == "pas64" else refined.size
+    )
+    llr = demap_llr(
+        refined.reshape(-1)[:wanted_symbols], modulation,
+        _noise_prefix(noise_var, wanted_symbols),
+    )
+    soft = deinterleave(llr)[:encoded_bits(byte_count, fec)]
+    if prior_soft is not None:
+        prior_fec, prior = prior_soft
+        soft = combine_harq_soft(
+            soft, fec, prior, prior_fec, byte_count
+        )
+    candidates = iterative_decode_candidates(soft, byte_count, fec)
+    return ([np.packbits(bits[:byte_count * 8].astype(np.uint8)).tobytes()
+             for bits in candidates], soft)
+
+
 def reference_evm(profile: WaveformProfile, symbols, data: bytes,
                   modulation: str,
                   fec: FecProfile | int = FecProfile.FEC_1_2) -> float | None:
-    reference = encode_section(profile, data, modulation, fec).reshape(-1)
-    observed = np.asarray(symbols, dtype=np.complex128).reshape(-1)
+    reference = encode_section(profile, data, modulation, fec)
+    observed = reliability_gated_refine(symbols, modulation)
+    if modulation == "pas64":
+        # The fixed-composition matcher consumes complete 16-symbol groups.
+        # Each physical row is zero-filled after its last complete group; those
+        # silent padding points must not make the reported EVM look better.
+        usable = (profile.points_per_block // 16) * 16
+        reference = reference.reshape(-1, profile.points_per_block)[:, :usable]
+        observed = observed.reshape(-1, profile.points_per_block)[:, :usable]
+    reference = reference.reshape(-1)
+    observed = observed.reshape(-1)
     count = min(len(reference), len(observed))
     if count < 1:
         return None
@@ -72,6 +127,36 @@ def reference_evm(profile: WaveformProfile, symbols, data: bytes,
     if power <= 0.0:
         return None
     return float(np.sqrt(np.mean(np.abs(error) ** 2) / power))
+
+
+def reference_gmi(profile: WaveformProfile, symbols, noise_var, data: bytes,
+                  modulation: str,
+                  fec: FecProfile | int = FecProfile.FEC_1_2) -> float | None:
+    raw = np.unpackbits(np.frombuffer(data, dtype=np.uint8))
+    coded = encode_bits(raw, fec)
+    per_block = coded_capacity(profile.points_per_block, modulation)
+    padded = np.zeros(int(math.ceil(len(coded) / per_block)) * per_block,
+                      dtype=np.int8)
+    padded[:len(coded)] = coded
+    reference = interleave(padded)
+    observed = reliability_gated_refine(symbols, modulation)
+    wanted_symbols = (
+        (observed.size // profile.points_per_block)
+        * (profile.points_per_block // 16) * 16
+        if modulation == "pas64" else observed.size
+    )
+    llr = demap_llr(
+        observed.reshape(-1)[:wanted_symbols], modulation,
+        _noise_prefix(noise_var, wanted_symbols),
+    )
+    count = min(len(reference), len(llr))
+    if count < 1:
+        return None
+    signed = (2.0 * reference[:count] - 1.0) * llr[:count]
+    per_bit = 1.0 - float(np.mean(np.logaddexp(0.0, -signed)) / np.log(2.0))
+    rate = (coded_capacity(16, modulation) / 16.0
+            if modulation == "pas64" else bits_per_symbol(modulation))
+    return max(0.0, min(1.0, per_bit)) * rate
 
 
 class ExperimentalBurstCodec:
@@ -154,7 +239,7 @@ class ExperimentalBurstCodec:
 
     @staticmethod
     def decode_burst(profile: WaveformProfile, samples,
-                     start_hint: int | None = None) -> DecodedBurst:
+                     start_hint: int | None = None, *, soft_cache=None) -> DecodedBurst:
         try:
             receiver = make_receiver(profile, samples, start_hint)
         except (ValueError, IndexError, np.linalg.LinAlgError) as exc:
@@ -168,7 +253,7 @@ class ExperimentalBurstCodec:
             return DecodedBurst(metrics=metrics)
         head_symbols, head_var, _ = receiver.data_symbols(0, head_count)
         head_bytes = decode_section(
-            head_symbols, head_var, HEADER_BYTES, HEADER_MCS.modulation
+            profile, head_symbols, head_var, HEADER_BYTES, HEADER_MCS.modulation
         )
         try:
             header = PhyHeader.decode(head_bytes, mcs_lookup=sc_mcs)
@@ -194,7 +279,7 @@ class ExperimentalBurstCodec:
             values, variance, slope = receiver.data_symbols(cursor, count)
             metrics.phase_slope = slope
             framed = decode_section(
-                values, variance, framed_bytes, HEADER_MCS.modulation
+                profile, values, variance, framed_bytes, HEADER_MCS.modulation
             )
             payload, given = framed[:header.payload_len], framed[header.payload_len:]
             if given != _CRC.pack(crc16(payload)):
@@ -215,7 +300,9 @@ class ExperimentalBurstCodec:
                 return DecodedBurst(header=header, metrics=metrics)
             values, variance, slope = receiver.data_symbols(cursor, count)
             metrics.phase_slope = slope
-            framed = decode_section(values, variance, framed_bytes, modulation)
+            framed = decode_section(
+                profile, values, variance, framed_bytes, modulation
+            )
             payload, given = framed[:header.payload_len], framed[header.payload_len:]
             if given != _CRC.pack(crc16(payload)):
                 metrics.error = f"payload CRC failed on block {header.block_seq}"
@@ -239,7 +326,7 @@ class ExperimentalBurstCodec:
         values, variance, slope = receiver.data_symbols(cursor, manifest_count)
         cursor += manifest_count
         raw_manifest = decode_section(
-            values, variance, manifest_bytes, HEADER_MCS.modulation
+            profile, values, variance, manifest_bytes, HEADER_MCS.modulation
         )
         try:
             entries = _decode_manifest(
@@ -261,6 +348,7 @@ class ExperimentalBurstCodec:
         failed: set[int] = set()
         slopes = [slope]
         evms: list[float] = []
+        gmis: list[float] = []
         available = receiver.available_data_symbols()
         for position, (sequence, length) in enumerate(entries):
             framed_bytes = length + _CRC.size
@@ -271,20 +359,49 @@ class ExperimentalBurstCodec:
             values, variance, data_slope = receiver.data_symbols(cursor, count)
             cursor += count
             slopes.append(data_slope)
-            framed = decode_section(
-                values, variance, framed_bytes, modulation, header.fec
+            cache_key = (
+                int(header.msg_id), int(sequence), int(header.mcs),
+                int(framed_bytes),
             )
+            prior = None if soft_cache is None else soft_cache.get(cache_key)
+            framed_candidates, combined_soft = decode_section_with_soft(
+                profile, values, variance, framed_bytes, modulation,
+                header.fec, prior
+            )
+            if prior is not None:
+                metrics.harq_combined_blocks += 1
+            framed = framed_candidates[0]
+            for iteration, candidate in enumerate(framed_candidates, start=1):
+                candidate_payload = candidate[:length]
+                if candidate[length:] == _CRC.pack(crc16(candidate_payload)):
+                    framed = candidate
+                    metrics.turbo_iterations = max(metrics.turbo_iterations, iteration)
+                    break
             payload, given = framed[:length], framed[length:]
             if given != _CRC.pack(crc16(payload)):
                 failed.add(sequence)
+                if soft_cache is not None:
+                    soft_cache[cache_key] = (header.fec, combined_soft)
                 continue
+            if soft_cache is not None:
+                for key in [item for item in soft_cache
+                            if item[0] == int(header.msg_id)
+                            and item[1] == int(sequence)]:
+                    soft_cache.pop(key, None)
             decoded[sequence] = payload
             value = reference_evm(profile, values, framed, modulation, header.fec)
             if value is not None:
                 evms.append(value)
+            information = reference_gmi(
+                profile, values, variance, framed, modulation, header.fec
+            )
+            if information is not None:
+                gmis.append(information)
         metrics.phase_slope = float(np.mean(slopes))
         if evms:
             _set_evm(metrics, float(np.sqrt(np.mean(np.square(evms)))), "reference")
+        if gmis:
+            metrics.gmi_bits_per_symbol = float(np.mean(gmis))
         metrics.frame_ok = not failed and len(decoded) == len(entries)
         if not metrics.frame_ok:
             missing = sorted(failed | (set(order) - set(decoded)))
@@ -298,7 +415,8 @@ class ExperimentalBurstCodec:
         )
 
     @classmethod
-    def decode_many(cls, profile: WaveformProfile, samples, *, limit: int = 32
+    def decode_many(cls, profile: WaveformProfile, samples, *, limit: int = 32,
+                    soft_cache=None
                     ) -> list[DecodedBurst]:
         """Decode each independently synchronised microburst in one RX window."""
         raw = np.asarray(samples, dtype=np.float64)
@@ -312,7 +430,9 @@ class ExperimentalBurstCodec:
         for start in starts:
             if start < consumed_until:
                 continue
-            decoded = cls.decode_burst(profile, raw[start:], start_hint=0)
+            decoded = cls.decode_burst(
+                profile, raw[start:], start_hint=0, soft_cache=soft_cache
+            )
             if decoded.header is None:
                 continue
             lengths = ([decoded.block_lengths[sequence]

@@ -19,7 +19,7 @@ from ..ofdm.framing import OfdmFrameType, PhyHeader, split_blocks
 from ..ofdm.link import OfdmLink, simulated_pair
 from ..ofdm.metrics import LinkMetrics
 from .config import WaveformProfile
-from .constellation import bits_per_symbol
+from .constellation import bits_per_symbol, coded_capacity
 from .framing import ExperimentalBurstCodec, header_blocks
 
 WaveformFacts = ofdm_bench.WaveformFacts
@@ -33,7 +33,7 @@ def describe(profile: WaveformProfile, mcs_index: int,
     scheme = sc_mcs(mcs_index)
     selected_fec = fec_profile(fec)
     low, high = profile.occupied_band
-    coded = profile.points_per_block * bits_per_symbol(scheme.modulation)
+    coded = coded_capacity(profile.points_per_block, scheme.modulation)
     nominal = fec_spec(selected_fec).rate
     information = coded * nominal.numerator // nominal.denominator
     header = PhyHeader(
@@ -127,7 +127,8 @@ def run_transfer(profile: WaveformProfile, mcs_index: int = 2, *,
                  fec: FecProfile | int | str = FecProfile.FEC_7_8,
                  burst_bytes: int = 8192, arq_block_bytes: int = 512,
                  spec: ChannelSpec | None = None,
-                 train_bursts: int = 1) -> TransferResult:
+                 train_bursts: int = 1, superframe: bool = False,
+                 adaptive_train: bool = False) -> TransferResult:
     selected_fec = fec_profile(fec)
     config = AdaptationConfig(
         adaptive_fec=False,
@@ -158,11 +159,13 @@ def run_transfer(profile: WaveformProfile, mcs_index: int = 2, *,
         profile, near, mcs_index=mcs_index, ptt_turnaround=ptt_turnaround,
         timeout_margin=0.5, controller=sender_controller, codec=codec,
         train_bursts=train_bursts,
+        superframe=superframe, adaptive_train=adaptive_train,
     )
     receiver = OfdmLink(
         profile, far, mcs_index=mcs_index, ptt_turnaround=ptt_turnaround,
         timeout_margin=0.5, controller=receiver_controller, codec=codec,
         train_bursts=train_bursts,
+        superframe=superframe, adaptive_train=adaptive_train,
     )
     received: dict[str, bytes | None] = {}
     listener = threading.Thread(

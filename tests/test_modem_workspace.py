@@ -894,19 +894,36 @@ def test_modem_lab_exposes_all_g2_waveform_families() -> None:
             workspace.family_picker.itemData(index)
             for index in range(workspace.family_picker.count())
         }
-        assert offered == {"ofdm", "sc_hs", "sc_ftn", "sefdm"}
+        assert offered == {"ofdm", "sc_hs", "sc_ftn", "sc_fde_ftn", "sefdm"}
 
         workspace.family_picker.setCurrentIndex(
             workspace.family_picker.findData("sc_ftn")
+        )
+        workspace.profile_picker.setCurrentIndex(
+            workspace.profile_picker.findData("SC_FTN_2K7")
         )
         assert workspace.selected_profile().name == "SC_FTN_2K7"
         assert workspace.facts.profile == "SC_FTN_2K7"
         assert "τ=0.90" in workspace.facts_fields["spacing"].text()
         assert workspace.mcs_picker.findData(5) >= 0  # 16-APSK
         assert workspace.mcs_picker.findData(6) >= 0  # 32-APSK
+        assert workspace.mcs_picker.findData(11) >= 0  # 128-APSK
+        assert workspace.profile_picker.count() == 5
+
+        workspace.family_picker.setCurrentIndex(
+            workspace.family_picker.findData("sc_fde_ftn")
+        )
+        workspace.profile_picker.setCurrentIndex(
+            workspace.profile_picker.findData("SC_FDE_FTN_20K")
+        )
+        assert workspace.selected_profile().name == "SC_FDE_FTN_20K"
+        assert "RRC" in workspace.facts_fields["fft"].text()
 
         workspace.family_picker.setCurrentIndex(
             workspace.family_picker.findData("sefdm")
+        )
+        workspace.profile_picker.setCurrentIndex(
+            workspace.profile_picker.findData("SEFDM_2K7")
         )
         assert workspace.selected_profile().name == "SEFDM_2K7"
         assert "α=0.985" in workspace.facts_fields["spacing"].text()

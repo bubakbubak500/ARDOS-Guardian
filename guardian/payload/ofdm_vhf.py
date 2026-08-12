@@ -38,7 +38,7 @@ from ..ofdm.link import OfdmBurstCodec
 from ..ofdm.adaptation import AdaptationConfig, LinkAdaptationController
 from ..ofdm.coding import FecProfile, fec_profile, fec_spec
 from ..ofdm.framing import OfdmFrameType, burst_samples
-from ..waveforms.config import PROFILES as EXPERIMENTAL_PROFILES
+from ..waveforms.config import profile_for as experimental_profile_for
 from ..waveforms.framing import ExperimentalBurstCodec
 from ..timing import RxTiming, TxTiming
 from .base import DoneCb, PayloadBackend
@@ -396,16 +396,20 @@ class OfdmVhfBackend(PayloadBackend):
     def __init__(self, *, ofdm_profile: str = "BENCH", ofdm_mcs: int = 1,
                  ofdm_tx_lead_ms: int = 300, ofdm_tx_tail_ms: int = 100,
                  ofdm_max_retries: int = 4,
-                 ofdm_adaptive_fec: bool = True, ofdm_fec: str = "1/2",
+                  ofdm_adaptive_fec: bool = True,
+                  ofdm_modern_ldpc: bool = False, ofdm_fec: str = "1/2",
                  ofdm_adaptive_burst: bool = True, ofdm_burst_bytes: int = 4096,
                  ofdm_min_burst_bytes: int = 512,
                  ofdm_max_burst_bytes: int = 8192,
                  ofdm_arq_block_bytes: int = 512,
                  ofdm_timeout_multiplier: float = 1.0,
                  ofdm_legacy_mode: bool = False,
-                 ofdm_train_bursts: int = 1, ofdm_train_gap_ms: int = 30,
+                 ofdm_train_bursts: int = 1, ofdm_adaptive_train: bool = False,
+                 ofdm_superframe: bool = False,
+                 ofdm_train_gap_ms: int = 30,
                  ofdm_max_train_seconds: float = 20.0,
-                 g2_waveform: str = "ofdm", g2_mcs: int = 2,
+                  g2_waveform: str = "ofdm", g2_bandwidth: str = "2K7",
+                  g2_mcs: int = 2, g2_adaptive_mcs: bool = False,
                  g2_tx_scale: float = 1.0,
                  audio_input=None, audio_output=None,
                  ptt: Callable[[bool], None] | None = None,
@@ -413,13 +417,12 @@ class OfdmVhfBackend(PayloadBackend):
                  on_log=None, on_qsy=None, on_receive_qsy=None, on_unqsy=None,
                  on_acquire=None, on_release=None, pipe_factory=None) -> None:
         self.waveform_family = str(g2_waveform or "ofdm").strip().lower()
-        experimental = {
-            "sc_hs": "SC_HS_2K7",
-            "sc_ftn": "SC_FTN_2K7",
-            "sefdm": "SEFDM_2K7",
-        }
+        experimental = {"sc_hs", "sc_ftn", "sc_fde_ftn", "sefdm"}
+        self.g2_bandwidth = str(g2_bandwidth or "2K7").strip().upper()
         if self.waveform_family in experimental:
-            self.profile = EXPERIMENTAL_PROFILES[experimental[self.waveform_family]]
+            self.profile = experimental_profile_for(
+                self.waveform_family, self.g2_bandwidth
+            )
             self.codec = ExperimentalBurstCodec()
         else:
             self.waveform_family = "ofdm"
@@ -427,6 +430,7 @@ class OfdmVhfBackend(PayloadBackend):
             self.codec = OfdmBurstCodec()
         self.requested_profile = ofdm_profile
         self.mcs_index = int(ofdm_mcs if self.waveform_family == "ofdm" else g2_mcs)
+        self.adaptive_mcs = bool(g2_adaptive_mcs)
         self.tx_scale = min(1.0, max(0.05, float(g2_tx_scale)))
         self.tx_lead_ms = int(ofdm_tx_lead_ms)
         self.tx_tail_ms = int(ofdm_tx_tail_ms)
@@ -444,6 +448,7 @@ class OfdmVhfBackend(PayloadBackend):
         fixed_burst = max(arq_bytes, int(ofdm_burst_bytes))
         self.adaptation_config = AdaptationConfig(
             adaptive_fec=bool(ofdm_adaptive_fec),
+            modern_ldpc=bool(ofdm_modern_ldpc),
             fixed_fec=fec_profile(ofdm_fec),
             adaptive_burst=bool(ofdm_adaptive_burst),
             fixed_burst_bytes=fixed_burst,
@@ -457,6 +462,8 @@ class OfdmVhfBackend(PayloadBackend):
         self.timeout_multiplier = max(0.5, min(4.0, float(ofdm_timeout_multiplier)))
         self.legacy_mode = bool(ofdm_legacy_mode)
         self.train_bursts = max(1, min(8, int(ofdm_train_bursts)))
+        self.adaptive_train = bool(ofdm_adaptive_train)
+        self.superframe = bool(ofdm_superframe)
         self.train_gap_ms = max(10, min(200, int(ofdm_train_gap_ms)))
         self.max_train_seconds = max(
             1.0, min(60.0, float(ofdm_max_train_seconds))
@@ -533,6 +540,9 @@ class OfdmVhfBackend(PayloadBackend):
             controller=self.controller,
             legacy_mode=self.legacy_mode,
             train_bursts=self.train_bursts,
+            adaptive_train=self.adaptive_train,
+            adaptive_mcs=self.adaptive_mcs,
+            superframe=self.superframe,
             train_gap_seconds=self.train_gap_ms / 1000.0,
             max_train_seconds=self.max_train_seconds,
             codec=self.codec,

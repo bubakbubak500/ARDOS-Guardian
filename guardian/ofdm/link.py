@@ -20,8 +20,10 @@ import numpy as np
 from .adaptation import AdaptationConfig, LinkAdaptationController
 from .channel import Channel, ChannelSpec
 from .coding import FecProfile, fec_spec
-from .config import DEFAULT_MCS_INDEX, OfdmProfile
-from .framing import (AckBitmap, DEFER_ACK_FLAG, LEGACY_FRAME_VERSION, OfdmFrameError,
+from .config import (DEFAULT_MCS_INDEX, MCS_TABLE, SC_MCS_TABLE, OfdmProfile)
+from .framing import (AckBitmap, DEFER_ACK_FLAG, FRAME_VERSION, LEGACY_FRAME_VERSION,
+                      SUPERFRAME_VERSION, MAX_SUBBLOCKS,
+                      MAX_SUPERFRAME_SUBBLOCKS, OfdmFrameError,
                       OfdmFrameType, PhyHeader, SubBlock, build_burst,
                       burst_duration, decode_burst, decode_many,
                       protocol_overhead_bytes,
@@ -49,9 +51,9 @@ class BurstCodec(Protocol):
     def build_burst(self, profile, header: PhyHeader, payload: bytes = b"", *,
                     blocks: list[SubBlock] | None = None) -> np.ndarray: ...
 
-    def decode_burst(self, profile, samples): ...
+    def decode_burst(self, profile, samples, **kwargs): ...
 
-    def decode_many(self, profile, samples): ...
+    def decode_many(self, profile, samples, **kwargs): ...
 
     def burst_duration(self, profile, header: PhyHeader,
                        block_lengths: list[int] | None = None) -> float: ...
@@ -66,12 +68,12 @@ class OfdmBurstCodec:
         return build_burst(profile, header, payload, blocks=blocks)
 
     @staticmethod
-    def decode_burst(profile, samples):
-        return decode_burst(profile, samples)
+    def decode_burst(profile, samples, **kwargs):
+        return decode_burst(profile, samples, **kwargs)
 
     @staticmethod
-    def decode_many(profile, samples):
-        return decode_many(profile, samples)
+    def decode_many(profile, samples, **kwargs):
+        return decode_many(profile, samples, **kwargs)
 
     @staticmethod
     def burst_duration(profile, header: PhyHeader,
@@ -150,6 +152,9 @@ class OfdmLink:
     timeout_margin: float = 1.0
     timeout_multiplier: float = 1.0
     train_bursts: int = 1
+    superframe: bool = False
+    adaptive_train: bool = False
+    adaptive_mcs: bool = False
     train_gap_seconds: float = 0.03
     max_train_seconds: float = 20.0
     decode_margin_per_burst: float = 1.5
@@ -166,9 +171,21 @@ class OfdmLink:
     channel_seconds: float = 0.0
     _next_burst_id: int = 0
     _started_at: float | None = None
+    _current_train_bursts: int = 1
+    _train_clean_streak: int = 0
+    _mcs_clean_streak: int = 0
+    _maximum_mcs_index: int = 0
+    _soft_cache: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.train_bursts = max(1, min(8, int(self.train_bursts)))
+        self._current_train_bursts = 1 if self.adaptive_train else self.train_bursts
+        self._maximum_mcs_index = int(self.mcs_index)
+        if self.adaptive_mcs and self._maximum_mcs_index > DEFAULT_MCS_INDEX:
+            # A ceiling is not a safe acquisition mode. Start every automatic
+            # session at robust QPSK and earn denser constellations from three
+            # consecutive clean cumulative ACKs plus measured SNR margin.
+            self.mcs_index = DEFAULT_MCS_INDEX
         self.train_gap_seconds = max(0.01, min(0.20, float(self.train_gap_seconds)))
         self.max_train_seconds = max(1.0, min(60.0, float(self.max_train_seconds)))
         self.decode_margin_per_burst = max(
@@ -196,7 +213,7 @@ class OfdmLink:
     def _decode_burst(self, samples):
         started = time.monotonic()
         decoded = self.codec.decode_burst(  # type: ignore[union-attr]
-            self.profile, samples
+            self.profile, samples, soft_cache=self._soft_cache
         )
         elapsed = time.monotonic() - started
         self.status.rx_decode_seconds += elapsed
@@ -216,7 +233,7 @@ class OfdmLink:
         if method is None:
             return [self._decode_burst(samples)]
         started = time.monotonic()
-        decoded = method(self.profile, samples)
+        decoded = method(self.profile, samples, soft_cache=self._soft_cache)
         self.status.rx_decode_seconds += time.monotonic() - started
         rx = getattr(self.pipe, "last_rx_timing", None)
         if rx is not None:
@@ -228,6 +245,73 @@ class OfdmLink:
             except (AttributeError, TypeError):
                 pass
         return decoded
+
+    def _report_train_feedback(self, sent: int, received: int) -> None:
+        """Adapt aggregation separately from FEC and payload burst sizing.
+
+        A single loss shortens the next train immediately; three completely
+        clean windows buy one additional microburst.  This slow-up/fast-down
+        asymmetry keeps a long superframe from magnifying a transient fade.
+        """
+        if not self.adaptive_train:
+            return
+        if int(received) < int(sent):
+            self._train_clean_streak = 0
+            self._current_train_bursts = max(1, self._current_train_bursts - 1)
+            return
+        self._train_clean_streak += 1
+        if self._train_clean_streak >= 3:
+            self._train_clean_streak = 0
+            self._current_train_bursts = min(
+                self.train_bursts, self._current_train_bursts + 1
+            )
+
+    def _report_mcs_feedback(self, sent: int, received: int,
+                             remote_snr_db: float | None) -> None:
+        if not self.adaptive_mcs:
+            return
+        table = (MCS_TABLE if isinstance(self.codec, OfdmBurstCodec)
+                 else SC_MCS_TABLE)
+        ceiling = next((item for item in table
+                        if item.index == self._maximum_mcs_index), table[0])
+        # New experimental IDs preserve old wire assignments, so numeric MCS
+        # order is intentionally not a robustness ladder (for example 8-PSK is
+        # MCS7, after 256-QAM MCS4). Define "below the selected ceiling" by both
+        # information density and measured SNR threshold, then sort physically.
+        allowed = sorted(
+            (item for item in table
+             if float(item.bits_per_symbol) <= float(ceiling.bits_per_symbol)
+             and item.min_snr_db <= ceiling.min_snr_db),
+            key=lambda item: (
+                item.min_snr_db, float(item.bits_per_symbol), item.index,
+            ),
+        )
+        position = next((index for index, item in enumerate(allowed)
+                         if item.index == self.mcs_index), 0)
+        if int(received) < int(sent):
+            self._mcs_clean_streak = 0
+            if position > 0:
+                self.mcs_index = allowed[position - 1].index
+                self.controller.mcs_index = self.mcs_index
+            return
+        if remote_snr_db is None:
+            return
+        self._mcs_clean_streak += 1
+        if self._mcs_clean_streak < 3:
+            return
+        self._mcs_clean_streak = 0
+        usable = [item for item in allowed
+                  if float(remote_snr_db) >= item.min_snr_db + 1.5]
+        if usable:
+            target = max(
+                usable,
+                key=lambda item: (
+                    float(item.bits_per_symbol), -item.min_snr_db, -item.index,
+                ),
+            )
+            if target.index != self.mcs_index:
+                self.mcs_index = target.index
+                self.controller.mcs_index = target.index
 
     def _burst_duration(self, header: PhyHeader,
                         block_lengths: list[int] | None = None) -> float:
@@ -244,6 +328,7 @@ class OfdmLink:
     def _publish_profile(self) -> None:
         selected = self.controller.profile
         self.status.fec = fec_spec(selected.fec).label
+        self.status.mcs = self.mcs_index
         self.status.burst_bytes = selected.burst_bytes
         self.status.arq_block_bytes = selected.arq_block_bytes
 
@@ -350,14 +435,33 @@ class OfdmLink:
             airtime = self._burst_duration(header)
         else:
             selected = self.controller.profile
-            count = min(32, max(1, math.ceil(
+            base_count = min(MAX_SUBBLOCKS, max(1, math.ceil(
                 selected.burst_bytes / selected.arq_block_bytes
             )))
+            count = base_count
+            version = FRAME_VERSION
+            if self.superframe:
+                prototype_lengths = [selected.arq_block_bytes] * base_count
+                prototype = PhyHeader(
+                    OfdmFrameType.DATA, 0, block_count=base_count,
+                    mcs=self.mcs_index, fec=selected.fec,
+                    payload_len=sum(prototype_lengths), subblock_count=base_count,
+                )
+                micro_seconds = self._burst_duration(prototype, prototype_lengths)
+                by_time = max(1, int(
+                    (self.max_train_seconds + self.train_gap_seconds)
+                    / max(0.001, micro_seconds + self.train_gap_seconds)
+                ))
+                count = min(
+                    MAX_SUPERFRAME_SUBBLOCKS,
+                    base_count * min(self._current_train_bursts, by_time),
+                )
+                version = SUPERFRAME_VERSION
             lengths = [selected.arq_block_bytes] * count
             header = PhyHeader(
                 OfdmFrameType.DATA, 0, block_count=count, mcs=self.mcs_index,
                 fec=selected.fec, payload_len=sum(lengths),
-                subblock_count=count,
+                subblock_count=count, version=version,
             )
             airtime = self._burst_duration(header, lengths)
         return ((airtime + 2.0 * self.ptt_turnaround + self.timeout_margin)
@@ -398,26 +502,33 @@ class OfdmLink:
         next_sequence = 0
         while next_sequence < len(blocks):
             selected = self.controller.profile
-            capacity = min(32, max(1, selected.burst_bytes //
-                                   selected.arq_block_bytes))
-            prototype_lengths = [selected.arq_block_bytes] * capacity
+            base_capacity = min(MAX_SUBBLOCKS, max(
+                1, selected.burst_bytes // selected.arq_block_bytes
+            ))
+            prototype_lengths = [selected.arq_block_bytes] * base_capacity
             prototype = PhyHeader(
                 OfdmFrameType.DATA, msg_id, block_count=len(blocks),
                 mcs=self.mcs_index, fec=selected.fec,
-                payload_len=sum(prototype_lengths), subblock_count=capacity,
+                payload_len=sum(prototype_lengths), subblock_count=base_capacity,
             )
             micro_seconds = self._burst_duration(prototype, prototype_lengths)
             by_time = max(1, int(
                 (self.max_train_seconds + self.train_gap_seconds)
                 / max(0.001, micro_seconds + self.train_gap_seconds)
             ))
-            train_count = min(self.train_bursts, by_time)
+            train_count = min(self._current_train_bursts, by_time)
+            capacity = (min(MAX_SUPERFRAME_SUBBLOCKS,
+                            base_capacity * train_count)
+                        if self.superframe else base_capacity)
+            window_capacity = (capacity if self.superframe
+                               else capacity * train_count)
             sequences = list(range(
                 next_sequence,
-                min(len(blocks), next_sequence + capacity * train_count),
+                min(len(blocks), next_sequence + window_capacity),
             ))
             burst_id = self._next_burst_id
-            reserved_ids = max(1, math.ceil(len(sequences) / capacity))
+            reserved_ids = (1 if self.superframe else
+                            max(1, math.ceil(len(sequences) / capacity)))
             self._next_burst_id = (self._next_burst_id + reserved_ids) & 0xFFFF
             state = BurstTxState(
                 msg_id=msg_id, burst_id=burst_id, total_blocks=len(blocks),
@@ -468,6 +579,8 @@ class OfdmLink:
                 mcs=self.mcs_index, fec=fec,
                 payload_len=sum(len(block.payload) for block in members),
                 subblock_count=len(members), retransmission=attempt > 0,
+                version=(SUPERFRAME_VERSION if self.superframe
+                         else FRAME_VERSION),
             )
             waveform = self._build_burst(header, blocks=members)
             self.status.last_burst_blocks = len(members)
@@ -484,6 +597,11 @@ class OfdmLink:
             )
             received = (set() if answer is None else
                         state.pending & set(answer.received))
+            self._report_train_feedback(len(members), len(received))
+            self._report_mcs_feedback(
+                len(members), len(received),
+                answer.remote_snr_db if answer else None,
+            )
             if attempt == 0:
                 state.first_pass_acked.update(received)
             newly = received - acknowledged
@@ -591,6 +709,11 @@ class OfdmLink:
                 )
             received = (set() if answer is None else
                         state.pending & set(answer.received))
+            self._report_train_feedback(len(sequences), len(received))
+            self._report_mcs_feedback(
+                len(sequences), len(received),
+                answer.remote_snr_db if answer else None,
+            )
             if attempt == 0:
                 state.first_pass_acked.update(received)
             newly = received - acknowledged

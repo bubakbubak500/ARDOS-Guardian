@@ -86,15 +86,18 @@ def test_settings_persist_an_independent_g2_waveform_and_modulation() -> None:
         assert {
             dialog.g2_waveform.itemData(index)
             for index in range(dialog.g2_waveform.count())
-        } == {"ofdm", "sc_hs", "sc_ftn", "sefdm"}
-        dialog.g2_waveform.setCurrentIndex(dialog.g2_waveform.findData("sc_ftn"))
-        dialog.g2_mcs.setCurrentIndex(dialog.g2_mcs.findData(6))
+        } == {"ofdm", "sc_hs", "sc_ftn", "sc_fde_ftn", "sefdm"}
+        dialog.g2_waveform.setCurrentIndex(dialog.g2_waveform.findData("sc_fde_ftn"))
+        dialog.g2_bandwidth.setCurrentIndex(dialog.g2_bandwidth.findData("10K"))
+        dialog.g2_mcs.setCurrentIndex(dialog.g2_mcs.findData(11))
         assert not dialog.ofdm_profile.isEnabled()
+        assert dialog.g2_bandwidth.isEnabled()
         assert dialog.g2_mcs.isEnabled()
-        assert "SC_FTN_2K7" in dialog.ofdm_summary.text()
+        assert "SC_FDE_FTN_10K" in dialog.ofdm_summary.text()
         assert dialog.apply()
-        assert config.g2_waveform == "sc_ftn"
-        assert config.g2_mcs == 6
+        assert config.g2_waveform == "sc_fde_ftn"
+        assert config.g2_bandwidth == "10K"
+        assert config.g2_mcs == 11
     finally:
         dialog.close()
 

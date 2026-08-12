@@ -40,7 +40,7 @@ class Mcs:
 
     index: int
     modulation: str
-    bits_per_symbol: int
+    bits_per_symbol: int | Fraction
     code_rate: Fraction
     #: Post-equalisation SNR, in dB, at which 512-byte blocks decode reliably.
     #:
@@ -59,8 +59,15 @@ class Mcs:
     def label(self) -> str:
         pretty = {
             "bpsk": "BPSK", "qpsk": "QPSK", "qam16": "16-QAM",
-            "qam64": "64-QAM", "qam256": "256-QAM",
+            "psk8": "8-PSK", "qam32": "32-QAM", "qam64": "64-QAM",
+            "qam128": "128-QAM", "qam256": "256-QAM",
+            "qam512": "512-QAM", "qam1024": "1024-QAM",
             "apsk16": "16-APSK", "apsk32": "32-APSK",
+            "apsk64": "64-APSK", "apsk128": "128-APSK",
+            "apsk256": "256-APSK", "apsk512": "512-APSK",
+            "gqam16": "16-GQAM", "gqam64": "64-GQAM",
+            "gqam256": "256-GQAM", "gqam1024": "1024-GQAM",
+            "pas64": "64-QAM PAS",
         }
         rate = f"{self.code_rate.numerator}/{self.code_rate.denominator}"
         return f"MCS{self.index} {pretty[self.modulation]} r={rate}"
@@ -91,6 +98,24 @@ SC_MCS_TABLE: tuple[Mcs, ...] = (
     Mcs(4, "qam256", 8, Fraction(1, 2), min_snr_db=24.0),
     Mcs(5, "apsk16", 4, Fraction(1, 2), min_snr_db=11.0),
     Mcs(6, "apsk32", 5, Fraction(1, 2), min_snr_db=15.0),
+    # 2.3.3 experimental ladder. Existing indices 0..6 stay wire-compatible;
+    # new values occupy unused positions in the five-bit MCS field.
+    Mcs(7, "psk8", 3, Fraction(1, 2), min_snr_db=7.0),
+    Mcs(8, "qam32", 5, Fraction(1, 2), min_snr_db=14.0),
+    Mcs(9, "apsk64", 6, Fraction(1, 2), min_snr_db=17.0),
+    Mcs(10, "qam128", 7, Fraction(1, 2), min_snr_db=20.5),
+    Mcs(11, "apsk128", 7, Fraction(1, 2), min_snr_db=21.0),
+    Mcs(12, "apsk256", 8, Fraction(1, 2), min_snr_db=25.0),
+    Mcs(13, "qam512", 9, Fraction(1, 2), min_snr_db=29.0),
+    Mcs(14, "apsk512", 9, Fraction(1, 2), min_snr_db=30.0),
+    Mcs(15, "qam1024", 10, Fraction(1, 2), min_snr_db=34.0),
+    # Geometrically compressed QAM A/B candidates. These keep Gray labels and
+    # bits/symbol but trade AWGN distance for lower crest factor/nonlinearity.
+    Mcs(16, "gqam16", 4, Fraction(1, 2), min_snr_db=10.5),
+    Mcs(17, "gqam64", 6, Fraction(1, 2), min_snr_db=15.5),
+    Mcs(18, "gqam256", 8, Fraction(1, 2), min_snr_db=24.0),
+    Mcs(19, "gqam1024", 10, Fraction(1, 2), min_snr_db=34.0),
+    Mcs(20, "pas64", Fraction(43, 8), Fraction(1, 2), min_snr_db=15.0),
 )
 
 #: The mode used for the PHY header and for ACK/NACK bursts.

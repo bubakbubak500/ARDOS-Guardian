@@ -65,6 +65,17 @@ class LinkMetrics:
     #: Residual phase slope across the band per symbol, in radians per carrier.
     #: A non-zero mean is a timing or sample-clock offset, not noise.
     phase_slope: float | None = None
+    #: Numerical conditioning and implementation loss of the active equalizer.
+    equalizer_condition: float | None = None
+    noise_enhancement_db: float | None = None
+    residual_isi_rms: float | None = None
+    equalizer_mode: str | None = None
+    equalizer_iterations: int = 0
+    harq_combined_blocks: int = 0
+    #: Generalized mutual information from reference bits/LLRs, bits per
+    #: constellation symbol. Available only after CRC proves the reference.
+    gmi_bits_per_symbol: float | None = None
+    turbo_iterations: int = 0
     frame_ok: bool = False
     mcs: int | None = None
     #: Why a burst failed, for the log. None when it did not.
@@ -87,6 +98,14 @@ class LinkMetrics:
             parts.append(f"CFO {self.cfo_hz:+.1f} Hz")
         if self.sync_confidence is not None:
             parts.append(f"sync {self.sync_confidence:.2f}")
+        if self.equalizer_mode:
+            parts.append(f"EQ {self.equalizer_mode}/{self.equalizer_iterations}")
+        if self.noise_enhancement_db is not None:
+            parts.append(f"noise gain {self.noise_enhancement_db:+.1f} dB")
+        if self.gmi_bits_per_symbol is not None:
+            parts.append(f"GMI {self.gmi_bits_per_symbol:.2f} bit/sym")
+        if self.turbo_iterations:
+            parts.append(f"turbo {self.turbo_iterations} iter")
         if self.mcs is not None:
             parts.append(f"MCS{self.mcs}")
         parts.append("ok" if self.frame_ok else (self.error or "failed"))

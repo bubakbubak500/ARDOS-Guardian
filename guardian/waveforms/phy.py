@@ -19,7 +19,12 @@ from .config import WaveformProfile
 _SEED = 0x47573231
 _SC_PREAMBLE_HALF = 64
 _SC_TRAINING = 96
-_SC_GUARD = 8
+# The learned 81-tap equalizer consumes 40 symbol decisions at each edge.  A
+# shorter tail silently zero-filled the end of the final codeword: CRC often
+# survived through FEC, but EVM/GMI were badly biased and dense constellations
+# paid for deterministic erasures.  Forty-eight covers the largest configured
+# radius with a small timing margin and is paid once per physical burst.
+_SC_GUARD = 48
 _SEFDM_PREAMBLE = 2
 _SEFDM_TRAINING = 2
 _SEFDM_EQUALIZER_TAPS = 97
@@ -66,10 +71,11 @@ def _occupied_analytic(samples, profile: WaveformProfile) -> np.ndarray:
     return np.fft.ifft(kept)
 
 
-def _rrc(beta: float, samples_per_symbol: int, span: int = 12) -> np.ndarray:
+def _rrc(beta: float, samples_per_symbol: float, span: int = 12) -> np.ndarray:
     """Unit-energy root-raised-cosine impulse response."""
-    sps = int(samples_per_symbol)
-    t = np.arange(-span * sps // 2, span * sps // 2 + 1, dtype=np.float64) / sps
+    sps = float(samples_per_symbol)
+    half = int(np.ceil(span * sps / 2.0))
+    t = np.arange(-half, half + 1, dtype=np.float64) / sps
     taps = np.empty_like(t)
     for index, value in enumerate(t):
         if abs(value) < 1e-12:
@@ -87,6 +93,111 @@ def _rrc(beta: float, samples_per_symbol: int, span: int = 12) -> np.ndarray:
             denominator = np.pi * value * (1.0 - (4.0 * beta * value) ** 2)
             taps[index] = numerator / denominator
     return taps / np.sqrt(np.sum(taps * taps))
+
+
+def _lanczos_weights(position: float, indices: np.ndarray, half: int = 8) -> np.ndarray:
+    delta = float(position) - indices.astype(np.float64)
+    weights = np.sinc(delta) * np.sinc(delta / float(half))
+    weights[np.abs(delta) >= half] = 0.0
+    total = float(np.sum(weights))
+    return weights / total if abs(total) > 1e-12 else weights
+
+
+def _fractional_impulses(symbols: np.ndarray, spacing: float) -> np.ndarray:
+    """Place symbols on a possibly fractional sample grid with bounded sinc taps."""
+    values = np.asarray(symbols, dtype=np.complex128).reshape(-1)
+    if not len(values):
+        return np.zeros(0, dtype=np.complex128)
+    rounded = int(round(spacing))
+    if abs(spacing - rounded) < 1e-12:
+        result = np.zeros((len(values) - 1) * rounded + 1, dtype=np.complex128)
+        result[::rounded] = values
+        return result
+    length = int(np.ceil((len(values) - 1) * spacing)) + 1
+    result = np.zeros(length, dtype=np.complex128)
+    half = 8
+    for number, value in enumerate(values):
+        position = number * spacing
+        first = max(0, int(np.floor(position)) - half + 1)
+        last = min(length, int(np.floor(position)) + half + 1)
+        indices = np.arange(first, last)
+        result[indices] += value * _lanczos_weights(position, indices, half)
+    return result
+
+
+def _fractional_samples(values: np.ndarray, start: float, spacing: float,
+                        count: int | None = None) -> np.ndarray:
+    """Sample a band-limited stream on a fractional symbol clock."""
+    stream = np.asarray(values, dtype=np.complex128).reshape(-1)
+    if not len(stream) or start >= len(stream):
+        return np.zeros(0, dtype=np.complex128)
+    available = max(0, int(np.floor((len(stream) - 1 - start) / spacing)) + 1)
+    wanted = available if count is None else min(available, max(0, int(count)))
+    if wanted < 1:
+        return np.zeros(0, dtype=np.complex128)
+    rounded_start = int(round(start))
+    rounded_spacing = int(round(spacing))
+    if (abs(start - rounded_start) < 1e-12
+            and abs(spacing - rounded_spacing) < 1e-12):
+        return stream[
+            rounded_start:rounded_start + wanted * rounded_spacing:rounded_spacing
+        ][:wanted]
+    result = np.empty(wanted, dtype=np.complex128)
+    half = 8
+    for number in range(wanted):
+        position = start + number * spacing
+        first = max(0, int(np.floor(position)) - half + 1)
+        last = min(len(stream), int(np.floor(position)) + half + 1)
+        indices = np.arange(first, last)
+        result[number] = np.dot(_lanczos_weights(position, indices, half), stream[indices])
+    return result
+
+
+def _symbol_noise_covariance(pulse: np.ndarray, spacing: float, taps: int) -> np.ndarray:
+    """Matched-filter noise covariance on the packed symbol grid."""
+    response = np.convolve(pulse, pulse[::-1], mode="full")
+    centre = len(response) // 2
+    offsets = np.arange(-(taps - 1), taps, dtype=np.float64) * spacing + centre
+    axis = np.arange(len(response), dtype=np.float64)
+    sampled = np.interp(offsets, axis, response, left=0.0, right=0.0)
+    middle = max(float(sampled[taps - 1]), 1e-12)
+    correlation = sampled / middle
+    indices = np.arange(taps)
+    covariance = correlation[(indices[:, None] - indices[None, :]) + taps - 1]
+    # Finite pulse truncation and interpolation can introduce tiny negative
+    # eigenvalues; a diagonal floor keeps the regularizer positive definite.
+    covariance = (covariance + covariance.T) / 2.0
+    minimum = float(np.min(np.linalg.eigvalsh(covariance)))
+    if minimum < 1e-9:
+        covariance += np.eye(taps) * (1e-9 - minimum)
+    return covariance.astype(np.complex128)
+
+
+def _fft_filter_valid(values: np.ndarray, coefficients: np.ndarray) -> np.ndarray:
+    """Apply the learned FIR by bounded-memory overlap-save FDE."""
+    x = np.asarray(values, dtype=np.complex128)
+    h = np.asarray(coefficients, dtype=np.complex128)[::-1]
+    if not len(h) or len(x) < len(h):
+        return np.zeros(0, dtype=np.complex128)
+    # Four filter lengths keeps transform overhead small without allocating an
+    # FFT as long as a multi-second 20 kHz superframe.
+    size = 1 << max(8, (4 * len(h) - 1).bit_length())
+    fresh = size - len(h) + 1
+    spectrum = np.fft.fft(h, size)
+    padded = np.concatenate([np.zeros(len(h) - 1, dtype=np.complex128), x])
+    causal: list[np.ndarray] = []
+    position = 0
+    while position < len(x):
+        block = padded[position:position + size]
+        take = min(fresh, len(x) - position)
+        if len(block) < size:
+            block = np.pad(block, (0, size - len(block)))
+        filtered = np.fft.ifft(np.fft.fft(block, size) * spectrum)
+        causal.append(filtered[len(h) - 1:len(h) - 1 + take])
+        position += take
+    full = np.concatenate(causal)
+    first = len(h) - 1
+    return full[first:first + len(x) - len(h) + 1]
 
 
 def _fft_valid_correlation(signal: np.ndarray, reference: np.ndarray) -> tuple[int, float]:
@@ -192,9 +303,7 @@ class SingleCarrierModulator:
         return rows.reshape(-1)
 
     def _render_symbols(self, symbols: np.ndarray) -> np.ndarray:
-        up = np.zeros((len(symbols) - 1) * self.spacing + 1, dtype=np.complex128)
-        if len(symbols):
-            up[::self.spacing] = symbols
+        up = _fractional_impulses(symbols, self.spacing)
         baseband = np.convolve(up, self.taps, mode="full")
         time = np.arange(len(baseband), dtype=np.float64) / self.profile.sample_rate
         return np.real(baseband * np.exp(2j * np.pi * self.profile.center_hz * time))
@@ -222,7 +331,7 @@ class SingleCarrierModulator:
             2 * _SC_GUARD + len(self.known.prefix)
             + int(data_blocks) * self.profile.physical_symbols_per_block
         )
-        return (count - 1) * self.spacing + 1 + len(self.taps) - 1
+        return int(np.ceil((count - 1) * self.spacing)) + 1 + len(self.taps) - 1
 
 
 class SingleCarrierReceiver:
@@ -268,7 +377,7 @@ class SingleCarrierReceiver:
             -2j * np.pi * self.profile.center_hz * n / fs
         )
         matched = np.convolve(baseband, self.modulator.taps, mode="full")
-        nominal = (
+        nominal = float(
             start + len(self.modulator.taps) - 1
             + _SC_GUARD * self.modulator.spacing
         )
@@ -276,19 +385,21 @@ class SingleCarrierReceiver:
         # The raw correlation aligns the waveform to within a sample.  Select
         # the polyphase whose known preamble has the largest coherent response.
         best = (0.0, nominal)
-        for shift in range(-self.modulator.spacing // 2,
-                           self.modulator.spacing // 2 + 1):
+        radius_samples = max(1, int(np.ceil(self.modulator.spacing / 2.0)))
+        for shift in range(-radius_samples, radius_samples + 1):
             first = nominal + shift
             stop = first + len(self.known.prefix) * self.modulator.spacing
             if first < 0 or stop >= len(matched):
                 continue
-            observed = matched[first:stop:self.modulator.spacing][:len(self.known.prefix)]
+            observed = _fractional_samples(
+                matched, first, self.modulator.spacing, len(self.known.prefix)
+            )
             score = abs(np.vdot(self.known.prefix, observed))
             if score > best[0]:
                 best = (float(score), first)
         first_sample = best[1]
 
-        raw = matched[first_sample::self.modulator.spacing]
+        raw = _fractional_samples(matched, first_sample, self.modulator.spacing)
         if len(raw) < len(self.known.prefix):
             raise ValueError("single-carrier burst is truncated before training")
         half = _SC_PREAMBLE_HALF
@@ -300,7 +411,7 @@ class SingleCarrierReceiver:
         if abs(cfo) > 1e-9:
             corrected = baseband * np.exp(-2j * np.pi * cfo * n / fs)
             matched = np.convolve(corrected, self.modulator.taps, mode="full")
-            raw = matched[first_sample::self.modulator.spacing]
+            raw = _fractional_samples(matched, first_sample, self.modulator.spacing)
 
         prefix = self.known.prefix
         taps = min(self.profile.equalizer_taps, len(prefix) // 3 * 2 + 1)
@@ -313,17 +424,65 @@ class SingleCarrierReceiver:
         train_rows = windows[:len(prefix) - taps + 1]
         target = prefix[radius:len(prefix) - radius]
         gram = train_rows.conj().T @ train_rows
-        ridge = np.eye(taps, dtype=np.complex128) * (
-            max(float(np.trace(gram).real), 1.0) * 1e-7
+        self.metrics.equalizer_condition = float(np.linalg.cond(gram))
+
+        # Compare only the stationary middle of both repeated halves. Their
+        # edges see different neighbouring symbols through the long RRC pulse;
+        # counting that deterministic boundary ISI as random noise caused a
+        # grossly over-regularized FTN inverse even in a clean loopback.
+        pulse_memory = int(np.ceil(len(self.modulator.taps)
+                                   / self.modulator.spacing / 2.0))
+        margin = min(half // 4, max(2, pulse_memory))
+        repeated_error = (
+            raw[margin:half - margin]
+            - raw[half + margin:2 * half - margin]
         )
-        coeff = np.linalg.solve(gram + ridge, train_rows.conj().T @ target)
-        equalised = windows @ coeff
+        noise_power = max(float(np.mean(np.abs(repeated_error) ** 2) / 2.0), 1e-12)
+        observed_power = max(float(np.mean(np.abs(train_rows) ** 2)), 1e-12)
+        noise_fraction = min(1.0, noise_power / observed_power)
+        # `gram` accumulates many overlapping training rows whereas the noise
+        # estimate is per raw symbol. Applying the raw fraction directly here
+        # over-regularizes by roughly the training-window reuse factor. The
+        # bounded 0.02 conversion was selected by clean/noisy replay of the
+        # known prefix and still rises automatically with measured noise.
+        ridge_fraction = max(
+            self.profile.equalizer_ridge_floor, noise_fraction * 0.02
+        )
+        ridge_scale = max(float(np.trace(gram).real) / taps, 1.0) * ridge_fraction
+        covariance = (
+            _symbol_noise_covariance(self.modulator.taps, self.modulator.spacing, taps)
+            if self.profile.noise_whitening else np.eye(taps, dtype=np.complex128)
+        )
+        weights = np.ones(len(train_rows), dtype=np.float64)
+        coeff = np.zeros(taps, dtype=np.complex128)
+        completed_iterations = 0
+        for iteration in range(self.profile.equalizer_iterations):
+            weighted = train_rows * np.sqrt(weights)[:, None]
+            wanted = target * np.sqrt(weights)
+            normal = weighted.conj().T @ weighted + ridge_scale * covariance
+            coeff = np.linalg.solve(normal, weighted.conj().T @ wanted)
+            completed_iterations = iteration + 1
+            if iteration + 1 >= self.profile.equalizer_iterations:
+                break
+            fit_error = train_rows @ coeff - target
+            scale = max(float(np.median(np.abs(fit_error))) * 1.4826, 1e-9)
+            weights = 1.0 / (1.0 + (np.abs(fit_error) / (2.5 * scale)) ** 2)
+
+        equalised = (_fft_filter_valid(raw, coeff)
+                     if self.profile.equalizer_mode == "sc_fde" else windows @ coeff)
         aligned = np.zeros(len(raw), dtype=np.complex128)
         aligned[radius:radius + len(equalised)] = equalised
+        self.metrics.equalizer_mode = self.profile.equalizer_mode
+        self.metrics.equalizer_iterations = completed_iterations
+        white_gain = float(np.real(np.vdot(coeff, covariance @ coeff)))
+        self.metrics.noise_enhancement_db = float(
+            10.0 * np.log10(max(white_gain, 1e-12))
+        )
 
         recovered = aligned[radius:len(prefix) - radius]
         expected = prefix[radius:len(prefix) - radius]
         residual = recovered - expected
+        self.metrics.residual_isi_rms = float(np.sqrt(np.mean(np.abs(residual) ** 2)))
         self._variance = max(float(np.mean(np.abs(residual) ** 2)), 1e-9)
         signal = max(float(np.mean(np.abs(expected) ** 2)), 1e-12)
         self.metrics.snr_db = float(10.0 * np.log10(signal / self._variance))

@@ -48,6 +48,7 @@ from .station_lab import (
     full_plan,
     quick_plan,
 )
+from .waveforms.config import profile_for as experimental_profile_for
 from .radio import Channel, ChannelPlan, ChannelScanner, make_driver
 from .radio.bands import band_for, same_band
 from .radio.presets import DUMMY_MODEL, find_executable
@@ -861,6 +862,7 @@ class Operations:
     def transmit_test_burst(self, *, profile_name: str | None = None,
                             mcs_index: int | None = None,
                             waveform_family: str = "ofdm",
+                            bandwidth: str | None = None,
                             fec=None,
                             tx_scale: float | None = None,
                             seed: int = 0xA5,
@@ -901,13 +903,13 @@ class Operations:
             selected_bench = bench
             default_mcs = self.config.ofdm_mcs
         else:
-            fallback_names = {
-                "sc_hs": "SC_HS_2K7", "sc_ftn": "SC_FTN_2K7",
-                "sefdm": "SEFDM_2K7",
-            }
-            selected_name = (profile_name if profile_name in experimental_profiles
-                             else fallback_names.get(family, "SC_HS_2K7"))
-            waveform_profile = experimental_profiles[selected_name]
+            waveform_profile = (
+                experimental_profiles[profile_name]
+                if profile_name in experimental_profiles
+                else experimental_profile_for(
+                    family, bandwidth or self.config.g2_bandwidth
+                )
+            )
             selected_bench = experimental_bench
             default_mcs = self.config.g2_mcs
         index = default_mcs if mcs_index is None else int(mcs_index)
@@ -1234,9 +1236,10 @@ class Operations:
                 self.config.ofdm_mcs if self.config.g2_waveform == "ofdm"
                 else self.config.g2_mcs,
                 fec,
+                self.config.g2_bandwidth,
             )
             plan = [ProbeCommand(index, item.waveform, item.mcs, item.fec,
-                                 item.tx_scale)
+                                 item.tx_scale, item.bandwidth)
                     for index, item in enumerate(
                         candidate for item in base for candidate in (item, item)
                     )]
@@ -1304,6 +1307,7 @@ class Operations:
                 point_started = time.monotonic()
                 aired = self.transmit_test_burst(
                     waveform_family=command.waveform,
+                    bandwidth=command.bandwidth,
                     mcs_index=command.mcs, fec=command.fec,
                     tx_scale=command.tx_scale, payload_bytes=512, repeats=1,
                     seed=status.session_id ^ command.sequence,
@@ -1319,6 +1323,7 @@ class Operations:
                         command.mcs, command.fec, False,
                         wall_seconds=max(0.001, time.monotonic() - point_started),
                         error="no calibration report",
+                        bandwidth=command.bandwidth,
                     )
                 else:
                     result.payload_bytes = 512
@@ -1357,16 +1362,15 @@ class Operations:
     def _receive_calibration_probe(self, command: ProbeCommand) -> ProbeResult:
         from .ofdm.link import OfdmBurstCodec
         from .payload.ofdm_vhf import RadioAudioPipe
-        from .waveforms.config import PROFILES as waveform_profiles
         from .waveforms.framing import ExperimentalBurstCodec
 
         if command.waveform == "ofdm":
             profile = profile_or_default(self.config.ofdm_profile)
             codec = OfdmBurstCodec()
         else:
-            names = {"sc_hs": "SC_HS_2K7", "sc_ftn": "SC_FTN_2K7",
-                     "sefdm": "SEFDM_2K7"}
-            profile = waveform_profiles[names[command.waveform]]
+            profile = experimental_profile_for(
+                command.waveform, command.bandwidth
+            )
             codec = ExperimentalBurstCodec()
         pipe = RadioAudioPipe(
             profile,
@@ -1389,8 +1393,20 @@ class Operations:
                     command.mcs, command.fec, False,
                     wall_seconds=time.monotonic() - started,
                     error="no measuring burst heard",
+                    bandwidth=command.bandwidth,
                 )
             decoded = codec.decode_burst(profile, samples)
+            from .ofdm.bench import write_wav
+            capture_root = config_dir() / "station-lab" / "captures"
+            capture_root.mkdir(parents=True, exist_ok=True)
+            raw_path = write_wav(
+                capture_root / (
+                    f"cal-{self.station_lab.session_id:08x}-{command.sequence:03d}-"
+                    f"{command.waveform}-{command.bandwidth}-mcs{command.mcs}.wav"
+                ),
+                samples,
+                profile.sample_rate,
+            )
             metrics = decoded.metrics
             peak = float(np.max(np.abs(samples))) if len(samples) else 0.0
             rms = float(np.sqrt(np.mean(np.asarray(samples) ** 2))) if len(samples) else 0.0
@@ -1411,6 +1427,8 @@ class Operations:
                 payload_bytes=(header.payload_len if header is not None else 0),
                 wall_seconds=time.monotonic() - started,
                 error=metrics.error or "",
+                bandwidth=command.bandwidth,
+                capture_path=str(raw_path),
             )
         finally:
             pipe.stop()
@@ -1427,6 +1445,7 @@ class Operations:
                 command.sequence, command.tx_scale, command.waveform,
                 command.mcs, command.fec, False,
                 error=str(task.error),
+                bandwidth=command.bandwidth,
             )
         else:
             result = task.value
@@ -1951,6 +1970,7 @@ class Operations:
             ofdm_tx_tail_ms=self.config.ofdm_tx_tail_ms,
             ofdm_max_retries=self.config.ofdm_max_retries,
             ofdm_adaptive_fec=self.config.ofdm_adaptive_fec,
+            ofdm_modern_ldpc=self.config.ofdm_modern_ldpc,
             ofdm_fec=self.config.ofdm_fec,
             ofdm_adaptive_burst=self.config.ofdm_adaptive_burst,
             ofdm_burst_bytes=self.config.ofdm_burst_bytes,
@@ -1960,10 +1980,14 @@ class Operations:
             ofdm_timeout_multiplier=self.config.ofdm_timeout_multiplier,
             ofdm_legacy_mode=self.config.ofdm_legacy_mode,
             ofdm_train_bursts=self.config.ofdm_train_bursts,
+            ofdm_adaptive_train=self.config.ofdm_adaptive_train,
+            ofdm_superframe=self.config.ofdm_superframe,
             ofdm_train_gap_ms=self.config.ofdm_train_gap_ms,
             ofdm_max_train_seconds=self.config.ofdm_max_train_seconds,
             g2_waveform=self.config.g2_waveform,
+            g2_bandwidth=self.config.g2_bandwidth,
             g2_mcs=self.config.g2_mcs,
+            g2_adaptive_mcs=self.config.g2_adaptive_mcs,
             g2_tx_scale=self.config.g2_tx_scales.get(
                 self.config.g2_waveform, 1.0
             ),

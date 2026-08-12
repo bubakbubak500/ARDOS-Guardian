@@ -70,7 +70,9 @@ from ..ofdm.adaptation import AdaptationConfig, BURST_LADDER
 from ..ofdm.coding import FEC_SPECS, FecProfile, fec_profile
 from ..ofdm.config import PROFILE_LADDER, SC_MCS_TABLE, profile_or_default
 from ..waveforms import bench as experimental_bench
-from ..waveforms.config import PROFILES as EXPERIMENTAL_PROFILES
+from ..waveforms.config import (PROFILES as EXPERIMENTAL_PROFILES,
+                                family_profile_names,
+                                profile_for as experimental_profile_for)
 from ..services import TaskResult
 from .inputs import RowTable
 from .measurements import mcs_verdict, measurement, repolish
@@ -164,6 +166,7 @@ class ModemWorkspace(QWidget):
             ("OFDM", "ofdm"),
             ("SC-HS", "sc_hs"),
             ("SC-FTN", "sc_ftn"),
+            ("SC-FDE-FTN", "sc_fde_ftn"),
             ("SEFDM", "sefdm"),
         ):
             self.family_picker.addItem(label, value)
@@ -235,19 +238,17 @@ class ModemWorkspace(QWidget):
             schemes = MCS_TABLE
             wanted_mcs = self.runtime.config.ofdm_mcs
         else:
-            names = {
-                "sc_hs": "SC_HS_2K7",
-                "sc_ftn": "SC_FTN_2K7",
-                "sefdm": "SEFDM_2K7",
-            }
-            name = names[family]
-            profile = EXPERIMENTAL_PROFILES[name]
-            low, high = profile.occupied_band
-            self.profile_picker.addItem(
-                f"{name} · {low:.0f}–{high:.0f} Hz · {profile.occupied_bandwidth:.0f} Hz",
-                name,
-            )
-            wanted_profile = name
+            for name in family_profile_names(family):
+                profile = EXPERIMENTAL_PROFILES[name]
+                low, high = profile.occupied_band
+                self.profile_picker.addItem(
+                    f"{name} · {low:.0f}–{high:.0f} Hz · "
+                    f"{profile.occupied_bandwidth:.0f} Hz",
+                    name,
+                )
+            wanted_profile = experimental_profile_for(
+                family, self.runtime.config.g2_bandwidth
+            ).name
             schemes = SC_MCS_TABLE
             # The lab should open SEFDM on the measured robust operating point,
             # not repeat the 2.3.0 256-QAM failure by inheriting an unrelated

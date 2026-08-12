@@ -402,7 +402,7 @@ Once the required software and map data are present, the core messaging system o
 
 # Guardian G2 soundcard modem — waveforms of Guardian's own
 
-Guardian **2.3.2** expands the experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
+Guardian **2.3.3** expands the experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
 
 Select it in *Settings → Payload* as **Guardian G2 soundcard modem (Experimental)**. VARA P2P stays the default, and a G2 modem station and a VARA station can talk to each other: the two peers agree on a transport during the ordinary control handshake, and unless *both* are configured for the built-in modem the pair falls back to VARA before anything is transmitted.
 
@@ -432,7 +432,7 @@ This is how the modem gets tuned: a capture lets the whole receiver be re-run ov
 
 # Current status
 
-Guardian **1.0.0** was the first release where the interface and documentation were consolidated around the radio functionality developed and tested throughout the 0.6 series. **2.3.2** is the current Guardian G2 station-lab release.
+Guardian **1.0.0** was the first release where the interface and documentation were consolidated around the radio functionality developed and tested throughout the 0.6 series. **2.3.3** is the current Guardian G2 capacity-modem release. It adds width-selectable SC/SEFDM profiles through 20K, SC-FDE-FTN, a denser APSK/QAM/GQAM ladder, PAS64, modern LDPC with soft HARQ combining, adaptive MCS/train control and the opt-in protocol-v3 superframe. See [the 2.3.3 release notes](docs/RELEASE_NOTES_2.3.3.md) and [capacity-modem measurement guide](docs/G2_CAPACITY_MODEM_2.3.3.md).
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |

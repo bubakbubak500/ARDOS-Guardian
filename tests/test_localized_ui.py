@@ -5,6 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPlainTextEdit
 
+from guardian import __version__
 from guardian.config import StationConfig
 from guardian.i18n import Language, TRANSLATIONS, set_language
 from guardian.message.forms import FORMS
@@ -152,7 +153,7 @@ def test_payload_page_is_bilingual_in_both_directions() -> None:
         assert dialog.payload_backend.itemText(0) == "Guardian VARA P2P"
         assert (
             dialog.payload_backend.itemText(1)
-            == "Guardian G2 soundcard modem (Experimental)"
+            == f"Guardian G2 {__version__} capacity modem (Latest)"
         )
         summary = dialog.ofdm_summary.text()
         assert "experimental" in summary
@@ -181,7 +182,7 @@ def test_payload_page_is_bilingual_in_both_directions() -> None:
         assert "Komprese a identifikace" in titles
         assert (
             dialog.payload_backend.itemText(1)
-            == "Zvukový modem Guardian G2 (Experimentální)"
+            == f"Kapacitní modem Guardian G2 {__version__} (Nejnovější)"
         )
         summary = dialog.ofdm_summary.text()
         assert "experimentální" in summary

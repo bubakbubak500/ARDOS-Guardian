@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .coding import FEC_SPECS, FecProfile, fec_profile
+from .coding import FecProfile, fec_profile, fec_spec
 
 
 BURST_LADDER: tuple[int, ...] = (256, 512, 1024, 2048, 4096, 8192, 16384)
@@ -13,6 +13,7 @@ BURST_LADDER: tuple[int, ...] = (256, 512, 1024, 2048, 4096, 8192, 16384)
 @dataclass(frozen=True)
 class AdaptationConfig:
     adaptive_fec: bool = True
+    modern_ldpc: bool = False
     fixed_fec: FecProfile = FecProfile.FEC_1_2
     adaptive_burst: bool = True
     fixed_burst_bytes: int = 4096
@@ -75,7 +76,8 @@ class LinkAdaptationController:
     _next_upgrade: str = "fec"
 
     def __post_init__(self) -> None:
-        self.current_fec = (FecProfile.FEC_1_2 if self.config.adaptive_fec
+        self.current_fec = ((FecProfile.LDPC_1_2 if self.config.modern_ldpc
+                             else FecProfile.FEC_1_2) if self.config.adaptive_fec
                             else fec_profile(self.config.fixed_fec))
         if self.config.adaptive_burst:
             start = max(self.config.min_burst_bytes, 2048)
@@ -94,8 +96,15 @@ class LinkAdaptationController:
 
     def fec_for_retry(self, attempt: int) -> FecProfile:
         """One stronger profile per retry, never below the mother code."""
-        base = int(self.profile.fec)
-        return FecProfile(max(int(FecProfile.FEC_1_2), base - max(0, int(attempt))))
+        base = self.profile.fec
+        attempts = max(0, int(attempt))
+        if base in {FecProfile.LDPC_1_2, FecProfile.LDPC_3_4, FecProfile.LDPC_9_10}:
+            ladder = [
+                FecProfile.FEC_1_2, FecProfile.LDPC_1_2,
+                FecProfile.LDPC_3_4, FecProfile.LDPC_9_10,
+            ]
+            return ladder[max(0, ladder.index(base) - attempts)]
+        return FecProfile(max(int(FecProfile.FEC_1_2), int(base) - attempts))
 
     def report_burst(self, *, sent_blocks: int, acked_blocks: int,
                      retransmitted_bytes: int = 0,
@@ -135,10 +144,13 @@ class LinkAdaptationController:
         return old + alpha * (float(value) - old)
 
     def _downgrade(self) -> None:
-        if self.config.adaptive_fec and self.current_fec > FecProfile.FEC_1_2:
-            self.current_fec = FecProfile(int(self.current_fec) - 1)
-            self._next_upgrade = "fec"
-            return
+        if self.config.adaptive_fec:
+            ladder = self._fec_ladder()
+            index = ladder.index(self.current_fec)
+            if index > 0:
+                self.current_fec = ladder[index - 1]
+                self._next_upgrade = "fec"
+                return
         if self.config.adaptive_burst:
             allowed = self._allowed_bursts()
             index = allowed.index(self.current_burst_bytes)
@@ -148,8 +160,10 @@ class LinkAdaptationController:
 
     def _upgrade(self) -> None:
         if self._next_upgrade == "fec" and self.config.adaptive_fec:
-            if self.current_fec < FecProfile.FEC_7_8:
-                self.current_fec = FecProfile(int(self.current_fec) + 1)
+            ladder = self._fec_ladder()
+            index = ladder.index(self.current_fec)
+            if index + 1 < len(ladder):
+                self.current_fec = ladder[index + 1]
                 self._next_upgrade = "burst"
                 return
         if self.config.adaptive_burst:
@@ -159,9 +173,25 @@ class LinkAdaptationController:
                 self.current_burst_bytes = allowed[index + 1]
                 self._next_upgrade = "fec"
                 return
-        if self.config.adaptive_fec and self.current_fec < FecProfile.FEC_7_8:
-            self.current_fec = FecProfile(int(self.current_fec) + 1)
+        if self.config.adaptive_fec:
+            ladder = self._fec_ladder()
+            index = ladder.index(self.current_fec)
+            if index + 1 < len(ladder):
+                self.current_fec = ladder[index + 1]
         self._next_upgrade = "burst"
+
+    def _fec_ladder(self) -> list[FecProfile]:
+        if self.config.modern_ldpc:
+            return [
+                FecProfile.LDPC_1_2,
+                FecProfile.LDPC_3_4,
+                FecProfile.LDPC_9_10,
+            ]
+        return [
+            FecProfile.FEC_1_2, FecProfile.FEC_2_3,
+            FecProfile.FEC_3_4, FecProfile.FEC_5_6,
+            FecProfile.FEC_7_8,
+        ]
 
     def _allowed_bursts(self) -> list[int]:
         return [size for size in BURST_LADDER
@@ -169,5 +199,5 @@ class LinkAdaptationController:
 
     def summary(self) -> str:
         profile = self.profile
-        spec = FEC_SPECS[int(profile.fec)]
+        spec = fec_spec(profile.fec)
         return f"FEC {spec.label}, burst {profile.burst_bytes} B, ARQ {profile.arq_block_bytes} B"

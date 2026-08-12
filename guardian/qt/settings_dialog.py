@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..config import StationConfig, radio_profile_name
 from ..i18n import Language, dual, language, set_language, tr
 from ..install.dependencies import find_vara_fm, find_vara_hf
@@ -36,7 +37,8 @@ from ..ofdm import MCS_TABLE
 from ..ofdm.adaptation import BURST_LADDER
 from ..ofdm.coding import FEC_SPECS
 from ..ofdm.config import PROFILE_LADDER, SC_MCS_TABLE, profile_or_default
-from ..waveforms.config import PROFILES as EXPERIMENTAL_PROFILES
+from ..waveforms.config import (PROFILES as EXPERIMENTAL_PROFILES,
+                                profile_for as experimental_profile_for)
 from ..protocol import MAX_PTT_DELAY_MS, PTT_DELAY_STEP_MS
 from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.usb_serial import list_serial_ports, port_device
@@ -875,8 +877,8 @@ class SettingsDialog(QDialog):
         self.payload_backend.addItem("Guardian VARA P2P", "vara_p2p")
         self.payload_backend.addItem(
             dual(
-                "Guardian G2 soundcard modem (Experimental)",
-                "Zvukový modem Guardian G2 (Experimentální)",
+                f"Guardian G2 {__version__} capacity modem (Latest)",
+                f"Kapacitní modem Guardian G2 {__version__} (Nejnovější)",
             ),
             "ofdm_vhf",
         )
@@ -975,11 +977,19 @@ class SettingsDialog(QDialog):
                 self.g2_mcs,
             ),
             (
+                dual("Experimental occupied band", "Experimentální šířka pásma"),
+                self.g2_bandwidth,
+            ),
+            (
                 dual("OFDM waveform profile", "Profil vlnového průběhu OFDM"),
                 self.ofdm_profile,
             ),
             (dual("OFDM modulation (MCS)", "Modulace OFDM (MCS)"), self.ofdm_mcs),
+            (dual("Adaptive payload MCS", "Adaptivní MCS dat"),
+             self.g2_adaptive_mcs),
             (dual("Adaptive FEC", "Adaptivní FEC"), self.ofdm_adaptive_fec),
+            (dual("Modern LDPC ladder", "Moderní žebřík LDPC"),
+             self.ofdm_modern_ldpc),
             (dual("Fixed FEC rate", "Pevná rychlost FEC"), self.ofdm_fec),
             (dual("Adaptive burst length", "Adaptivní délka dávky"),
              self.ofdm_adaptive_burst),
@@ -995,6 +1005,10 @@ class SettingsDialog(QDialog):
              self.ofdm_timeout_multiplier),
             (dual("Microbursts per PTT", "Mikrodávky na jedno PTT"),
              self.ofdm_train_bursts),
+            (dual("Adaptive train length", "Adaptivní délka vlaku"),
+             self.ofdm_adaptive_train),
+            (dual("Shared superframe v3", "Sdílený superrámec v3"),
+             self.ofdm_superframe),
             (dual("Microburst gap", "Mezera mezi mikrodávkami"),
              self.ofdm_train_gap),
             (dual("Maximum continuous train", "Nejdelší souvislý vlak"),
@@ -1077,6 +1091,7 @@ class SettingsDialog(QDialog):
             ("OFDM — verified baseline", "OFDM — ověřený základ", "ofdm"),
             ("SC-HS — single carrier", "SC-HS — jedna nosná", "sc_hs"),
             ("SC-FTN — faster than Nyquist", "SC-FTN — rychleji než Nyquist", "sc_ftn"),
+            ("SC-FDE-FTN — FFT equalized", "SC-FDE-FTN — ekvalizace FFT", "sc_fde_ftn"),
             ("SEFDM — compressed carriers", "SEFDM — stlačené nosné", "sefdm"),
         ):
             self.g2_waveform.addItem(dual(english, czech), value)
@@ -1086,8 +1101,23 @@ class SettingsDialog(QDialog):
         self.g2_mcs = QComboBox()
         for scheme in SC_MCS_TABLE:
             self.g2_mcs.addItem(scheme.label, scheme.index)
+        self.g2_adaptive_mcs = QCheckBox(dual(
+            "Adapt modulation from cumulative ACK quality; selected MCS is the ceiling",
+            "Přizpůsobovat modulaci podle kvality souhrnného ACK; zvolená MCS je strop",
+        ))
+        self.g2_adaptive_mcs.setChecked(self.config.g2_adaptive_mcs)
         self.g2_mcs.setCurrentIndex(max(
             0, self.g2_mcs.findData(self.config.g2_mcs)
+        ))
+        self.g2_bandwidth = QComboBox()
+        for label, width in (
+            ("1K2 · ~1.2 kHz", "1K2"), ("2K7 · ~2.7 kHz", "2K7"),
+            ("5K · ~5 kHz", "5K"), ("10K · ~10 kHz", "10K"),
+            ("20K · ~18.8 kHz", "20K"),
+        ):
+            self.g2_bandwidth.addItem(label, width)
+        self.g2_bandwidth.setCurrentIndex(max(
+            0, self.g2_bandwidth.findData(self.config.g2_bandwidth)
         ))
 
         self.ofdm_profile = QComboBox()
@@ -1124,6 +1154,11 @@ class SettingsDialog(QDialog):
             "AUTO — učit se z výsledků doručení",
         ))
         self.ofdm_adaptive_fec.setChecked(self.config.ofdm_adaptive_fec)
+        self.ofdm_modern_ldpc = QCheckBox(dual(
+            "Use LDPC 1/2 → 3/4 → 9/10 (both peers need 2.3.3)",
+            "Použít LDPC 1/2 → 3/4 → 9/10 (obě stanice musí mít 2.3.3)",
+        ))
+        self.ofdm_modern_ldpc.setChecked(self.config.ofdm_modern_ldpc)
         self.ofdm_fec = QComboBox()
         for spec in FEC_SPECS:
             self.ofdm_fec.addItem(f"FEC {spec.label}", spec.label)
@@ -1181,6 +1216,22 @@ class SettingsDialog(QDialog):
             "Pro protistanice starší než 2.3.2 použijte 1. Vyšší hodnoty drží "
             "samostatně chráněné dávky pod jedním PTT a žádají jedno souhrnné ACK.",
         ))
+        self.ofdm_superframe = QCheckBox(dual(
+            "Share one preamble, channel training and header across up to 63 ARQ blocks",
+            "Sdílet jednu preambuli, trénink kanálu a hlavičku až pro 63 ARQ bloků",
+        ))
+        self.ofdm_superframe.setChecked(self.config.ofdm_superframe)
+        self.ofdm_superframe.setToolTip(dual(
+            "Protocol v3 opt-in. It removes repeated physical acquisition overhead "
+            "while every ARQ block keeps independent FEC and CRC. Both peers must use 2.3.3+.",
+            "Volitelný protokol v3. Odstraní opakovanou režii fyzické synchronizace, "
+            "ale každý ARQ blok si ponechá vlastní FEC a CRC. Obě stanice musí mít 2.3.3+.",
+        ))
+        self.ofdm_adaptive_train = QCheckBox(dual(
+            "Grow after three clean windows; shorten immediately after loss",
+            "Prodloužit po třech čistých oknech; po ztrátě ihned zkrátit",
+        ))
+        self.ofdm_adaptive_train.setChecked(self.config.ofdm_adaptive_train)
         self.ofdm_train_gap = _spin(10, 200, self.config.ofdm_train_gap_ms)
         self.ofdm_train_gap.setSuffix(" ms")
         self.ofdm_max_train = QDoubleSpinBox()
@@ -1213,8 +1264,12 @@ class SettingsDialog(QDialog):
         self.ofdm_adaptive_burst.toggled.connect(self._sync_ofdm_controls)
         self.ofdm_legacy_mode.toggled.connect(self._sync_ofdm_controls)
         self.ofdm_train_bursts.currentIndexChanged.connect(self._sync_ofdm_controls)
+        self.ofdm_superframe.toggled.connect(self._sync_ofdm_controls)
+        self.ofdm_adaptive_train.toggled.connect(self._sync_ofdm_summary)
         self.g2_waveform.currentIndexChanged.connect(self._sync_ofdm_controls)
         self.g2_mcs.currentIndexChanged.connect(self._sync_ofdm_summary)
+        self.g2_adaptive_mcs.toggled.connect(self._sync_ofdm_summary)
+        self.g2_bandwidth.currentIndexChanged.connect(self._sync_ofdm_summary)
         for picker in (
             self.ofdm_fec, self.ofdm_burst_bytes, self.ofdm_min_burst_bytes,
             self.ofdm_max_burst_bytes, self.ofdm_arq_block_bytes,
@@ -1226,10 +1281,13 @@ class SettingsDialog(QDialog):
         legacy = self.ofdm_legacy_mode.isChecked()
         classic = self.g2_waveform.currentData() == "ofdm"
         self.ofdm_profile.setEnabled(classic)
+        self.g2_bandwidth.setEnabled(not classic)
         self.ofdm_mcs.setEnabled(classic)
         self.g2_mcs.setEnabled(not classic)
+        self.g2_adaptive_mcs.setEnabled(not legacy)
         self.ofdm_adaptive_fec.setEnabled(not legacy)
         self.ofdm_fec.setEnabled(not legacy and not self.ofdm_adaptive_fec.isChecked())
+        self.ofdm_modern_ldpc.setEnabled(not legacy)
         self.ofdm_adaptive_burst.setEnabled(not legacy)
         self.ofdm_burst_bytes.setEnabled(
             not legacy and not self.ofdm_adaptive_burst.isChecked()
@@ -1242,8 +1300,15 @@ class SettingsDialog(QDialog):
         )
         self.ofdm_arq_block_bytes.setEnabled(not legacy)
         self.ofdm_train_bursts.setEnabled(not legacy)
+        self.ofdm_adaptive_train.setEnabled(
+            not legacy and int(self.ofdm_train_bursts.currentData()) > 1
+        )
+        self.ofdm_superframe.setEnabled(
+            not legacy and int(self.ofdm_train_bursts.currentData()) > 1
+        )
         self.ofdm_train_gap.setEnabled(
             not legacy and int(self.ofdm_train_bursts.currentData()) > 1
+            and not self.ofdm_superframe.isChecked()
         )
         self.ofdm_max_train.setEnabled(
             not legacy and int(self.ofdm_train_bursts.currentData()) > 1
@@ -1258,14 +1323,11 @@ class SettingsDialog(QDialog):
         directly above it.
         """
         family = str(self.g2_waveform.currentData())
-        experimental_names = {
-            "sc_hs": "SC_HS_2K7",
-            "sc_ftn": "SC_FTN_2K7",
-            "sefdm": "SEFDM_2K7",
-        }
         waveform = (profile_or_default(str(self.ofdm_profile.currentData()))
                     if family == "ofdm"
-                    else EXPERIMENTAL_PROFILES[experimental_names[family]])
+                    else experimental_profile_for(
+                        family, str(self.g2_bandwidth.currentData())
+                    ))
         if self.ofdm_legacy_mode.isChecked():
             mode = dual(
                 "Protocol v1 compatibility: 512 B stop-and-wait, FEC 1/2.",
@@ -1278,11 +1340,13 @@ class SettingsDialog(QDialog):
                      f"{self.ofdm_max_burst_bytes.currentData()} B"
                      if self.ofdm_adaptive_burst.isChecked()
                      else f"fixed {self.ofdm_burst_bytes.currentData()} B")
+            protocol = "v3 superframe" if self.ofdm_superframe.isChecked() else "v2 selective repeat"
+            protocol_cs = "v3 superrámec" if self.ofdm_superframe.isChecked() else "v2 se selektivním opakováním"
             mode = dual(
-                f"Protocol v2 selective repeat · FEC {fec} · burst {burst} · "
+                f"Protocol {protocol} · FEC {fec} · burst {burst} · "
                 f"ARQ {self.ofdm_arq_block_bytes.currentData()} B · "
                 f"{self.ofdm_train_bursts.currentData()} microburst(s)/PTT.",
-                f"Protokol v2 se selektivním opakováním · FEC {fec} · dávka "
+                f"Protokol {protocol_cs} · FEC {fec} · dávka "
                 f"{burst} · ARQ {self.ofdm_arq_block_bytes.currentData()} B · "
                 f"{self.ofdm_train_bursts.currentData()} mikrodávek/PTT.",
             )
@@ -1699,6 +1763,7 @@ class SettingsDialog(QDialog):
         cfg.ofdm_tx_tail_ms = self.ofdm_tx_tail.value()
         cfg.ofdm_max_retries = self.ofdm_max_retries.value()
         cfg.ofdm_adaptive_fec = self.ofdm_adaptive_fec.isChecked()
+        cfg.ofdm_modern_ldpc = self.ofdm_modern_ldpc.isChecked()
         cfg.ofdm_fec = str(self.ofdm_fec.currentData())
         cfg.ofdm_adaptive_burst = self.ofdm_adaptive_burst.isChecked()
         cfg.ofdm_burst_bytes = int(self.ofdm_burst_bytes.currentData())
@@ -1708,10 +1773,14 @@ class SettingsDialog(QDialog):
         cfg.ofdm_timeout_multiplier = self.ofdm_timeout_multiplier.value()
         cfg.ofdm_legacy_mode = self.ofdm_legacy_mode.isChecked()
         cfg.ofdm_train_bursts = int(self.ofdm_train_bursts.currentData())
+        cfg.ofdm_adaptive_train = self.ofdm_adaptive_train.isChecked()
+        cfg.ofdm_superframe = self.ofdm_superframe.isChecked()
         cfg.ofdm_train_gap_ms = self.ofdm_train_gap.value()
         cfg.ofdm_max_train_seconds = self.ofdm_max_train.value()
         cfg.g2_waveform = str(self.g2_waveform.currentData())
+        cfg.g2_bandwidth = str(self.g2_bandwidth.currentData())
         cfg.g2_mcs = int(self.g2_mcs.currentData())
+        cfg.g2_adaptive_mcs = self.g2_adaptive_mcs.isChecked()
         cfg.control_modem = self.control_modem.currentData()
         cfg.vara_hf_bandwidth = self.vara_hf_bandwidth.currentData()
         cfg.vara_host_ptt = self.vara_host_ptt.isChecked()

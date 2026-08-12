@@ -25,15 +25,21 @@ from typing import Protocol
 from . import __version__
 from .config import config_dir
 
-CALIBRATION_PROTOCOL_VERSION = 1
+CALIBRATION_PROTOCOL_VERSION = 2
 MAX_CALIBRATION_SECONDS = 15 * 60
 MAX_CALIBRATION_BURSTS = 96
 MAX_DUTY_CYCLE = 0.50
 MIN_DIGITAL_HEADROOM_DB = 1.0
 
-_FAMILY_ID = {"ofdm": 0, "sc_hs": 1, "sc_ftn": 2, "sefdm": 3}
+_FAMILY_ID = {
+    "ofdm": 0, "sc_hs": 1, "sc_ftn": 2, "sefdm": 3,
+    "sc_fde_ftn": 4,
+}
 _ID_FAMILY = {value: key for key, value in _FAMILY_ID.items()}
-_PROBE = struct.Struct(">BBBBH")
+_BANDWIDTH_ID = {"1K2": 0, "2K7": 1, "5K": 2, "10K": 3, "20K": 4}
+_ID_BANDWIDTH = {value: key for key, value in _BANDWIDTH_ID.items()}
+_PROBE_V1 = struct.Struct(">BBBBH")
+_PROBE = struct.Struct(">BBBBBH")
 _REPORT = struct.Struct(">BBbbbBBB")
 
 
@@ -61,14 +67,20 @@ class ProbeCommand:
     mcs: int
     fec: int
     tx_scale: float
+    bandwidth: str = "2K7"
+    capture_path: str = ""
 
     def encode(self) -> str:
         family = _FAMILY_ID.get(self.waveform)
         if family is None:
             raise ValueError(f"unknown waveform family {self.waveform!r}")
+        bandwidth = _BANDWIDTH_ID.get(str(self.bandwidth).upper())
+        if bandwidth is None:
+            raise ValueError(f"unknown calibration bandwidth {self.bandwidth!r}")
         raw = _PROBE.pack(
             int(self.sequence) & 0xFF,
             family,
+            bandwidth,
             max(0, min(255, int(self.mcs))),
             max(0, min(255, int(self.fec))),
             max(0, min(1000, round(float(self.tx_scale) * 1000))),
@@ -77,11 +89,21 @@ class ProbeCommand:
 
     @classmethod
     def decode(cls, token: str) -> "ProbeCommand":
-        raw = _decode_base32(token, _PROBE.size)
-        sequence, family, mcs, fec, scale = _PROBE.unpack(raw)
+        raw = _decode_base32(token)
+        if len(raw) == _PROBE_V1.size:
+            sequence, family, mcs, fec, scale = _PROBE_V1.unpack(raw)
+            bandwidth = "2K7"
+        elif len(raw) == _PROBE.size:
+            sequence, family, width, mcs, fec, scale = _PROBE.unpack(raw)
+            if width not in _ID_BANDWIDTH:
+                raise ValueError("unknown calibration bandwidth id")
+            bandwidth = _ID_BANDWIDTH[width]
+        else:
+            raise ValueError("wrong calibration token length")
         if family not in _ID_FAMILY:
             raise ValueError("unknown calibration waveform id")
-        return cls(sequence, _ID_FAMILY[family], mcs, fec, scale / 1000.0)
+        return cls(sequence, _ID_FAMILY[family], mcs, fec, scale / 1000.0,
+                   bandwidth)
 
 
 @dataclass
@@ -107,6 +129,7 @@ class ProbeResult:
     error: str = ""
     endpoint_volume: float | None = None
     session_volume: float | None = None
+    bandwidth: str = "2K7"
 
     @property
     def safe(self) -> bool:
@@ -154,6 +177,7 @@ class ProbeResult:
             evm_rms=evm, cfo_hz=float(cfo),
             audio_peak=_byte_unit(peak),
             clipped_samples=clipped, sync_confidence=_byte_unit(sync),
+            bandwidth=command.bandwidth,
         )
 
 
@@ -167,6 +191,7 @@ class RecommendedPoint:
     score_bps: float
     margin_db: float
     reason: str
+    bandwidth: str = "2K7"
 
 
 @dataclass
@@ -217,31 +242,47 @@ class CalibrationReport:
         return json_path, csv_path
 
 
-def quick_plan(waveform: str, mcs: int, fec: int) -> list[ProbeCommand]:
+def quick_plan(waveform: str, mcs: int, fec: int,
+               bandwidth: str = "2K7") -> list[ProbeCommand]:
     """Conservative low-to-high ladder with a useful point at every step."""
     scales = (0.20, 0.28, 0.40, 0.56, 0.72, 0.88)
-    return [ProbeCommand(i, waveform, mcs, fec, scale)
+    return [ProbeCommand(i, waveform, mcs, fec, scale, bandwidth)
             for i, scale in enumerate(scales)]
 
 
-def full_plan(waveforms: list[str] | None = None) -> list[ProbeCommand]:
+def full_plan(waveforms: list[str] | None = None,
+              bandwidths: list[str] | None = None) -> list[ProbeCommand]:
     """Bounded characterizer frontier; failed branches are pruned by the runner."""
-    families = waveforms or ["ofdm", "sc_hs", "sc_ftn", "sefdm"]
+    families = waveforms or ["ofdm", "sc_hs", "sc_ftn", "sc_fde_ftn", "sefdm"]
     commands: list[ProbeCommand] = []
     sequence = 0
+    widths = bandwidths or ["1K2", "2K7", "5K", "10K", "20K"]
     for family in families:
-        ladder = (0, 1, 2, 3) if family == "ofdm" else (0, 1, 2, 3, 5, 6, 4)
-        for mcs in ladder:
-            commands.append(ProbeCommand(sequence, family, mcs, 1, 0.40))
+        # First cover the whole family/width surface with robust and useful
+        # intermediate orders. Denser modes are appended below and naturally
+        # trimmed by MAX_CALIBRATION_BURSTS.
+        ladder = (0, 1, 2, 3) if family == "ofdm" else (1, 2, 7, 5)
+        family_widths = ["2K7"] if family == "ofdm" else widths
+        for width in family_widths:
+            for mcs in ladder:
+                commands.append(ProbeCommand(
+                    sequence, family, mcs, 1, 0.40, width
+                ))
+                sequence += 1
+    for family in (item for item in families if item != "ofdm"):
+        for mcs in (3, 6, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20):
+            commands.append(ProbeCommand(
+                sequence, family, mcs, 1, 0.40, "2K7"
+            ))
             sequence += 1
     return commands[:MAX_CALIBRATION_BURSTS]
 
 
 def recommend(results: list[ProbeResult]) -> RecommendedPoint | None:
     """Choose the lowest drive within 0.5 dB of the best safe goodput."""
-    grouped: dict[tuple[str, int, int, float, float | None], list[ProbeResult]] = {}
+    grouped: dict[tuple[str, str, int, int, float, float | None], list[ProbeResult]] = {}
     for result in results:
-        key = (result.waveform, result.mcs, result.fec,
+        key = (result.waveform, result.bandwidth, result.mcs, result.fec,
                round(result.tx_scale, 4), result.endpoint_volume)
         grouped.setdefault(key, []).append(result)
     candidates: list[tuple[float, tuple, list[ProbeResult]]] = []
@@ -261,13 +302,14 @@ def recommend(results: list[ProbeResult]) -> RecommendedPoint | None:
     best_score = max(score for score, _key, _group in candidates)
     floor = best_score * 10.0 ** (-0.5 / 10.0)
     near = [item for item in candidates if item[0] >= floor]
-    score, key, _group = min(near, key=lambda item: (item[1][3], item[1][4] or 0.0,
+    score, key, _group = min(near, key=lambda item: (item[1][4], item[1][5] or 0.0,
                                                      -item[0]))
-    waveform, mcs, fec, tx_scale, endpoint = key
+    waveform, bandwidth, mcs, fec, tx_scale, endpoint = key
     margin = 10.0 * math.log10(max(score, 1e-12) / max(best_score, 1e-12))
     return RecommendedPoint(
         waveform, mcs, fec, tx_scale, endpoint, score, margin,
         "lowest safe drive within 0.5 dB of the best measured goodput",
+        bandwidth,
     )
 
 
@@ -396,10 +438,10 @@ class GainJournal:
             pass
 
 
-def _decode_base32(token: str, expected: int) -> bytes:
+def _decode_base32(token: str, expected: int | None = None) -> bytes:
     clean = "".join(str(token).upper().split())
     raw = base64.b32decode(clean + "=" * ((-len(clean)) % 8), casefold=True)
-    if len(raw) != expected:
+    if expected is not None and len(raw) != expected:
         raise ValueError("wrong calibration token length")
     return raw
 

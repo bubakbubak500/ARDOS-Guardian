@@ -241,6 +241,10 @@ class StationConfig:
     # directly when their AUTO switch is off and are also the reproducible test
     # settings shown in the modem workspace.
     ofdm_adaptive_fec: bool = True
+    # Opt-in 2.3.3 systematic sparse LDPC ladder. Older G2 peers understand
+    # only the convolutional IDs, so this is explicit until capability v2 is
+    # negotiated on the control channel.
+    ofdm_modern_ldpc: bool = False
     ofdm_fec: str = "1/2"              # 1/2 | 2/3 | 3/4 | 5/6 | 7/8
     ofdm_adaptive_burst: bool = True
     ofdm_burst_bytes: int = 4096       # fixed-mode keyed-burst target
@@ -253,18 +257,28 @@ class StationConfig:
     # independently protected microbursts under a single PTT and defer the
     # cumulative ACK until the train ends. Keep one for mixed older peers.
     ofdm_train_bursts: int = 1
+    ofdm_adaptive_train: bool = False
+    # Protocol-v3 superframe: fold the configured train into one physical burst
+    # with one preamble/training/header and up to 63 independently protected
+    # ARQ blocks. Explicit opt-in because 2.3.2 peers only accept frame v2.
+    ofdm_superframe: bool = False
     ofdm_train_gap_ms: int = 30
     ofdm_max_train_seconds: float = 20.0
     # Physical waveform under the Guardian G2 soundcard transport.  "ofdm" is
     # the verified default; the other families are explicit opt-in experiments
     # which keep the same control handshake, framing and selective-repeat ARQ.
-    g2_waveform: str = "ofdm"           # ofdm | sc_hs | sc_ftn | sefdm
+    g2_waveform: str = "ofdm"           # ofdm | sc_hs | sc_ftn | sc_fde_ftn | sefdm
+    # Common experimental occupied-band rung. OFDM keeps its established named
+    # profile because its BENCH width intentionally differs from SC 2K7.
+    g2_bandwidth: str = "2K7"            # 1K2 | 2K7 | 5K | 10K | 20K
     g2_mcs: int = 2                     # experimental-family modulation index
+    g2_adaptive_mcs: bool = False        # selected MCS is the automatic ceiling
     # Calibrated digital drive is deliberately per waveform: their crest
     # factors differ enough that one safe RMS value would waste SC-FTN headroom
     # or clip SEFDM. Values are linear full-scale multipliers.
     g2_tx_scales: dict[str, float] = field(default_factory=lambda: {
-        "ofdm": 1.0, "sc_hs": 1.0, "sc_ftn": 1.0, "sefdm": 1.0,
+        "ofdm": 1.0, "sc_hs": 1.0, "sc_ftn": 1.0,
+        "sc_fde_ftn": 1.0, "sefdm": 1.0,
     })
     calibration_allowlist: list[str] = field(default_factory=list)
     calibration_auto_accept: bool = False
@@ -397,7 +411,10 @@ class StationConfig:
             else:
                 clean.pop(name, None)
         # Keep hand-edited adaptive modem values on explicit protocol ladders.
-        if str(clean.get("ofdm_fec", "")) not in {"1/2", "2/3", "3/4", "5/6", "7/8"}:
+        if str(clean.get("ofdm_fec", "")) not in {
+            "1/2", "2/3", "3/4", "5/6", "7/8",
+            "LDPC-1/2", "LDPC-3/4", "LDPC-9/10",
+        }:
             clean.pop("ofdm_fec", None)
         burst_ladder = {256, 512, 1024, 2048, 4096, 8192, 16384}
         for name in ("ofdm_burst_bytes", "ofdm_min_burst_bytes",
@@ -406,14 +423,18 @@ class StationConfig:
                 clean.pop(name, None)
         if clean.get("ofdm_arq_block_bytes") not in {256, 512, 1024}:
             clean.pop("ofdm_arq_block_bytes", None)
-        if clean.get("g2_waveform") not in {"ofdm", "sc_hs", "sc_ftn", "sefdm"}:
+        if clean.get("g2_waveform") not in {
+            "ofdm", "sc_hs", "sc_ftn", "sc_fde_ftn", "sefdm"
+        }:
             clean.pop("g2_waveform", None)
+        if clean.get("g2_bandwidth") not in {"1K2", "2K7", "5K", "10K", "20K"}:
+            clean.pop("g2_bandwidth", None)
         scales = clean.get("g2_tx_scales")
         if isinstance(scales, dict):
             try:
                 clean["g2_tx_scales"] = {
                     name: min(1.0, max(0.05, float(scales.get(name, 1.0))))
-                    for name in ("ofdm", "sc_hs", "sc_ftn", "sefdm")
+                    for name in ("ofdm", "sc_hs", "sc_ftn", "sc_fde_ftn", "sefdm")
                 }
             except (TypeError, ValueError):
                 clean.pop("g2_tx_scales", None)
@@ -438,7 +459,7 @@ class StationConfig:
         except (TypeError, ValueError):
             clean.pop("g2_mcs", None)
         else:
-            clean["g2_mcs"] = min(6, max(0, experimental_mcs))
+            clean["g2_mcs"] = min(20, max(0, experimental_mcs))
         arq_bytes = int(clean.get("ofdm_arq_block_bytes", 512))
         for name in ("ofdm_burst_bytes", "ofdm_min_burst_bytes",
                      "ofdm_max_burst_bytes"):

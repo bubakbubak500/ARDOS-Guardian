@@ -10,14 +10,17 @@ import pytest
 from guardian.ofdm import BENCH
 from guardian.ofdm.adaptation import AdaptationConfig, LinkAdaptationController
 from guardian.ofdm.coding import (FEC_SPECS, FecProfile, decode_soft,
+                                  combine_harq_soft,
                                   effective_rate, encode_bits, encoded_bits,
                                   mother_bits)
 from guardian.ofdm.config import HEADER_MCS
-from guardian.ofdm.framing import (AckBitmap, OfdmFrameType, PhyHeader,
+from guardian.ofdm.framing import (AckBitmap, SUPERFRAME_VERSION, OfdmFrameType, PhyHeader,
                                    SubBlock, build_burst, burst_duration,
                                    decode_burst, header_symbols,
                                    protocol_overhead_bytes, section_symbols)
 from guardian.ofdm.link import OfdmLink, simulated_pair
+from guardian.waveforms.config import SC_FTN_2K7
+from guardian.waveforms.framing import ExperimentalBurstCodec
 
 
 @pytest.mark.parametrize("spec", FEC_SPECS, ids=lambda item: item.label)
@@ -36,9 +39,13 @@ def test_every_punctured_profile_round_trips_the_mother_code(spec) -> None:
 
 
 def test_faster_fec_profiles_transmit_strictly_fewer_bits() -> None:
-    lengths = [encoded_bits(512, spec.profile) for spec in FEC_SPECS]
-    assert lengths == sorted(lengths, reverse=True)
-    assert len(set(lengths)) == len(FEC_SPECS)
+    for family in ("conv", "ldpc"):
+        lengths = [
+            encoded_bits(512, spec.profile)
+            for spec in FEC_SPECS if spec.family == family
+        ]
+        assert lengths == sorted(lengths, reverse=True)
+        assert len(set(lengths)) == len(lengths)
 
 
 @pytest.mark.parametrize("spec", FEC_SPECS, ids=lambda item: item.label)
@@ -74,6 +81,29 @@ def test_a_1024_byte_arq_subblock_is_supported_by_version_two() -> None:
     decoded = decode_burst(BENCH, build_burst(BENCH, header, payload))
     assert decoded.ok
     assert decoded.payload == payload
+
+
+def test_superframe_v3_carries_more_than_32_independently_checked_blocks() -> None:
+    rng = np.random.default_rng(310)
+    blocks = [
+        SubBlock(index, rng.integers(0, 256, 24, dtype=np.uint8).tobytes())
+        for index in range(40)
+    ]
+    with pytest.raises(ValueError, match="1..32"):
+        PhyHeader(
+            OfdmFrameType.DATA, 310, block_count=40, payload_len=960,
+            subblock_count=40,
+        ).encode()
+    header = PhyHeader(
+        OfdmFrameType.DATA, 310, block_count=40, mcs=1,
+        payload_len=sum(len(item.payload) for item in blocks),
+        subblock_count=len(blocks), version=SUPERFRAME_VERSION,
+    )
+    decoded = decode_burst(BENCH, build_burst(BENCH, header, blocks=blocks))
+    assert decoded.ok
+    assert decoded.header.version == SUPERFRAME_VERSION
+    assert decoded.block_order == tuple(range(40))
+    assert decoded.blocks == {item.sequence: item.payload for item in blocks}
 
 
 def test_a_broken_manifest_never_delivers_unidentified_bytes() -> None:
@@ -169,6 +199,40 @@ def test_joint_adaptation_uses_hysteresis_and_changes_one_axis_at_a_time() -> No
     assert controller.profile.burst_bytes == 2048
 
 
+def test_modern_adaptation_uses_only_the_ldpc_ladder_and_safe_retry() -> None:
+    controller = LinkAdaptationController(AdaptationConfig(modern_ldpc=True))
+    assert controller.profile.fec is FecProfile.LDPC_1_2
+    for _ in range(3):
+        controller.report_burst(sent_blocks=4, acked_blocks=4)
+    assert controller.profile.fec is FecProfile.LDPC_3_4
+    for _ in range(3):
+        controller.report_burst(sent_blocks=4, acked_blocks=4)
+    # The alternating second clean window grows the burst; the third advances FEC.
+    for _ in range(3):
+        controller.report_burst(sent_blocks=4, acked_blocks=4)
+    assert controller.profile.fec is FecProfile.LDPC_9_10
+    assert controller.fec_for_retry(1) is FecProfile.LDPC_3_4
+    assert controller.fec_for_retry(2) is FecProfile.LDPC_1_2
+    assert controller.fec_for_retry(3) is FecProfile.FEC_1_2
+
+
+def test_rate_compatible_harq_combines_punctured_observations_on_mother_code() -> None:
+    raw = np.random.default_rng(233).integers(0, 2, 512 * 8, dtype=np.int8)
+    weak = encode_bits(raw, FecProfile.FEC_7_8)
+    strong = encode_bits(raw, FecProfile.FEC_1_2)
+    weak_llr = (2.0 * weak - 1.0) * 0.25
+    strong_llr = (2.0 * strong - 1.0) * 1.0
+    combined = combine_harq_soft(
+        strong_llr, FecProfile.FEC_1_2,
+        weak_llr, FecProfile.FEC_7_8, 512,
+    )
+    assert len(combined) == len(strong_llr)
+    # Positions seen in both rounds have more confidence; newly revealed mother
+    # parity positions retain the strong retry's confidence.
+    assert np.max(np.abs(combined)) > np.max(np.abs(strong_llr))
+    decoded = decode_soft(combined, 512, FecProfile.FEC_1_2)
+    assert np.array_equal(decoded[:len(raw)], raw)
+
 def test_fixed_profiles_do_not_move_and_retries_strengthen_fec() -> None:
     config = AdaptationConfig(
         adaptive_fec=False, fixed_fec=FecProfile.FEC_7_8,
@@ -203,6 +267,41 @@ def test_timeout_multiplier_scales_duration_derived_deadlines() -> None:
         normal.reply_timeout(32) * 1.8
     )
     assert cautious.data_timeout() == pytest.approx(normal.data_timeout() * 1.8)
+
+
+def test_adaptive_train_uses_clean_hysteresis_and_fast_backoff() -> None:
+    link = OfdmLink(
+        BENCH, None, train_bursts=4, adaptive_train=True, superframe=True,
+    )
+    assert link._current_train_bursts == 1
+    for _ in range(3):
+        link._report_train_feedback(4, 4)
+    assert link._current_train_bursts == 2
+    link._report_train_feedback(8, 7)
+    assert link._current_train_bursts == 1
+
+
+def test_adaptive_mcs_moves_slowly_up_and_immediately_down() -> None:
+    link = OfdmLink(BENCH, None, mcs_index=3, adaptive_mcs=True)
+    assert link.mcs_index == 1
+    assert link._maximum_mcs_index == 3
+    for _ in range(3):
+        link._report_mcs_feedback(4, 4, 18.0)
+    assert link.mcs_index == 3
+    link._report_mcs_feedback(4, 3, 18.0)
+    assert link.mcs_index == 2
+
+
+def test_experimental_mcs_ceiling_uses_physical_order_not_wire_id() -> None:
+    link = OfdmLink(
+        SC_FTN_2K7, None, mcs_index=7, adaptive_mcs=True,
+        codec=ExperimentalBurstCodec(),
+    )
+    for _ in range(3):
+        link._report_mcs_feedback(4, 4, 9.0)
+    assert link.mcs_index == 7  # 8-PSK, never old-ID 256-QAM MCS4
+    link._report_mcs_feedback(4, 3, 9.0)
+    assert link.mcs_index == 1  # robust QPSK is the next physical step down
 
 
 def test_legacy_mode_still_moves_a_multiblock_message_exactly_once() -> None:

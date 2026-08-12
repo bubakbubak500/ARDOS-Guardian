@@ -177,6 +177,69 @@ def test_fast_selective_repeat_sends_two_microbursts_under_one_ptt_and_ack():
     assert far.transmissions == 2        # one cumulative ACK per train
 
 
+def test_v3_superframe_shares_acquisition_for_a_whole_four_burst_train():
+    payload = _payload(8192, seed=8090)
+    near, far = simulated_pair(
+        BENCH, ChannelSpec(snr_db=22.0, delay=300, trailing=800), seed=8090
+    )
+    sender = OfdmLink(
+        BENCH, near, mcs_index=1, train_bursts=4, superframe=True,
+        max_train_seconds=60.0, ptt_turnaround=TURNAROUND, timeout_margin=MARGIN,
+    )
+    receiver = OfdmLink(
+        BENCH, far, mcs_index=1, train_bursts=4, superframe=True,
+        max_train_seconds=60.0, ptt_turnaround=TURNAROUND, timeout_margin=MARGIN,
+    )
+    got = {}
+    listener = threading.Thread(
+        target=lambda: got.__setitem__("data", receiver.receive_message(msg_id=8090)),
+        daemon=True,
+    )
+    listener.start()
+    assert sender.send_message(8090, payload)
+    listener.join(timeout=180)
+    assert not listener.is_alive()
+    assert got["data"] == payload
+    assert sender.status.data_bursts == 1
+    assert near.transmissions == 1
+    assert far.transmissions == 1
+
+
+def test_v3_superframe_retries_only_one_erased_middle_codeword():
+    payload = _payload(8192, seed=8091)
+    delay = 300
+    near, far = simulated_pair(
+        BENCH, ChannelSpec(snr_db=24.0, delay=delay, trailing=800), seed=8091
+    )
+    near.damage = lambda count, samples: (
+        _erase_subblock(samples, delay=delay, members=16, position=7)
+        if count == 1 else samples
+    )
+    sender = OfdmLink(
+        BENCH, near, mcs_index=1, train_bursts=4, superframe=True,
+        max_train_seconds=60.0, ptt_turnaround=TURNAROUND,
+        timeout_margin=MARGIN,
+    )
+    receiver = OfdmLink(
+        BENCH, far, mcs_index=1, train_bursts=4, superframe=True,
+        max_train_seconds=60.0, ptt_turnaround=TURNAROUND,
+        timeout_margin=MARGIN,
+    )
+    got = {}
+    listener = threading.Thread(
+        target=lambda: got.__setitem__("data", receiver.receive_message(msg_id=8091)),
+        daemon=True,
+    )
+    listener.start()
+    assert sender.send_message(8091, payload)
+    listener.join(timeout=180)
+    assert not listener.is_alive()
+    assert got["data"] == payload
+    assert sender.status.retransmitted_bytes == 512
+    assert sender.status.retries == 1
+    assert near.transmissions == 2
+
+
 def test_lost_final_microburst_is_recovered_by_poll_then_sparse_retry():
     payload = _payload(4096)
     near, far = simulated_pair(

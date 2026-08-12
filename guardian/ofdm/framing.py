@@ -28,7 +28,8 @@ from enum import IntEnum
 import numpy as np
 
 from ..protocol import crc16
-from .coding import (FecProfile, decode_soft, effective_rate, encode_bits,
+from .coding import (FecProfile, combine_harq_soft, decode_soft, effective_rate, encode_bits,
+                     iterative_decode_candidates,
                      encoded_bits, fec_profile, fec_spec)
 from .config import HEADER_MCS, OfdmConfigError, OfdmProfile, mcs
 from .constellation import bits_per_symbol, demap_llr, evm, map_bits
@@ -40,6 +41,7 @@ from .sync import candidates
 #: OFDM frame-format version. Independent of the ARDOS control-frame version:
 #: this one describes the payload waveform, which no legacy station ever hears.
 FRAME_VERSION = 2
+SUPERFRAME_VERSION = 3
 LEGACY_FRAME_VERSION = 1
 
 # version, frame_type, msg_id, block_seq, block_count, mcs, payload_len, flags
@@ -56,6 +58,8 @@ _ACK_PREFIX = struct.Struct(">HbB")
 _ACK_SPARSE = 0x53
 _ACK_SPARSE_COUNT = struct.Struct(">H")
 MAX_ARQ_BLOCK_BYTES = 1024
+MAX_SUBBLOCKS = 32
+MAX_SUPERFRAME_SUBBLOCKS = 63
 
 
 class OfdmFrameError(Exception):
@@ -92,15 +96,19 @@ class PhyHeader:
     retransmission: bool = False
 
     def encode(self) -> bytes:
-        if self.version not in (LEGACY_FRAME_VERSION, FRAME_VERSION):
+        if self.version not in (
+            LEGACY_FRAME_VERSION, FRAME_VERSION, SUPERFRAME_VERSION,
+        ):
             raise ValueError("unsupported OFDM frame version")
         if self.version == LEGACY_FRAME_VERSION:
             scheme = int(self.mcs)
             wire_flags = int(self.flags)
         else:
             fec = fec_profile(self.fec)
-            if not 1 <= int(self.subblock_count) <= 32:
-                raise ValueError("subblock_count must be in 1..32")
+            maximum = (MAX_SUPERFRAME_SUBBLOCKS
+                       if self.version == SUPERFRAME_VERSION else MAX_SUBBLOCKS)
+            if not 1 <= int(self.subblock_count) <= maximum:
+                raise ValueError(f"subblock_count must be in 1..{maximum}")
             scheme = (int(fec) << 5) | (int(self.mcs) & 0x1F)
             wire_flags = (int(self.flags) & 0x40) | int(self.subblock_count)
             if self.retransmission:
@@ -127,7 +135,9 @@ class PhyHeader:
         if given != want:
             raise OfdmFrameError(f"header CRC {given:#06x}, computed {want:#06x}")
         version, ftype, msg_id, seq, count, scheme, length, flags = _HEADER.unpack(body)
-        if version not in (LEGACY_FRAME_VERSION, FRAME_VERSION):
+        if version not in (
+            LEGACY_FRAME_VERSION, FRAME_VERSION, SUPERFRAME_VERSION,
+        ):
             raise OfdmFrameError(f"unsupported OFDM frame version {version}")
         try:
             frame_type = OfdmFrameType(ftype)
@@ -152,7 +162,9 @@ class PhyHeader:
             subblock_count = flags & _SUBBLOCK_MASK
             retransmission = bool(flags & _RETRANSMISSION_FLAG)
             reserved_flags = flags & 0x40
-            if not 1 <= subblock_count <= 32:
+            maximum = (MAX_SUPERFRAME_SUBBLOCKS
+                       if version == SUPERFRAME_VERSION else MAX_SUBBLOCKS)
+            if not 1 <= subblock_count <= maximum:
                 raise OfdmFrameError(f"invalid sub-block count {subblock_count}")
         try:
             (mcs if mcs_lookup is None else mcs_lookup)(index)
@@ -318,6 +330,23 @@ def decode_section(symbols, noise_var, byte_count: int, modulation: str,
     return np.packbits(bits[: byte_count * 8].astype(np.uint8)).tobytes()
 
 
+def decode_section_with_soft(symbols, noise_var, byte_count: int, modulation: str,
+                             fec: FecProfile | int = FecProfile.FEC_1_2,
+                             prior_soft=None) -> tuple[list[bytes], np.ndarray]:
+    """Decode a section and expose deinterleaved LLRs for Chase-HARQ."""
+    llr = demap_llr(symbols, modulation, noise_var)
+    soft = deinterleave(llr)[:coded_bits(byte_count, fec)]
+    if prior_soft is not None:
+        prior_fec, prior = prior_soft
+        soft = combine_harq_soft(
+            soft, fec, prior, prior_fec, byte_count
+        )
+    candidates = iterative_decode_candidates(soft, byte_count, fec)
+    raw = [np.packbits(bits[:byte_count * 8].astype(np.uint8)).tobytes()
+           for bits in candidates]
+    return raw, soft
+
+
 def reference_evm(profile: OfdmProfile, symbols, data: bytes,
                   modulation: str,
                   fec: FecProfile | int = FecProfile.FEC_1_2) -> float | None:
@@ -350,6 +379,26 @@ def reference_evm(profile: OfdmProfile, symbols, data: bytes,
         return None
     error = symbols[:count] - reference[:count]
     return float(np.sqrt(float(np.mean(np.abs(error) ** 2)) / power))
+
+
+def reference_gmi(profile: OfdmProfile, symbols, noise_var, data: bytes,
+                  modulation: str,
+                  fec: FecProfile | int = FecProfile.FEC_1_2) -> float | None:
+    """Bit-metric GMI from a CRC-proven transmitted reference and soft LLRs."""
+    raw = np.unpackbits(np.frombuffer(data, dtype=np.uint8))
+    coded = encode_bits(raw, fec)
+    per_symbol = profile.coded_bits_per_symbol(bits_per_symbol(modulation))
+    padded = np.zeros(int(math.ceil(len(coded) / per_symbol)) * per_symbol,
+                      dtype=np.int8)
+    padded[:len(coded)] = coded
+    reference = interleave(padded)
+    llr = demap_llr(symbols, modulation, noise_var)
+    count = min(len(reference), len(llr))
+    if count < 1:
+        return None
+    signed = (2.0 * reference[:count] - 1.0) * llr[:count]
+    per_bit = 1.0 - float(np.mean(np.logaddexp(0.0, -signed)) / np.log(2.0))
+    return max(0.0, min(1.0, per_bit)) * bits_per_symbol(modulation)
 
 
 def evm_to_snr_db(evm_rms: float | None) -> float | None:
@@ -527,7 +576,7 @@ class DecodedBurst:
         return bool(self.header is not None and self.block_order)
 
 
-def decode_burst(profile: OfdmProfile, samples) -> DecodedBurst:
+def decode_burst(profile: OfdmProfile, samples, *, soft_cache=None) -> DecodedBurst:
     """Find, synchronise and decode a burst in a buffer.
 
     Every plausible burst position is tried in order until one produces a valid
@@ -550,7 +599,7 @@ def decode_burst(profile: OfdmProfile, samples) -> DecodedBurst:
     # is holding its transmitter off waiting for an answer.
     fallback: DecodedBurst | None = None
     for sync in found:
-        attempt = _decode_at(profile, sync)
+        attempt = _decode_at(profile, sync, soft_cache=soft_cache)
         if attempt.header is not None:
             return attempt
         # Nothing had a readable header yet. Keep the candidate that got
@@ -563,7 +612,8 @@ def decode_burst(profile: OfdmProfile, samples) -> DecodedBurst:
     )
 
 
-def decode_many(profile: OfdmProfile, samples, *, limit: int = 32) -> list[DecodedBurst]:
+def decode_many(profile: OfdmProfile, samples, *, limit: int = 32,
+                soft_cache=None) -> list[DecodedBurst]:
     """Decode every independently synchronised burst in one capture window."""
     modulator = OfdmModulator(profile)
     found = candidates(samples, profile, modulator, limit=max(1, int(limit)))
@@ -572,7 +622,7 @@ def decode_many(profile: OfdmProfile, samples, *, limit: int = 32) -> list[Decod
     for sync in found:
         if sync.burst_start < consumed_until:
             continue
-        attempt = _decode_at(profile, sync)
+        attempt = _decode_at(profile, sync, soft_cache=soft_cache)
         if attempt.header is None:
             continue
         lengths = ([attempt.block_lengths[sequence]
@@ -586,7 +636,7 @@ def decode_many(profile: OfdmProfile, samples, *, limit: int = 32) -> list[Decod
     return decoded
 
 
-def _decode_at(profile: OfdmProfile, sync) -> DecodedBurst:
+def _decode_at(profile: OfdmProfile, sync, *, soft_cache=None) -> DecodedBurst:
     """Try to decode a burst at one already-synchronised position."""
     metrics = LinkMetrics(
         sync_confidence=sync.confidence,
@@ -628,7 +678,9 @@ def _decode_at(profile: OfdmProfile, sync) -> DecodedBurst:
         return _decode_control(profile, receiver, header, head_count, metrics)
     if header.version == LEGACY_FRAME_VERSION:
         return _decode_legacy_data(profile, receiver, header, head_count, metrics)
-    return _decode_v2_data(profile, receiver, header, head_count, metrics)
+    return _decode_v2_data(
+        profile, receiver, header, head_count, metrics, soft_cache=soft_cache
+    )
 
 
 def _decode_control(profile: OfdmProfile, receiver: BurstReceiver,
@@ -686,7 +738,7 @@ def _decode_legacy_data(profile: OfdmProfile, receiver: BurstReceiver,
 
 def _decode_v2_data(profile: OfdmProfile, receiver: BurstReceiver,
                     header: PhyHeader, cursor: int,
-                    metrics: LinkMetrics) -> DecodedBurst:
+                    metrics: LinkMetrics, *, soft_cache=None) -> DecodedBurst:
     """Decode a robust manifest then every independent sub-block section."""
     manifest_bytes = header.subblock_count * _MANIFEST_ENTRY.size + _CRC.size
     manifest_count = section_symbols(
@@ -721,6 +773,7 @@ def _decode_v2_data(profile: OfdmProfile, receiver: BurstReceiver,
     failed: set[int] = set()
     slopes = [slope]
     reference_evms: list[float] = []
+    reference_gmis: list[float] = []
     available = receiver.available_data_symbols()
     for position, (sequence, length) in enumerate(entries):
         framed_bytes = length + _CRC.size
@@ -731,24 +784,52 @@ def _decode_v2_data(profile: OfdmProfile, receiver: BurstReceiver,
         data_symbols, data_var, data_slope = receiver.data_symbols(cursor, count)
         cursor += count
         slopes.append(data_slope)
-        framed = decode_section(
-            data_symbols, data_var, framed_bytes, modulation, header.fec
+        cache_key = (
+            int(header.msg_id), int(sequence), int(header.mcs),
+            int(framed_bytes),
         )
+        prior = None if soft_cache is None else soft_cache.get(cache_key)
+        framed_candidates, combined_soft = decode_section_with_soft(
+            data_symbols, data_var, framed_bytes, modulation, header.fec, prior
+        )
+        if prior is not None:
+            metrics.harq_combined_blocks += 1
+        framed = framed_candidates[0]
+        for iteration, candidate in enumerate(framed_candidates, start=1):
+            candidate_payload = candidate[:length]
+            if candidate[length:] == _CRC.pack(crc16(candidate_payload)):
+                framed = candidate
+                metrics.turbo_iterations = max(metrics.turbo_iterations, iteration)
+                break
         payload, given = framed[:length], framed[length:]
         if given != _CRC.pack(crc16(payload)):
             failed.add(sequence)
+            if soft_cache is not None:
+                soft_cache[cache_key] = (header.fec, combined_soft)
             continue
+        if soft_cache is not None:
+            for key in [item for item in soft_cache
+                        if item[0] == int(header.msg_id)
+                        and item[1] == int(sequence)]:
+                soft_cache.pop(key, None)
         blocks[sequence] = payload
         value = reference_evm(
             profile, data_symbols, framed, modulation, header.fec
         )
         if value is not None:
             reference_evms.append(value)
+        information = reference_gmi(
+            profile, data_symbols, data_var, framed, modulation, header.fec
+        )
+        if information is not None:
+            reference_gmis.append(information)
 
     metrics.phase_slope = float(np.mean(slopes))
     if reference_evms:
         _set_evm(metrics, float(np.sqrt(np.mean(np.square(reference_evms)))),
                  "reference")
+    if reference_gmis:
+        metrics.gmi_bits_per_symbol = float(np.mean(reference_gmis))
     metrics.frame_ok = not failed and len(blocks) == len(entries)
     if not metrics.frame_ok:
         missing = sorted(failed | (set(order) - set(blocks)))

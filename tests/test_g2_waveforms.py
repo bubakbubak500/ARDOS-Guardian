@@ -16,11 +16,15 @@ from guardian.ofdm.framing import (OfdmFrameError, OfdmFrameType, PhyHeader,
                                    SubBlock)
 from guardian.ofdm.link import OfdmLink, simulated_pair
 from guardian.payload import make_backend
-from guardian.waveforms.config import SC_FTN_2K7, SC_HS_2K7, SEFDM_2K7
+from guardian.waveforms.config import (FAMILY_PROFILE_LADDERS, PROFILES as WAVE_PROFILES,
+                                       SC_FDE_FTN_2K7, SC_FTN_2K7, SC_HS_2K7,
+                                       SEFDM_2K7)
 from guardian.waveforms.constellation import (BITS_PER_SYMBOL, demap_llr,
                                               map_bits)
+from guardian.waveforms.shaping import PAS64_INPUT_BITS
 from guardian.waveforms.framing import ExperimentalBurstCodec
 from guardian.waveforms import bench as waveform_bench
+from guardian.waveforms.capacity_report import benchmark_point, write_report
 
 
 PROFILES = (SC_HS_2K7, SC_FTN_2K7, SEFDM_2K7)
@@ -71,12 +75,65 @@ def test_experimental_constellations_have_exact_soft_round_trip(modulation: str)
 
 
 def test_new_mcs_values_do_not_expand_the_verified_ofdm_picker() -> None:
-    assert [entry.index for entry in SC_MCS_TABLE] == list(range(7))
+    assert [entry.index for entry in SC_MCS_TABLE] == list(range(21))
     with pytest.raises(OfdmConfigError, match="unknown MCS index 4"):
         mcs(4)
     assert sc_mcs(4).modulation == "qam256"
     assert sc_mcs(5).modulation == "apsk16"
     assert sc_mcs(6).modulation == "apsk32"
+    assert sc_mcs(7).modulation == "psk8"
+    assert sc_mcs(10).modulation == "qam128"
+    assert sc_mcs(11).modulation == "apsk128"
+    assert sc_mcs(15).modulation == "qam1024"
+    assert sc_mcs(16).modulation == "gqam16"
+    assert sc_mcs(19).modulation == "gqam1024"
+    assert sc_mcs(20).modulation == "pas64"
+
+
+def test_pas64_distribution_matcher_is_reversible_and_nonuniform() -> None:
+    rng = np.random.default_rng(0xA564)
+    bits = rng.integers(0, 2, PAS64_INPUT_BITS * 4, dtype=np.int8)
+    symbols = map_bits(bits, "pas64")
+    recovered = (demap_llr(symbols, "pas64", 0.01) > 0).astype(np.int8)
+    assert np.array_equal(recovered, bits)
+    assert len(symbols) == 64
+    assert np.mean(np.abs(symbols) ** 2) == pytest.approx(1.0)
+
+
+def test_pas64_full_frame_round_trip_keeps_crc_and_reports_gmi() -> None:
+    payload = np.random.default_rng(2064).integers(
+        0, 256, 192, dtype=np.uint8
+    ).tobytes()
+    header = PhyHeader(
+        OfdmFrameType.DATA, 2064, block_count=1, mcs=20,
+        payload_len=len(payload), subblock_count=1,
+    )
+    codec = ExperimentalBurstCodec()
+    decoded = codec.decode_burst(
+        SC_FTN_2K7,
+        codec.build_burst(SC_FTN_2K7, header, blocks=[SubBlock(0, payload)]),
+    )
+    assert decoded.ok
+    assert decoded.payload == payload
+    assert decoded.metrics.gmi_bits_per_symbol is not None
+    assert decoded.metrics.gmi_bits_per_symbol <= 43 / 8
+
+
+def test_capacity_report_is_reproducible_and_exports_raw_rows(tmp_path) -> None:
+    first = benchmark_point(
+        SC_FDE_FTN_2K7, 2, rf_snr_db=30.0,
+        payload_bytes=64, repeats=1, seed=233,
+    )
+    second = benchmark_point(
+        SC_FDE_FTN_2K7, 2, rf_snr_db=30.0,
+        payload_bytes=64, repeats=1, seed=233,
+    )
+    assert first == second
+    assert first.frames_ok == 1
+    assert first.median_gmi_bits_per_symbol is not None
+    json_path, csv_path = write_report([first], tmp_path / "capacity")
+    assert json_path.exists() and csv_path.exists()
+    assert "decoded_payload_bps" in csv_path.read_text(encoding="utf-8-sig")
 
     experimental = PhyHeader(
         OfdmFrameType.DATA, 0x213, 0, 1, 4, 16,
@@ -85,6 +142,38 @@ def test_new_mcs_values_do_not_expand_the_verified_ofdm_picker() -> None:
     with pytest.raises(OfdmFrameError, match="unknown MCS index 4"):
         PhyHeader.decode(experimental)
     assert PhyHeader.decode(experimental, mcs_lookup=sc_mcs).mcs == 4
+
+
+def test_every_experimental_family_has_the_width_ladder() -> None:
+    for family in ("sc_hs", "sc_ftn", "sc_fde_ftn", "sefdm"):
+        names = FAMILY_PROFILE_LADDERS[family]
+        assert len(names) == 5
+        widths = [WAVE_PROFILES[name].occupied_bandwidth for name in names]
+        assert widths == sorted(widths)
+        assert widths[0] == pytest.approx(1200.0, abs=60.0)
+        assert widths[-1] == pytest.approx(18750.0, abs=60.0)
+    assert SC_FDE_FTN_2K7.equalizer_mode == "sc_fde"
+    assert SC_FDE_FTN_2K7.noise_whitening
+
+
+@pytest.mark.parametrize(
+    "name", ("SC_HS_1K2", "SC_FTN_5K", "SC_FDE_FTN_10K", "SC_FDE_FTN_20K")
+)
+def test_fractional_clock_single_carrier_profiles_round_trip(name: str) -> None:
+    profile = WAVE_PROFILES[name]
+    payload = bytes(range(32))
+    header = PhyHeader(
+        OfdmFrameType.DATA, 0x233, 0, 1, 2, len(payload),
+        fec=FecProfile.FEC_1_2,
+    )
+    codec = ExperimentalBurstCodec()
+    waveform = codec.build_burst(
+        profile, header, blocks=[SubBlock(0, payload)]
+    )
+    decoded = codec.decode_burst(profile, waveform)
+    assert decoded.blocks == {0: payload}
+    assert decoded.metrics.equalizer_mode == profile.equalizer_mode
+    assert decoded.metrics.equalizer_iterations == profile.equalizer_iterations
 
 
 @pytest.mark.parametrize("profile", PROFILES, ids=lambda profile: profile.name)
@@ -156,14 +245,17 @@ def test_proven_selective_repeat_link_runs_over_each_codec(profile, snr_db) -> N
 
 def test_waveform_selection_persists_and_builds_the_requested_backend(tmp_path) -> None:
     path = tmp_path / "g2.json"
-    StationConfig(g2_waveform="sc_ftn", g2_mcs=6).save(path)
+    StationConfig(g2_waveform="sc_fde_ftn", g2_bandwidth="10K", g2_mcs=11).save(path)
     loaded = StationConfig.load(path)
-    assert (loaded.g2_waveform, loaded.g2_mcs) == ("sc_ftn", 6)
-    backend = make_backend(
-        "ofdm_vhf", g2_waveform=loaded.g2_waveform, g2_mcs=loaded.g2_mcs
+    assert (loaded.g2_waveform, loaded.g2_bandwidth, loaded.g2_mcs) == (
+        "sc_fde_ftn", "10K", 11
     )
-    assert backend.profile is SC_FTN_2K7
-    assert backend.mcs_index == 6
+    backend = make_backend(
+        "ofdm_vhf", g2_waveform=loaded.g2_waveform,
+        g2_bandwidth=loaded.g2_bandwidth, g2_mcs=loaded.g2_mcs
+    )
+    assert backend.profile is WAVE_PROFILES["SC_FDE_FTN_10K"]
+    assert backend.mcs_index == 11
     assert isinstance(backend.codec, ExperimentalBurstCodec)
 
 
@@ -172,4 +264,4 @@ def test_bad_waveform_config_falls_back_without_disabling_ofdm(tmp_path) -> None
     path.write_text('{"g2_waveform":"telepathy","g2_mcs":99}', encoding="utf-8")
     loaded = StationConfig.load(path)
     assert loaded.g2_waveform == "ofdm"
-    assert loaded.g2_mcs == 6
+    assert loaded.g2_mcs == 20
