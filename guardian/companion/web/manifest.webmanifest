@@ -1,0 +1,12 @@
+{
+  "name": "Guardian Offline Companion",
+  "short_name": "Guardian",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#06101a",
+  "theme_color": "#07111c",
+  "description": "Offline local companion for an ARDOS Guardian station.",
+  "icons": [{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+}

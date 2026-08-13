@@ -15,6 +15,7 @@ from ..install.dependencies import inspect_dependencies
 from ..i18n import dual
 from ..message import Folder, MessageStore
 from ..operations import Operations
+from ..companion import CompanionController, WifiDirectHotspot
 from ..routing import HeardStations, RouteTable, Topology
 from ..updates import UpdateInfo, check_for_update, download_installer
 from ..services import (
@@ -55,6 +56,8 @@ class ShellRuntime:
             self.routes,
             self.heard,
         )
+        self.companion = CompanionController(self)
+        self.companion_hotspot = WifiDirectHotspot()
         self.refresh()
         self.request_dependency_refresh()
         self.events.publish(
@@ -92,6 +95,7 @@ class ShellRuntime:
 
     def tick(self) -> None:
         self.operations.tick()
+        self.companion.poll()
 
     def request_dependency_refresh(self) -> bool:
         config = self.config
@@ -285,5 +289,7 @@ class ShellRuntime:
         )
 
     def close(self) -> None:
+        self.companion.stop()
+        self.companion_hotspot.stop()
         self.operations.close()
         self.workers.close(wait=False)

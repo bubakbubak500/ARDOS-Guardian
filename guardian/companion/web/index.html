@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#07111c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Guardian">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <title>Guardian Companion</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <div>
+      <div class="eyebrow">ARDOS · OFFLINE LINK</div>
+      <h1>Guardian <span id="station">—</span></h1>
+    </div>
+    <button id="connection" class="pill offline" type="button">Connecting</button>
+  </header>
+
+  <main>
+    <section id="pairing" class="card hidden">
+      <h2>Pair this phone</h2>
+      <p>Scan the current QR code in Guardian. Pairing expires after five minutes and works once.</p>
+      <label>Phone name <input id="phone-name" maxlength="40" value="Field phone"></label>
+      <button id="pair" class="primary" type="button">Pair securely</button>
+      <p id="pair-error" class="error"></p>
+    </section>
+
+    <div id="app" class="hidden">
+      <section class="metrics">
+        <button class="metric" data-tab="inbox"><span id="unread">0</span><small>Unread</small></button>
+        <button class="metric" data-tab="inbox"><span id="inbox-count">0</span><small>Inbox</small></button>
+        <button class="metric" data-tab="compose"><span id="outbox-count">0</span><small>Outbox</small></button>
+        <div class="metric"><span id="heard-count">0</span><small>Heard</small></div>
+      </section>
+
+      <section id="watch-card" class="card watch-card">
+        <div>
+          <div class="eyebrow">FIELD WATCH</div>
+          <h2 id="watch-title">Keep me in range</h2>
+          <p id="watch-detail">Keeps this screen awake where supported and sounds on new mail.</p>
+        </div>
+        <button id="watch" class="primary" type="button">Start watch</button>
+      </section>
+
+      <nav>
+        <button class="active" data-tab="inbox" type="button">Inbox</button>
+        <button data-tab="activity" type="button">Activity</button>
+        <button data-tab="compose" type="button">Compose</button>
+        <button data-tab="field" type="button">Field</button>
+      </nav>
+
+      <section id="tab-inbox" class="tab active">
+        <div id="messages" class="stack empty">No messages</div>
+      </section>
+
+      <section id="tab-activity" class="tab">
+        <div class="card status-grid">
+          <span>Control channel</span><strong id="control-state">Off</strong>
+          <span>Radio</span><strong id="radio-state">Disconnected</strong>
+          <span>Active sessions</span><strong id="session-count">0</strong>
+          <span>Round trip</span><strong id="latency">—</strong>
+        </div>
+        <div id="events" class="timeline"></div>
+      </section>
+
+      <section id="tab-compose" class="tab">
+        <form id="compose-form" class="card form">
+          <h2>Message</h2>
+          <label>Destination <input id="destination" required maxlength="16" autocapitalize="characters" placeholder="OK1AAA"></label>
+          <label>Subject <input id="subject" maxlength="120" placeholder="Short subject"></label>
+          <label>Priority
+            <select id="priority">
+              <option value="0">Routine</option>
+              <option value="1">Priority</option>
+              <option value="2">Urgent</option>
+              <option value="3">Emergency</option>
+            </select>
+          </label>
+          <label>Message <textarea id="body" required maxlength="8192" rows="7"></textarea></label>
+          <label id="transmit-row" class="check hidden"><input id="transmit" type="checkbox"> Transmit emergency immediately</label>
+          <button id="queue" class="primary" type="submit">Queue in Guardian</button>
+          <p id="compose-result" class="result"></p>
+        </form>
+      </section>
+
+      <section id="tab-field" class="tab">
+        <div class="card">
+          <div class="eyebrow">RETURN TIMER</div>
+          <h2 id="checkin-title">Set a check-in</h2>
+          <div class="inline">
+            <select id="checkin-minutes"><option>5</option><option selected>10</option><option>20</option><option>30</option><option>60</option></select>
+            <button id="start-checkin" class="primary" type="button">Start timer</button>
+          </div>
+          <button id="clear-checkin" class="secondary hidden" type="button">I'm back — clear timer</button>
+        </div>
+        <div class="card">
+          <div class="eyebrow">FIELD NOTEBOOK</div>
+          <h2>Local scratchpad</h2>
+          <textarea id="note-text" maxlength="2000" rows="4" placeholder="Observation, frequency, task…"></textarea>
+          <button id="save-note" class="secondary" type="button">Save to Guardian</button>
+          <div id="notes" class="notes"></div>
+        </div>
+        <button id="ping" class="attention" type="button">Ping operator at station</button>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="reader">
+    <button id="reader-close" class="close" type="button">Close</button>
+    <div class="eyebrow" id="reader-route"></div>
+    <h2 id="reader-subject"></h2>
+    <pre id="reader-body"></pre>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

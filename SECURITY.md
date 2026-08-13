@@ -32,3 +32,22 @@ VARA is proprietary third-party software. Guardian never bundles it. The
 readiness assistant restricts downloads to the official Winlink distribution
 host and accepts only the exact version, size, archive layout, and SHA-256
 pinned in that Guardian release.
+
+## Offline companion boundary
+
+The phone companion is disabled until the operator starts it. It listens on the
+configured local TCP port and is therefore reachable by devices on the same
+network. API access requires a one-use, five-minute QR pairing secret; sessions
+are HttpOnly/SameSite, idle-expiring and revocable. Stop the companion when it
+is not needed and do not expose its port through router forwarding.
+
+Immediate RF transmission from a phone is disabled on every server start and
+must be armed explicitly at the desktop. Only Emergency-priority phone traffic
+can request it. Pairing does not bypass Guardian's radio, channel or routing
+safety checks.
+
+The initial local transport is HTTP because isolated field networks do not have
+a public certificate authority. WPA2/WPA3 or physical control of the local
+network is therefore part of the trust boundary: do not run the companion on an
+untrusted public hotspot. Message data remains local but is not additionally
+encrypted between the paired phone and Guardian in version 2.3.4.

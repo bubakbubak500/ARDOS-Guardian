@@ -6,7 +6,7 @@
 
 **A Windows communication system for sending messages, files and structured emergency traffic directly over VHF/UHF FM or HF — without the Internet, Winlink or any central server.**
 
-[![Latest Release](https://img.shields.io/github/v/release/bubakbubak500/ARDOS-Guardian?label=release)](../../releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/bubakbubak500/ARDOS-Guardian-G2?label=release)](../../releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![Radio](https://img.shields.io/badge/radio-HF%20%7C%20VHF%20%7C%20UHF-orange)
 
@@ -174,6 +174,37 @@ The map can also be prepared for offline operation and exported as PNG.
 Guardian stations can broadcast short network-wide alerts independently from ordinary mail.
 
 Alerts can be received, displayed and relayed by other Guardian stations and can optionally be transmitted across configured channels.
+
+---
+
+### 📱 Offline phone companion
+
+Guardian 2.3.4 can serve a paired companion directly to an iPhone or Android
+phone on the same local Wi-Fi. There is no cloud account, relay server or
+Internet dependency. Open **Tools → Offline phone companion**, start the local
+server and scan the two QR codes: the first joins Guardian's optional Wi-Fi
+Direct network and the second opens and pairs the phone.
+
+The companion provides:
+
+* Inbox, unread count and full message reader;
+* live Guardian activity and station/radio state;
+* ordinary messages queued safely into the desktop Outbox;
+* optional immediate emergency transmission, armed explicitly and temporarily
+  at the Windows console;
+* Field Watch with an audible/vibration alarm while the page remains active;
+* a local return/check-in timer;
+* a shared field notebook and an operator-attention ping.
+
+On iPhone use Safari's **Share → Add to Home Screen**. On Android use Chrome's
+**Add to Home screen**. The initial local HTTP mode cannot wake a suspended or
+locked iPhone: for dependable offline alerts, start Field Watch and keep the
+page visible (disable automatic locking when iOS cannot grant a wake lock).
+
+Guardian attempts to create a Wi-Fi Direct legacy access point without
+disconnecting the PC's existing network. Adapter and driver support varies; if
+Windows rejects it, the dialog opens Mobile Hotspot settings and the companion
+continues to work over any shared Wi-Fi.
 
 ---
 
@@ -402,19 +433,28 @@ Once the required software and map data are present, the core messaging system o
 
 # Guardian G2 soundcard modem — waveforms of Guardian's own
 
-Guardian **2.3.3** expands the experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
+Guardian **2.3.4** includes the experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
 
 Select it in *Settings → Payload* as **Guardian G2 soundcard modem (Experimental)**. VARA P2P stays the default, and a G2 modem station and a VARA station can talk to each other: the two peers agree on a transport during the ordinary control handshake, and unless *both* are configured for the built-in modem the pair falls back to VARA before anything is transmitted.
 
-The proven OFDM implementation is retained unchanged as the default. Version 2.3 adds three independently selectable experimental waveform modules: **SC-HS** (single-carrier Nyquist signaling with frequency-domain equalisation), **SC-FTN** (faster-than-Nyquist signaling at \(\tau=0.90\)), and **SEFDM** (compressed non-orthogonal multicarrier signaling). Version 2.3.1 moves SEFDM to the measured robust point \(\alpha=0.985\), adds a joint time/carrier equalizer and uses denser pilots; MCS6 32-APSK passes the reproducible realistic-channel test. The single-carrier modes add 256-QAM, 16-APSK and 32-APSK choices. All four families reuse the established framing, FEC, interleaving, CRC and selective-repeat ARQ; the existing control frames and transport negotiation stay unchanged.
+The established OFDM implementation remains the compatibility baseline.
+Separately selectable SC-HS, SC-FTN, SC-FDE-FTN and SEFDM families reuse the
+same CRC-protected framing and selective-repeat ARQ. Version 2.3.3 adds width
+profiles through 20K, a denser MCS ladder, modern LDPC, soft HARQ combining,
+adaptive MCS/train control and an opt-in protocol-v3 superframe. Station Test,
+Quick Tune and Full Characterizer retain raw WAV and JSON/CSV evidence and do
+not apply a recommendation without operator review.
 
-The reproducible software model transfers an 8 KiB payload at about **949 B/s** with the existing 2.7 kHz-class OFDM benchmark, **1,412 B/s** with SC-HS and **1,553 B/s** with SC-FTN, including framing, FEC, ACK and a 250 ms PTT turnaround. SEFDM now completes the same transfer at 654 B/s with one selective retry; it is robust enough to test, but not the capacity winner. These are channel-model results, not an on-air guarantee. The complete assumptions and radio-test procedure are in [the Guardian G2 2.3.1 waveform report](docs/G2_WAVEFORM_LAB_2.3.1.md).
+These modes are experiments, not on-air speed claims. Start with frame v2,
+classic FEC and a 2K7 profile; enable Modern LDPC and Superframe v3 only when
+both peers run 2.3.3 or newer. The current procedure and compatibility boundary
+are in [the G2 modem guide](docs/G2_MODEM.md).
 
-Version 2.3.2 adds **Operation → Station test & AutoTune**. Two consenting Guardians exchange bounded measuring bursts in both directions, test the actual radio/audio path and propose a safe per-waveform digital drive. On Windows it can also sweep the selected radio output endpoint: an A/B measurement first proves whether that mixer really changes the remote level, and the original mixer state is restored after completion, cancellation, timeout or failure. Raw JSON/CSV evidence is always saved and no recommendation is applied until the operator reviews it.
-
-The payload link can now concatenate independently CRC-protected microbursts under one PTT and receive one cumulative selective-repeat ACK. A robust POLL recovers a lost final burst or ACK. The compatibility default remains one microburst; increase it only when both peers run 2.3.2. In the deterministic 8 KiB SC-FTN/FEC 7/8 test, four microbursts per train improved modeled channel goodput from 6,166 to 7,840 bit/s (**+27.1%**). A 64 KiB run reduced data/ACK PTT pairs from 8+8 to 4+4 and improved 8,541 to 9,058 bit/s (**+6.1%**); these are lab figures, not an RF guarantee. Details are in [the Guardian G2 2.3.2 station-lab report](docs/G2_STATION_LAB_2.3.2.md).
-
-**The PHY has been on the air; adaptive format 2 still needs its first flight.** Two IC-705s, 2026-08-09: messages moved, and the audio path turned out to pass about 3 kHz — which makes `BENCH` the profile to use and `WIDE_5K` and above unreachable on that radio. The run also proved that repeated 512-byte PTT/ACK cycles, not raw PHY speed, dominated transfer time. [docs/OFDM_AIR_RESULTS_2026-08-09.md](docs/OFDM_AIR_RESULTS_2026-08-09.md) is what those radios measured, [the adaptive/selective-repeat note](docs/OFDM_G2_ADAPTIVE_ARQ.md) describes this implementation and first-test parameters, [docs/ofdm-vhf.md](docs/ofdm-vhf.md) has the full design, and [docs/OFDM_AIR_TEST.md](docs/OFDM_AIR_TEST.md) is the procedure ([česky](docs/OFDM_AIR_TEST.cs.md)).
+**The original PHY has been on the air; adaptive frame v2 and protocol v3 still
+need staged two-radio validation.** Two IC-705s moved messages on 2026-08-09 and
+their path passed about 3 kHz. Wider profiles are therefore not valid for that
+setup. The measured evidence is in
+[the air-test report](docs/OFDM_AIR_RESULTS_2026-08-09.md).
 
 ### Testing it without a radio
 
@@ -432,7 +472,11 @@ This is how the modem gets tuned: a capture lets the whole receiver be re-run ov
 
 # Current status
 
-Guardian **1.0.0** was the first release where the interface and documentation were consolidated around the radio functionality developed and tested throughout the 0.6 series. **2.3.3** is the current Guardian G2 capacity-modem release. It adds width-selectable SC/SEFDM profiles through 20K, SC-FDE-FTN, a denser APSK/QAM/GQAM ladder, PAS64, modern LDPC with soft HARQ combining, adaptive MCS/train control and the opt-in protocol-v3 superframe. See [the 2.3.3 release notes](docs/RELEASE_NOTES_2.3.3.md) and [capacity-modem measurement guide](docs/G2_CAPACITY_MODEM_2.3.3.md).
+Guardian **2.3.4** is the current G2 release. It retains the 2.3.3 capacity-modem
+work and adds an entirely local, paired iOS/Android companion for station
+status, mail queueing, field notes and a deliberately narrow, explicitly armed
+emergency-send path. See [the 2.3.4 release notes](docs/RELEASE_NOTES_2.3.4.md),
+[current status](STATUS.md) and [G2 modem guide](docs/G2_MODEM.md).
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |
@@ -449,6 +493,9 @@ Guardian **1.0.0** was the first release where the interface and documentation w
 | Shared network topology         | ✅ Implemented                      |
 | Assisted multi-hop discovery    | 🧪 Implemented and software tested |
 | Live topology advertisements    | 🧪 Experimental                    |
+| G2 OFDM BENCH/MCS1              | ✅ Confirmed on two radios          |
+| Adaptive G2 modem / superframe  | 🧪 Software tested; RF test needed |
+| Offline phone companion         | 🧪 Software tested; device QA needed |
 
 See [STATUS.md](STATUS.md) for the complete engineering and field-verification record.
 
@@ -530,8 +577,8 @@ Administrator rights are not normally required.
 Python **3.11 or later** is required when running Guardian from source.
 
 ```powershell
-git clone https://github.com/bubakbubak500/ARDOS-Guardian.git
-cd ARDOS-Guardian
+git clone https://github.com/bubakbubak500/ARDOS-Guardian-G2.git
+cd ARDOS-Guardian-G2
 
 .\setup.ps1
 .\run.ps1
@@ -546,7 +593,7 @@ To create the standalone Windows build:
 Output:
 
 ```text
-dist\Guardian\Guardian.exe
+dist\Guardian-G2\Guardian-G2.exe
 ```
 
 ---
@@ -558,7 +605,9 @@ The README provides the high-level overview of Guardian.
 Detailed design and implementation information is intentionally kept elsewhere:
 
 * **[PRODUCT.md](PRODUCT.md)** — product scope and operational boundaries
-* **[STATUS.md](STATUS.md)** — development history, field tests and current verification
+* **[STATUS.md](STATUS.md)** — current implementation and verification boundary
+* **[docs/G2_MODEM.md](docs/G2_MODEM.md)** — current G2 modem operation and measurement
+* **[docs/DEVELOPMENT_BACKLOG.md](docs/DEVELOPMENT_BACKLOG.md)** — the only active backlog
 * **[docs/MULTIHOP_DISCOVERY.md](docs/MULTIHOP_DISCOVERY.md)** — multi-hop discovery
 * **[SECURITY.md](SECURITY.md)** — security policy
 * **[GitHub Releases](../../releases)** — installers and release notes

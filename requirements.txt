@@ -7,6 +7,13 @@ sounddevice>=0.4.6
 pycaw==20251023; sys_platform == "win32"
 winrt-Windows.Devices.Geolocation>=3.2,<4; sys_platform == "win32"
 winrt-Windows.Foundation>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Devices.WiFiDirect>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Devices.Enumeration>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Networking>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Security.Credentials>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Storage>=3.2,<4; sys_platform == "win32"
+qrcode[pil]>=8,<9
 
 # Packaging (dev only)
 pyinstaller>=6.20.0

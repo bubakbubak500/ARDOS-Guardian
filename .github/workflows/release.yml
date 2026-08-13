@@ -48,6 +48,7 @@ jobs:
           tests/test_session.py
           tests/test_operations.py
           tests/test_payloads.py
+          tests/test_companion.py
           tests/test_ofdm_payload.py
           tests/test_g2_waveforms.py
           tests/test_transfer_progress.py

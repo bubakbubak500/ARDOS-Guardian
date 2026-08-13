@@ -353,6 +353,11 @@ class StationConfig:
     notify_incoming: bool = True
     notify_sound: bool = True
 
+    # Offline phone companion.  The server is always operator-started; keeping
+    # only its non-privileged TCP port is safe across restarts.  RF authority
+    # and pairing sessions are deliberately ephemeral and never enter config.
+    companion_port: int = 8765
+
     # Named snapshots of the radio page, so a station used with more than one
     # rig or cable is one pick away from each of them instead of nine fields
     # re-entered from memory. Radio settings only: a profile must never carry
@@ -485,6 +490,12 @@ class StationConfig:
             for name in ("ofdm_train_bursts", "ofdm_train_gap_ms",
                          "ofdm_max_train_seconds"):
                 clean.pop(name, None)
+        try:
+            clean["companion_port"] = min(
+                65535, max(1024, int(clean.get("companion_port", 8765)))
+            )
+        except (TypeError, ValueError):
+            clean.pop("companion_port", None)
         return cls(**clean)
 
     def save(self, path: Path | str | None = None) -> Path:

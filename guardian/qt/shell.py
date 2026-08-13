@@ -43,6 +43,7 @@ from .alerts import AlertBanner
 from .notifications import EmergencyDialog, NotificationCenter, SoundPlayer
 from .capture_dialog import CaptureResultDialog
 from .diagnostics_dialog import DiagnosticsDialog
+from .companion_dialog import CompanionDialog
 from .help_dialog import HelpDialog
 from .inputs import FrequencySpinBox
 from .log_workspace import LogWorkspace
@@ -223,6 +224,14 @@ class GuardianMainWindow(QMainWindow):
         self.record_action.setShortcut("Ctrl+R")
         self.record_action.triggered.connect(self._toggle_recording)
         tools_menu.addAction(self.record_action)
+        tools_menu.addSeparator()
+        companion = QAction(
+            dual("Offline phone companion…", "Offline companion pro telefon…"),
+            self,
+        )
+        companion.setShortcut("Ctrl+Shift+P")
+        companion.triggered.connect(self._show_companion)
+        tools_menu.addAction(companion)
         tools_menu.addSeparator()
         readiness = QAction(tr("menu.readiness"), self)
         readiness.triggered.connect(self._show_readiness)
@@ -1134,6 +1143,10 @@ class GuardianMainWindow(QMainWindow):
     def _show_diagnostics(self) -> None:
         self.runtime.drain_workers()
         DiagnosticsDialog(self.runtime, self).exec()
+
+    def _show_companion(self) -> None:
+        dialog = CompanionDialog(self.runtime, self)
+        dialog.exec()
 
     def _show_help(self) -> None:
         HelpDialog(self).exec()

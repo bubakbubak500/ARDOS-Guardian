@@ -30,6 +30,8 @@ binaries += collect_dynamic_libs("winrt")
 # notices for Guardian's optional ZPAQ/PAQ8PX/LPAQ8 compression candidates.
 datas.append((str(root / "guardian" / "codecs" / "vendor"),
               "guardian/codecs/vendor"))
+datas.append((str(root / "guardian" / "companion" / "web"),
+              "guardian/companion/web"))
 
 analysis = Analysis(
     [str(root / "guardian_launch.py")],
