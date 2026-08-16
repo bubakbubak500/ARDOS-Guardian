@@ -34,12 +34,11 @@ know whether the fault is the radio, the audio path, or the software.
   waveform; anyone who hears it will not recognise it. Say what you are doing.
 - Keep transmissions short while you are finding the levels.
 
-Everything lives in two places:
+Everything lives in one place:
 
 | | |
 |---|---|
-| **Tools ▸ Modem test** | profiles, bench runs, transmitting a test burst, decoding any capture |
-| **Home ▸ Record received audio** (or Ctrl+R) | capturing what the radio heard |
+| **Tools ▸ Modem test ▸ Files** | profiles, transmitting a test burst, recording and decoding captures |
 
 Captures and generated files go to `%APPDATA%\Guardian-G2\captures\`.
 
@@ -76,14 +75,7 @@ Establishes that anything you see later is the radio, not the installation.
 
 **Tools ▸ Modem test.** Profile `BENCH`, MCS1.
 
-1. **Run one burst.** Must say PASS, and the measured SNR must land within about
-   a dB of the applied SNR.
-2. **Run a transfer.** Must say PASS with 0 retries.
-3. **Run a sweep.** Must end with **wrong-byte deliveries: 0**. If that number is
-   ever anything but zero, stop and tell me — it is the most serious result this
-   modem can produce.
-
-Then **save a transmit test file** and **decode it straight back**. That proves
+**Save a transmit test file** and **decode it straight back**. That proves
 the generate-and-decode path end to end, on one PC, before a radio is involved.
 
 If any of this fails, the problem is not your radio.
@@ -115,10 +107,11 @@ radio.
    but you do not need it for this.)
 
 **Station B:**
-3. Ctrl+R to start recording *before* A transmits. Stop after.
+3. Select the same profile in **Tools ▸ Modem test ▸ Files**, then start
+   recording *before* A transmits. Stop after. Guardian decodes the recording
+   with that selected profile automatically.
 4. Read the verdict. **If it says silent or clipping, fix it and repeat before
    doing anything else** — everything downstream is worthless otherwise.
-5. Press **Analyse**.
 
 ### Then climb the ladder
 

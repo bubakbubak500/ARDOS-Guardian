@@ -21,7 +21,8 @@ from .adaptation import AdaptationConfig, LinkAdaptationController
 from .channel import Channel, ChannelSpec
 from .coding import FecProfile, fec_spec
 from .config import (DEFAULT_MCS_INDEX, MCS_TABLE, SC_MCS_TABLE, OfdmProfile)
-from .framing import (AckBitmap, DEFER_ACK_FLAG, FRAME_VERSION, LEGACY_FRAME_VERSION,
+from .framing import (AckBitmap, DEFER_ACK_FLAG, FINAL_ACK_CONFIRM_FLAG,
+                      FRAME_VERSION, LEGACY_FRAME_VERSION,
                       SUPERFRAME_VERSION, MAX_SUBBLOCKS,
                       MAX_SUPERFRAME_SUBBLOCKS, OfdmFrameError,
                       OfdmFrameType, PhyHeader, SubBlock, build_burst,
@@ -547,6 +548,13 @@ class OfdmLink:
                 return False
             next_sequence = sequences[-1] + 1
 
+        # Tell the receiver its final bitmap arrived. Without this one-bit
+        # handshake it has to keep the OFDM soundcard open for a complete reply
+        # timeout in case that ACK was lost; for a large bitmap that can be
+        # minutes and delays the session-layer RECEIVED frame on the control
+        # channel. A lost confirmation is harmless: the existing linger/re-ACK
+        # path remains active until its normal timeout.
+        self._confirm_final_bitmap(state)
         self.status.last_block_ok = True
         self._publish("idle")
         self._log(
@@ -558,6 +566,27 @@ class OfdmLink:
             f"protocol_overhead={self.status.protocol_overhead_bytes} B"
         )
         return True
+
+    def _confirm_final_bitmap(self, state: BurstTxState) -> None:
+        confirmation = PhyHeader(
+            OfdmFrameType.POLL,
+            state.msg_id,
+            block_seq=state.burst_id,
+            block_count=state.total_blocks,
+            flags=FINAL_ACK_CONFIRM_FLAG,
+        )
+        self._log(f"OFDM ACK CONFIRM #{state.burst_id}")
+        try:
+            self._transmit(
+                self._build_burst(confirmation),
+                header=confirmation,
+                control=True,
+            )
+        except Exception as exc:  # delivered data must not become a false failure
+            self._log(
+                f"OFDM ACK CONFIRM #{state.burst_id} could not be sent: {exc}; "
+                "receiver will use its bounded re-ACK hold"
+            )
 
     def _send_window(self, state: BurstTxState) -> bool:
         self.adaptation.blocks_sent += len(state.blocks)
@@ -973,14 +1002,23 @@ class OfdmLink:
             if samples is None:
                 return
             decoded = self._decode_burst(samples)
-            self._record(decoded)
             header = decoded.header
             if header is None:
+                self._record(decoded)
                 continue
             if header.msg_id != state.msg_id or header.frame_type not in {
                 OfdmFrameType.DATA, OfdmFrameType.POLL,
             }:
+                self._record(decoded)
                 return
+            if (header.frame_type is OfdmFrameType.POLL
+                    and header.flags & FINAL_ACK_CONFIRM_FLAG):
+                self._log(
+                    f"OFDM: final bitmap for #{state.msg_id} confirmed; "
+                    "returning to the control channel"
+                )
+                return
+            self._record(decoded)
             if header.frame_type is OfdmFrameType.DATA:
                 self.adaptation.duplicates += len(
                     set(decoded.block_order) & set(state.blocks)

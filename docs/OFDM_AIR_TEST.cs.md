@@ -32,12 +32,11 @@ nebudete vědět, zda je chyba v rádiu, ve zvukové cestě, nebo v softwaru.
   kdo ho zaslechne, nepozná ho. Řekněte, co děláte.
 - Dokud hledáte správné úrovně, vysílejte krátce.
 
-Všechno je na dvou místech:
+Všechno je na jednom místě:
 
 | | |
 |---|---|
-| **Nástroje ▸ Test modemu** | profily, měření, vysílání testovací dávky, dekódování jakéhokoli záznamu |
-| **Domů ▸ Nahrávat přijímaný zvuk** (nebo Ctrl+R) | záznam toho, co rádio slyšelo |
+| **Nástroje ▸ Test modemu ▸ Soubory** | profily, vysílání testovací dávky, nahrávání a dekódování záznamů |
 
 Záznamy i vygenerované soubory se ukládají do
 `%APPDATA%\Guardian-G2\captures\`.
@@ -78,14 +77,7 @@ Zajistí, že cokoli uvidíte později, bude vlastnost rádia, a ne instalace.
 
 **Nástroje ▸ Test modemu.** Profil `BENCH`, MCS1.
 
-1. **Spusťte jeden burst.** Musí skončit PASS a naměřený odstup signálu od šumu
-   (SNR) musí odpovídat zadanému asi do jednoho decibelu.
-2. **Spusťte přenos.** Musí skončit PASS s 0 opakováními.
-3. **Spusťte rozmítání (sweep).** Musí skončit s **wrong-byte deliveries: 0**.
-   Pokud tam kdykoli bude jiné číslo než nula, přestaňte a napište mi — je to
-   nejzávažnější výsledek, jaký tento modem může vyprodukovat.
-
-Potom **uložte testovací soubor k vysílání** a hned ho **dekódujte zpět**. Tím na
+**Uložte testovací soubor k vysílání** a hned ho **dekódujte zpět**. Tím na
 jednom počítači ověříte celou cestu od vygenerování k dekódování, ještě než do ní
 vstoupí rádio.
 
@@ -117,11 +109,11 @@ odebíráte.
    jinému, ale pro tento test ho nepotřebujete.)
 
 **Stanice B:**
-3. Ctrl+R — spusťte nahrávání **dřív**, než stanice A začne vysílat. Po vysílání
-   nahrávání ukončete.
+3. V **Nástroje ▸ Test modemu ▸ Soubory** zvolte stejný profil a spusťte
+   nahrávání **dřív**, než stanice A začne vysílat. Po vysílání nahrávání
+   ukončete. Guardian záznam automaticky dekóduje zvoleným profilem.
 4. Přečtěte si verdikt. **Pokud hlásí ticho nebo přebuzení, nejdřív to opravte a
    test zopakujte** — jinak je vše ostatní bezcenné.
-5. Stiskněte **Analyzovat**.
 
 ### Potom stoupejte po žebříku
 

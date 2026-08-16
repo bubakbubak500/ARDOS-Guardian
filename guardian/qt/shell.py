@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from math import log10
 from time import monotonic
 
 from PySide6.QtCore import QSettings, Qt, QTimer
@@ -32,7 +31,6 @@ from .. import __app_name__, __version__
 from ..assets import get_ico_path
 from ..i18n import dual, tr
 from ..modem.audio import resolve_device
-from ..modem.recorder import CLIP_THRESHOLD
 from ..ofdm.config import profile_or_default
 from ..routing import read_csv, write_csv
 from ..routing.csv_io import TEMPLATE_ROWS
@@ -41,7 +39,6 @@ from ..services import ApplicationSnapshot
 from ..services import LogLevel
 from .alerts import AlertBanner
 from .notifications import EmergencyDialog, NotificationCenter, SoundPlayer
-from .capture_dialog import CaptureResultDialog
 from .diagnostics_dialog import DiagnosticsDialog
 from .companion_dialog import CompanionDialog
 from .help_dialog import HelpDialog
@@ -72,12 +69,6 @@ PAYLOAD_LABELS = {
 
 #: How long a device-resolution answer is trusted before PortAudio is asked again.
 _AUDIO_PROBE_SECONDS = 10.0
-
-#: Below this peak a capture is silent rather than quiet -- the same figure
-#: `RecordingSummary.silent` uses, restated here because the live indicator has
-#: to make the call before there is a summary to ask.
-_SILENT_LEVEL = 1e-3
-
 
 def _repolish(widget: QWidget) -> None:
     widget.style().unpolish(widget)
@@ -142,6 +133,7 @@ class GuardianMainWindow(QMainWindow):
         # audio devices resolve, and asking PortAudio that twice a second on the
         # UI thread is not free.
         self._audio_probe: dict[tuple[str, str], tuple[float, bool]] = {}
+        self._last_station_lab_offer: tuple[str, int] | None = None
 
         self._build_menu()
         self._build_shell()
@@ -217,14 +209,6 @@ class GuardianMainWindow(QMainWindow):
         control_channel = QAction(tr("menu.control_toggle"), self)
         control_channel.triggered.connect(self._toggle_control)
         tools_menu.addAction(control_channel)
-        # Recording never keys the radio, so unlike the three above it needs no
-        # confirmation and can have a shortcut: it is started with one hand at
-        # the radio, at the moment the other station comes up.
-        self.record_action = QAction(tr("record.start"), self)
-        self.record_action.setShortcut("Ctrl+R")
-        self.record_action.triggered.connect(self._toggle_recording)
-        tools_menu.addAction(self.record_action)
-        tools_menu.addSeparator()
         companion = QAction(
             dual("Offline phone companion…", "Offline companion pro telefon…"),
             self,
@@ -239,13 +223,6 @@ class GuardianMainWindow(QMainWindow):
         diagnostics = QAction(tr("menu.diagnostics"), self)
         diagnostics.triggered.connect(self._show_diagnostics)
         tools_menu.addAction(diagnostics)
-        # The modem bench is a workspace, so its checkable action belongs to the
-        # View group above. It is listed here as well because Tools is where an
-        # operator looks for something that measures the station, next to
-        # readiness and diagnostics -- this entry only switches to it.
-        modem_test = QAction(tr("menu.modem"), self)
-        modem_test.triggered.connect(lambda: self._show_workspace("modem"))
-        tools_menu.addAction(modem_test)
         station_lab = QAction(tr("menu.station_lab"), self)
         station_lab.triggered.connect(lambda: self._show_workspace("station_lab"))
         tools_menu.addAction(station_lab)
@@ -446,7 +423,6 @@ class GuardianMainWindow(QMainWindow):
         description.setObjectName("Metadata")
         layout.addWidget(heading)
         layout.addWidget(description)
-        layout.addWidget(self._build_capture_row())
 
         self.readiness = QTreeWidget()
         self.readiness.setColumnCount(3)
@@ -470,28 +446,6 @@ class GuardianMainWindow(QMainWindow):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         return panel
-
-    def _build_capture_row(self) -> QWidget:
-        """Start/stop recording, and what the capture looks like so far.
-
-        On the home page rather than only in the menu: this is reached at the
-        radio, with one hand, in the seconds before the other station starts
-        transmitting -- and the level it reports is the reason the operator does
-        not have to ask for the session to be repeated.
-        """
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        self.record_button = QPushButton(tr("record.start"))
-        self.record_button.clicked.connect(self._toggle_recording)
-        # Plain QLabel: a statusRole is an attribute selector, and an objectName
-        # rule such as #Metadata would out-specify it and swallow the colour.
-        self.recording_indicator = QLabel()
-        self.recording_indicator.setWordWrap(True)
-        layout.addWidget(self.record_button)
-        layout.addWidget(self.recording_indicator, 1)
-        return row
 
     def _build_activity(self) -> QFrame:
         panel = QFrame()
@@ -612,6 +566,7 @@ class GuardianMainWindow(QMainWindow):
     def _refresh(self) -> None:
         self.runtime.drain_workers()
         self.runtime.tick()
+        self._poll_station_lab_offer()
         snapshot = self.runtime.snapshots.read()
         self._apply_snapshot(snapshot)
         self.notifications.poll()
@@ -632,6 +587,48 @@ class GuardianMainWindow(QMainWindow):
         refresh = getattr(active, "refresh", None)
         if callable(refresh):
             refresh()
+
+    def _poll_station_lab_offer(self) -> None:
+        """Put every new on-air calibration request in front of the operator."""
+        status = self.runtime.operations.station_lab
+        if not status.pending_offer or not status.peer or not status.session_id:
+            return
+        offer = (status.peer, int(status.session_id))
+        if offer == self._last_station_lab_offer:
+            return
+        # Remember before opening a modal dialog: its nested event loop keeps the
+        # 500 ms refresh timer alive and must not open the same question again.
+        self._last_station_lab_offer = offer
+        self._show_workspace("station_lab")
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        QApplication.alert(self)
+        answer = QMessageBox.question(
+            self,
+            dual("Incoming AutoTune request", "Příchozí výzva AutoTune"),
+            dual(
+                f"{status.peer} requests an on-air station calibration. "
+                "Accepting will let Guardian key this radio for measurement. "
+                "Do you want to accept?",
+                f"{status.peer} žádá o on-air kalibraci stanice. Přijetím "
+                "dovolíte Guardianu zaklíčovat toto rádio pro měření. "
+                "Chcete výzvu přijmout?",
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        current = self.runtime.operations.station_lab
+        if (
+            current.pending_offer
+            and current.peer == offer[0]
+            and current.session_id == offer[1]
+        ):
+            if answer == QMessageBox.StandardButton.Yes:
+                self.runtime.operations.accept_station_calibration()
+            elif answer == QMessageBox.StandardButton.No:
+                self.runtime.operations.reject_station_calibration()
+        self.workspace_names["station_lab"].refresh()
 
     def _show_workspace(self, name: str) -> None:
         workspace = self.workspace_names.get(name)
@@ -724,7 +721,6 @@ class GuardianMainWindow(QMainWindow):
                 self.runtime.operations.ofdm_status(),
             )
         )
-        self._update_recording_indicator()
 
         values = {
             "inbox": mailbox.inbox,
@@ -843,87 +839,6 @@ class GuardianMainWindow(QMainWindow):
             self.readiness.addTopLevelItem(
                 QTreeWidgetItem([component, state, detail])
             )
-
-    # ------------------------------ recording ------------------------------- #
-
-    def _toggle_recording(self) -> None:
-        """Start a capture, or stop one and show what it caught."""
-        operations = self.runtime.operations
-        if operations.recording_active():
-            summary = operations.stop_recording()
-            self._update_recording_indicator()
-            if summary is not None:
-                self._show_capture_result(summary)
-            return
-        started = operations.start_recording()
-        # Every refusal is already logged with its reason by `start_recording`;
-        # the status bar only has to say that nothing is running, because the one
-        # dangerous outcome is an indicator claiming a capture that does not exist.
-        self._update_recording_indicator()
-        if started is None:
-            self.statusBar().showMessage(tr("record.start_failed"), 10_000)
-        else:
-            self.statusBar().showMessage(
-                dual(
-                    f"Recording to {started.name}.",
-                    f"Nahrávám do {started.name}.",
-                ),
-                10_000,
-            )
-
-    def _update_recording_indicator(self) -> None:
-        """Reflect the recorder's own state -- never a local idea of it.
-
-        Driven by `_apply_snapshot`, i.e. by the one existing UI poll. Everything
-        shown is read back from `Operations`, so a capture that failed to start,
-        or one stopped from the menu while the button was last drawn as "Stop",
-        cannot leave the shell claiming to be recording.
-        """
-        operations = self.runtime.operations
-        active = operations.recording_active()
-        label = tr("record.stop") if active else tr("record.start")
-        self.record_button.setText(label)
-        self.record_action.setText(label)
-        if not active:
-            self.recording_indicator.setText(tr("record.idle"))
-            self.recording_indicator.setProperty("statusRole", "inactive")
-            _repolish(self.recording_indicator)
-            return
-        level = float(operations.recording_level())
-        text = tr(
-            "record.live",
-            seconds=f"{operations.recording_seconds():.1f}",
-            peak=(
-                f"{20.0 * log10(level):.0f} dBFS"
-                if level > 0.0
-                # No sample has arrived yet, so there is no level to report. A
-                # "0" here would read as a measurement of silence.
-                else tr("record.unavailable")
-            ),
-        )
-        if level >= CLIP_THRESHOLD:
-            role, note = "danger", tr("record.live_clipping")
-        elif level < _SILENT_LEVEL:
-            role, note = "warning", tr("record.live_silent")
-        else:
-            role, note = "success", ""
-        self.recording_indicator.setText(
-            f"{text}  ·  {note}" if note else text
-        )
-        self.recording_indicator.setProperty("statusRole", role)
-        _repolish(self.recording_indicator)
-
-    def _show_capture_result(self, summary) -> None:
-        """Report a finished capture without blocking the station.
-
-        Not modal, and closing it loses nothing: the WAV file is closed and on
-        disk before this is built, so the dialog is a reading of the file rather
-        than the only chance to act on it.
-        """
-        dialog = CaptureResultDialog(self.runtime, summary, self)
-        self.capture_dialog = dialog
-        dialog.show()
-        dialog.raise_()
 
     def _audio_available(self, name: str, kind: str) -> bool:
         """Does this device name resolve to an index, without asking every tick?

@@ -40,11 +40,9 @@ from ..protocol import (
     Priority,
     alert_kind,
     crc16,
-    decode_guardian_codec_capable,
     decode_ofdm_capable,
     decode_ptt_delay,
     encode_alert,
-    encode_guardian_codec_capable,
     encode_ofdm_capable,
     encode_ptt_delay,
 )
@@ -237,9 +235,6 @@ class Message:
     flags: Flags = Flags.NONE
     body: str = ""
     payload_bytes: bytes | None = None   # transferable bundle (mail), if any
-    # Safe standard-ZIP replacement used when the next hop does not actively
-    # advertise a decoder for a GCP1 ZPAQ/PAQ envelope.
-    fallback_payload_bytes: bytes | None = None
     direction: str = "out"         # "out" (I'm relaying/originating) | "in"
     state: SessionState = SessionState.IDLE
     attempts: int = 0
@@ -353,10 +348,6 @@ class Orchestrator:
         # transport, asked at call time so a settings change needs no rebuild.
         # Left None by an owner that has no such transport, which reads as "no".
         self.ofdm_payload_request: Callable[[], bool] | None = None
-        # Decoder capability, independent of whether this station elects to
-        # compress its own outgoing mail. It is actively inserted into ACK_HAVE
-        # so legacy peers (which only echo flags) cannot spoof support.
-        self.guardian_codec_request: Callable[[], bool] | None = None
         # This station's Maidenhead locator for the beacon, or "" to keep the
         # position off the air. Asked at beacon time so a change in Settings
         # needs no rebuild.
@@ -416,7 +407,6 @@ class Orchestrator:
         ttl: int = 5,
         flags: Flags = Flags.NONE,
         payload_bytes: bytes | None = None,
-        fallback_payload_bytes: bytes | None = None,
     ) -> Message:
         """Originate (or relay) a message toward final_dest."""
         final_dest = final_dest.strip().upper()
@@ -425,11 +415,10 @@ class Orchestrator:
             msg_id=msg_id, source=self.callsign, final_dest=final_dest,
             next_hop="", priority=priority, ttl=ttl,
             flags=encode_ofdm_capable(
-                encode_ptt_delay(encode_guardian_codec_capable(flags, False), own_delay),
+                encode_ptt_delay(flags, own_delay),
                 self._own_ofdm_capable(),
             ),
-            body=body, payload_bytes=payload_bytes,
-            fallback_payload_bytes=fallback_payload_bytes, direction="out",
+            body=body, payload_bytes=payload_bytes, direction="out",
         )
         msg.ptt_delay_ms = own_delay
         self.sessions[msg_id] = msg
@@ -468,14 +457,6 @@ class Orchestrator:
         try:
             return bool(self.ofdm_payload_request())
         except Exception:       # noqa: BLE001 - a config fault must not stop mail
-            return False
-
-    def _own_guardian_codec_capable(self) -> bool:
-        if self.guardian_codec_request is None:
-            return False
-        try:
-            return bool(self.guardian_codec_request())
-        except Exception:       # noqa: BLE001 - capability failure means safe fallback
             return False
 
     def _resolve_next_hop(
@@ -709,9 +690,7 @@ class Orchestrator:
             # radios, and so does the transport they settled on; the next leg
             # starts over from our own configuration.
             flags=encode_ofdm_capable(
-                encode_ptt_delay(
-                    encode_guardian_codec_capable(inbound.flags, False), own_delay
-                ),
+                encode_ptt_delay(inbound.flags, own_delay),
                 self._own_ofdm_capable(),
             ),
             body=inbound.body,
@@ -1098,9 +1077,8 @@ class Orchestrator:
         msg = Message(
             msg_id=f.message_id, source=f.source, final_dest=f.destination,
             next_hop=self.callsign, priority=f.priority, ttl=f.ttl,
-            flags=encode_guardian_codec_capable(
-                encode_ofdm_capable(encode_ptt_delay(f.flags, negotiated), agreed_ofdm),
-                self._own_guardian_codec_capable(),
+            flags=encode_ofdm_capable(
+                encode_ptt_delay(f.flags, negotiated), agreed_ofdm
             ),
             direction="in",
         )
@@ -1128,22 +1106,6 @@ class Orchestrator:
             # announcement: settings can have changed since it went out.
             agreed_ofdm = decode_ofdm_capable(f.flags) and self._own_ofdm_capable()
             msg.payload_transport = "ofdm_vhf" if agreed_ofdm else "vara_p2p"
-            peer_has_guardian_codec = decode_guardian_codec_capable(f.flags)
-            msg.flags = encode_guardian_codec_capable(
-                msg.flags, peer_has_guardian_codec
-            )
-            if msg.fallback_payload_bytes is not None and not peer_has_guardian_codec:
-                msg.payload_bytes = msg.fallback_payload_bytes
-                msg.fallback_payload_bytes = None
-                msg.flags = Flags(int(msg.flags) & ~int(Flags.COMPRESSED))
-                self._emit(
-                    msg,
-                    f"{f.source} has no Guardian high-ratio decoder — "
-                    "using the standard ZIP fallback",
-                )
-            elif peer_has_guardian_codec:
-                # The ACK committed the hop to GCP1; release the duplicate ZIP.
-                msg.fallback_payload_bytes = None
             if not agreed_ofdm and self._own_ofdm_capable():
                 self._emit(
                     msg,

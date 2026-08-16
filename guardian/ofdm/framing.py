@@ -52,6 +52,10 @@ HEADER_BYTES = _HEADER.size + _CRC.size
 
 _SUBBLOCK_MASK = 0x3F
 DEFER_ACK_FLAG = 0x40
+# The same reserved bit has a control-frame meaning: a POLL carrying it confirms
+# that the sender decoded the final ACK bitmap. DATA keeps the original
+# DEFER_ACK meaning, so the wire format and older decoders remain compatible.
+FINAL_ACK_CONFIRM_FLAG = 0x40
 _RETRANSMISSION_FLAG = 0x80
 _MANIFEST_ENTRY = struct.Struct(">HH")
 _ACK_PREFIX = struct.Struct(">HbB")

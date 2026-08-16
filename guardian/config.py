@@ -198,11 +198,8 @@ class StationConfig:
     # poor conditions, BW2750 the tactical one. Both stations must agree.
     vara_hf_bandwidth: str = "BW2300"   # "BW500" | "BW2300" | "BW2750"
 
-    # VARA's native TEXT compression remains the baseline. This switch selects
-    # the separate FILES codec documented by VARA for binary/file transfers.
-    # It is deliberately opt-in because both stations need compatible modem
-    # versions and Guardian's own adaptive bundle compression is usually the
-    # better transport-independent choice.
+    # Optional vendor-side binary bundle compression. It is mutually exclusive
+    # with Guardian BZIP2, but both may remain off.
     vara_file_compression: bool = False
     # VARA's proprietary AES-256 option is intended for authorised non-amateur
     # services. VARA itself stores this password in its INI file; keeping the
@@ -210,9 +207,8 @@ class StationConfig:
     vara_encryption: bool = False
     vara_encryption_password: str = ""
 
-    # Content-aware ZIP encoding of Guardian message bundles. The smallest of
-    # stored, DEFLATE, BZIP2 and LZMA is selected before either VARA or OFDM is
-    # handed the payload. No LLM or external service is involved.
+    # One measured BZIP2 pass over the Guardian ZIP bundle, used only when its
+    # result is smaller than the standard bundle. It works over VARA and OFDM.
     guardian_compression: bool = False
 
     # After the final destination has queued its last control acknowledgement,

@@ -6,6 +6,8 @@ from guardian.message import Folder, MailMessage, MessageStore, Status
 from guardian.operations import (
     ALERT_SWEEP_BURSTS,
     ALERT_SWEEP_MAX_CHANNELS,
+    CALIBRATION_OFFER_ATTEMPTS,
+    CALIBRATION_OFFER_MIN_INTERVAL,
     PTT_TEST_MAX_SECONDS,
     Operations,
     control_mode_compatible,
@@ -28,6 +30,7 @@ from guardian.session.orchestrator import (
     START_TIMEOUT,
     working_channel_token,
 )
+from guardian.station_lab import CalibrationState
 
 
 def test_idle_operations_never_transmit_and_keep_mail_queued(tmp_path) -> None:
@@ -103,6 +106,61 @@ def _spy_transmissions(operations) -> list:
     return sent
 
 
+def test_station_calibration_offer_retries_then_times_out(
+    tmp_path, monkeypatch
+) -> None:
+    operations, workers, _mailstore = _operations(tmp_path)
+    operations.audio_transport = SimpleNamespace(stop=lambda: None)
+    sent = _spy_transmissions(operations)
+    clock = [100.0]
+    monkeypatch.setattr("guardian.operations.time.monotonic", lambda: clock[0])
+    try:
+        assert operations.start_station_calibration("OK1AAA")
+        assert [frame.type for frame in sent] == [FrameType.CAL_OFFER]
+
+        interval = max(CALIBRATION_OFFER_MIN_INTERVAL, operations.net.ack_timeout)
+        for _attempt in range(1, CALIBRATION_OFFER_ATTEMPTS):
+            clock[0] += interval + 0.1
+            operations._tick_station_calibration(clock[0])
+        assert [frame.type for frame in sent] == [
+            FrameType.CAL_OFFER
+        ] * CALIBRATION_OFFER_ATTEMPTS
+        assert [frame.next_hop for frame in sent] == ["Q1", "Q2", "Q3"]
+
+        clock[0] += interval + 0.1
+        operations._tick_station_calibration(clock[0])
+        assert sent[-1].type is FrameType.CAL_CANCEL
+        assert sent[-1].next_hop == "TIMEOUT"
+        assert operations.station_lab.state == CalibrationState.FAILED.value
+        assert "did not answer" in operations.station_lab.error
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_repeated_accepted_calibration_offer_resends_accept_not_busy(
+    tmp_path,
+) -> None:
+    operations, workers, _mailstore = _operations(tmp_path)
+    sent = _spy_transmissions(operations)
+    offer = ControlFrame(
+        FrameType.CAL_OFFER, "OK1AAA", "OK7PS", "Q1", message_id=42, ttl=1
+    )
+    try:
+        operations._calibration_offer(offer)
+        assert operations.accept_station_calibration()
+        operations._calibration_offer(offer)
+
+        assert [frame.type for frame in sent] == [
+            FrameType.CAL_ACCEPT,
+            FrameType.CAL_ACCEPT,
+        ]
+        assert operations.station_lab.state == CalibrationState.PREPARING.value
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
 def test_guardian_compression_hands_a_compatible_bundle_to_either_transport(
     tmp_path, monkeypatch
 ) -> None:
@@ -120,7 +178,6 @@ def test_guardian_compression_hands_a_compatible_bundle_to_either_transport(
     )
     mailstore.add(mail)
     announced = []
-    monkeypatch.setattr("guardian.message.mail.external_candidates", lambda _data: [])
     monkeypatch.setattr(
         operations.net, "send_message", lambda **kwargs: announced.append(kwargs)
     )

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -17,9 +18,10 @@ from guardian.ofdm import (BENCH, AckBitmap, FecProfile, OfdmLink,
                            simulated_pair)
 from guardian.ofdm.channel import Channel, ChannelSpec
 from guardian.ofdm.config import HEADER_MCS, mcs
-from guardian.ofdm.framing import (OfdmFrameType, PhyHeader, burst_duration,
-                                   header_symbols, section_symbols)
-from guardian.ofdm.link import SimulatedDuplexPipe
+from guardian.ofdm.framing import (FINAL_ACK_CONFIRM_FLAG, OfdmFrameType,
+                                   PhyHeader, burst_duration, header_symbols,
+                                   section_symbols)
+from guardian.ofdm.link import RxBurstState, SimulatedDuplexPipe
 from guardian.ofdm.metrics import AdaptationState, LinkMetrics, OfdmStatus
 
 SEED = 0xA5
@@ -173,7 +175,7 @@ def test_fast_selective_repeat_sends_two_microbursts_under_one_ptt_and_ack():
     assert not listener.is_alive()
     assert got["data"] == payload
     assert sender.status.data_bursts == 4
-    assert near.transmissions == 2       # four microbursts, two PTT cycles
+    assert near.transmissions == 3       # two data PTT cycles + final ACK confirm
     assert far.transmissions == 2        # one cumulative ACK per train
 
 
@@ -201,7 +203,7 @@ def test_v3_superframe_shares_acquisition_for_a_whole_four_burst_train():
     assert not listener.is_alive()
     assert got["data"] == payload
     assert sender.status.data_bursts == 1
-    assert near.transmissions == 1
+    assert near.transmissions == 2       # superframe + final ACK confirm
     assert far.transmissions == 1
 
 
@@ -237,7 +239,7 @@ def test_v3_superframe_retries_only_one_erased_middle_codeword():
     assert got["data"] == payload
     assert sender.status.retransmitted_bytes == 512
     assert sender.status.retries == 1
-    assert near.transmissions == 2
+    assert near.transmissions == 3       # original, sparse retry, ACK confirm
 
 
 def test_lost_final_microburst_is_recovered_by_poll_then_sparse_retry():
@@ -279,7 +281,7 @@ def test_lost_final_microburst_is_recovered_by_poll_then_sparse_retry():
     assert not listener.is_alive()
     assert got["data"] == payload
     assert sender.status.retries == 1
-    assert near.transmissions == 3       # train, POLL, missing microburst
+    assert near.transmissions == 4       # train, POLL, retry, final ACK confirm
     assert far.transmissions == 2        # POLL state and final complete ACK
 
 
@@ -626,3 +628,34 @@ def test_lingering_ends_by_itself_when_the_acknowledgement_was_heard() -> None:
     sender, receiver, received, ok = _exchange(_payload(300))
     assert ok and received == _payload(300)
     assert receiver.adaptation.duplicates == 0
+
+
+def test_final_ack_confirmation_ends_the_receiver_hold_immediately(
+    monkeypatch,
+) -> None:
+    class OneConfirmation:
+        calls = 0
+
+        def receive(self, timeout):
+            self.calls += 1
+            if self.calls > 1:
+                raise AssertionError(f"receiver waited another {timeout} seconds")
+            return np.ones(1)
+
+    pipe = OneConfirmation()
+    receiver = OfdmLink(BENCH, pipe, timeout_margin=120.0)
+    state = RxBurstState(msg_id=44, total_blocks=512)
+    confirmation = PhyHeader(
+        OfdmFrameType.POLL,
+        state.msg_id,
+        block_seq=9,
+        block_count=state.total_blocks,
+        flags=FINAL_ACK_CONFIRM_FLAG,
+    )
+    monkeypatch.setattr(
+        receiver, "_decode_burst",
+        lambda samples: SimpleNamespace(header=confirmation),
+    )
+
+    receiver._linger_bitmap(state)
+    assert pipe.calls == 1

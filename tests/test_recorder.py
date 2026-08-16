@@ -437,6 +437,47 @@ def test_operations_opens_its_own_stream_when_the_control_channel_is_shut(
         workers.close()
 
 
+def test_modem_test_can_choose_the_standalone_recording_sample_rate(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    sd = FakeSounddevice()
+    monkeypatch.setattr("guardian.modem.audio._import_sounddevice", lambda: sd)
+    monkeypatch.setattr("guardian.operations.resolve_device", lambda name, kind: 4)
+    operations, workers = _operations(tmp_path, audio_input="Radio codec")
+    try:
+        assert operations.start_recording(sample_rate=96_000) is not None
+        assert sd.checked[0]["samplerate"] == 96_000
+        operations.stop_recording()
+    finally:
+        workers.close()
+
+
+def test_exclusive_test_recording_releases_and_restores_the_control_stream(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    sd = FakeSounddevice()
+    monkeypatch.setattr("guardian.modem.audio._import_sounddevice", lambda: sd)
+    monkeypatch.setattr("guardian.operations.resolve_device", lambda name, kind: 4)
+    operations, workers = _operations(tmp_path, audio_input="Radio codec")
+    transport = AudioControlTransportStub()
+    operations.audio_transport = transport
+    try:
+        assert operations.start_recording(
+            sample_rate=96_000, exclusive=True
+        ) is not None
+        assert transport.stopped
+        assert operations.payload_active()
+        assert sd.checked[0]["samplerate"] == 96_000
+
+        operations.stop_recording()
+        assert not transport.stopped
+        assert not operations.payload_active()
+    finally:
+        workers.close()
+
+
 def test_operations_refuses_when_no_receive_device_is_selected(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path))
     operations, workers = _operations(tmp_path, audio_input="")
