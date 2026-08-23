@@ -441,6 +441,30 @@ def test_inbound_payload_failure_sends_cancel_to_initiator() -> None:
     assert [frame.type for frame in frames] == [FrameType.CANCEL]
 
 
+def test_cancel_stops_payload_and_late_completion_cannot_revive_session() -> None:
+    class Payload:
+        def __init__(self) -> None:
+            self.cancelled = []
+
+        def cancel(self, message) -> None:
+            self.cancelled.append(message.msg_id)
+
+    payload = Payload()
+    bus = LoopbackBus()
+    receiver = Orchestrator("OK1AAA", bus.endpoint("receiver"), payload=payload)
+    message = Message(
+        106, "OK7PS", "OK1AAA", "OK1AAA",
+        direction="in", state=SessionState.RECEIVING,
+    )
+    receiver.sessions[message.msg_id] = message
+
+    receiver.cancel(message.msg_id, notify=False)
+    receiver.notify_payload_delivered(message.msg_id, ok=True)
+
+    assert payload.cancelled == [message.msg_id]
+    assert message.state is SessionState.CANCELLED
+
+
 def test_session_timeout_stays_above_scaled_payload_timeout() -> None:
     small = Message(104, "OK7PS", "OK1AAA", "OK1AAA", payload_bytes=b"x")
     large = Message(

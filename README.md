@@ -471,10 +471,10 @@ This is how the modem gets tuned: a capture lets the whole receiver be re-run ov
 
 # Current status
 
-Guardian **2.3.5** is the current G2 build. It simplifies modem testing and
-compression, fixes radio AutoTune and removes the long wait before the
-post-transfer control acknowledgement. See
-[the 2.3.5 release notes](docs/RELEASE_NOTES_2.3.5.md),
+Guardian **2.3.6** is the current G2 build. It makes long OFDM attachment
+transfers recover promptly from missed acknowledgements and stops an active
+payload when station control is switched off. See
+[the 2.3.6 release notes](docs/RELEASE_NOTES_2.3.6.md),
 [current status](STATUS.md) and [G2 modem guide](docs/G2_MODEM.md).
 
 | Capability                      | Status                             |

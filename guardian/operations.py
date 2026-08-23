@@ -2559,9 +2559,18 @@ class Operations:
     def stop_control_channel(self) -> None:
         self.stop_scanner(restore=True)
         self._close_recording_losing_its_source("the control channel was stopped")
-        if self.audio_transport is not None:
-            self.audio_transport.stop()
-        self.audio_transport = None
+        # Detach control first so a payload worker unwinding after cancellation
+        # cannot reopen it through _resume_control().
+        transport, self.audio_transport = self.audio_transport, None
+        if transport is not None:
+            transport.stop()
+        # Stopping control is a station-wide stop, not merely a UI reset. Abort
+        # every live payload before replacing its orchestrator; otherwise the
+        # old daemon worker can continue keying a radio no longer shown as busy.
+        old_net = self.net
+        for message in tuple(old_net.sessions.values()):
+            if not message.state.terminal:
+                old_net.cancel(message.msg_id, notify=False)
         self.config.control_channel = "off"
         self.config.save()
         self.net = self._build_net(NullTransport())

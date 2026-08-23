@@ -27,7 +27,7 @@ from guardian.services import (
     SnapshotStore,
     WorkerPool,
 )
-from guardian.session import LoopbackBus, Orchestrator, SessionState
+from guardian.session import LoopbackBus, Message, Orchestrator, SessionState
 from guardian.session.orchestrator import (
     ACK_TIMEOUT,
     START_TIMEOUT,
@@ -2179,6 +2179,37 @@ def test_ofdm_status_only_replaces_vara_progress_for_an_ofdm_hop(tmp_path) -> No
         assert operations.ofdm_status() is None
     finally:
         operations._payload_active.clear()
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_stopping_control_aborts_live_payload_before_replacing_net(tmp_path) -> None:
+    operations, workers, _ = _operations(tmp_path)
+    stopped = []
+    cancelled = []
+    operations.audio_transport = SimpleNamespace(stop=lambda: stopped.append(True))
+
+    class Payload:
+        def cancel(self, message) -> None:
+            cancelled.append(message.msg_id)
+
+    old_net = operations.net
+    old_net.payload = Payload()
+    message = Message(
+        992, "OK7PS", "OK1AAA", "OK1AAA",
+        direction="out", state=SessionState.TRANSFERRING,
+    )
+    old_net.sessions[message.msg_id] = message
+    try:
+        operations.stop_control_channel()
+
+        assert stopped == [True]
+        assert cancelled == [message.msg_id]
+        assert message.state is SessionState.CANCELLED
+        assert operations.audio_transport is None
+        assert operations.net is not old_net
+        assert operations.config.control_channel == "off"
+    finally:
         operations.close()
         workers.close(wait=True)
 

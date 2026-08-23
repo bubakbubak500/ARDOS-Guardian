@@ -7,6 +7,7 @@ feature can fail and cost a transfer; a transmitter left keyed costs the band.
 from __future__ import annotations
 
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -655,6 +656,68 @@ def test_a_short_burst_is_handed_over_promptly_not_after_the_longest_one(
     budget = len(aired) + int(BENCH.sample_rate * (HANGOVER_SECONDS + SLACK))
     assert len(window) < budget
     assert len(window) < pipe.longest_burst_samples()
+
+
+def test_a_false_reply_trigger_has_a_hard_capture_limit(monkeypatch) -> None:
+    """An AGC tail cannot turn a short ACK wait into a full DATA capture."""
+    from guardian.payload.ofdm_vhf import PRETRIGGER_SECONDS
+
+    sd = FakeSounddevice()
+    pipe = _pipe(sd, RecordingPtt(), monkeypatch)
+    pipe.start()
+    stream = sd.streams[0]
+    block = int(BENCH.sample_rate * 0.05)
+    quiet = np.random.default_rng(13).normal(0.0, 1e-4, block)
+    for _ in range(6):
+        stream.feed(quiet)
+    for _ in range(100):
+        stream.feed(np.full(block, 0.15))
+
+    window = pipe.receive_limited(20.0, max_capture_seconds=0.25)
+
+    assert window is not None
+    assert len(window) <= int(BENCH.sample_rate * (0.25 + PRETRIGGER_SECONDS + 0.05))
+
+
+def test_cancelling_the_backend_unblocks_an_active_receive() -> None:
+    started = threading.Event()
+    stopped = threading.Event()
+    finished = threading.Event()
+    results: list[bool] = []
+
+    class BlockingPipe:
+        def __init__(self, profile) -> None:
+            self.profile = profile
+
+        def start(self) -> None:
+            started.set()
+
+        def stop(self) -> None:
+            stopped.set()
+
+        def receive(self, timeout):  # noqa: ARG002
+            stopped.wait(5.0)
+            return None
+
+        def send(self, samples):  # noqa: ARG002
+            raise AssertionError("receive test must not transmit")
+
+    backend = OfdmVhfBackend(pipe_factory=BlockingPipe)
+    message = Message(991, "OK7PS", "OK1AAA", "OK1AAA", direction="in")
+
+    def done(ok: bool) -> None:
+        results.append(ok)
+        finished.set()
+
+    backend.start_receive(message, done)
+    assert started.wait(2.0)
+    before = time.monotonic()
+    backend.cancel(message)
+
+    assert stopped.wait(1.0)
+    assert finished.wait(2.0)
+    assert time.monotonic() - before < 2.0
+    assert results == [False]
 
 
 def test_the_squelch_waits_for_the_noise_floor_before_it_can_fire(monkeypatch) -> None:

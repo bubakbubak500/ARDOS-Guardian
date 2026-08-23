@@ -1,3 +1,3 @@
 """Single source of truth for the Guardian application version."""
 
-__version__ = "2.3.5"
+__version__ = "2.3.6"

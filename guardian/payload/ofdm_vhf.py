@@ -155,6 +155,10 @@ class RadioAudioPipe:
         self._buffer: list[np.ndarray] = []
         self._floor = 0.0
         self._floor_seen = 0.0
+        self._stopped = threading.Event()
+        self._stopped.set()
+        # Real radios need a short direction-change guard after an ACK.
+        self.peer_turnaround_guard = 0.35
         self.last_rx_timing: RxTiming | None = None
 
     # -- lifecycle ----------------------------------------------------------
@@ -176,10 +180,12 @@ class RadioAudioPipe:
             blocksize=int(rate * 0.05), callback=self._on_audio,
         )
         self._stream.start()
+        self._stopped.clear()
         self.on_log(f"OFDM VHF: listening at {rate} Hz on device {self.input_device}")
 
     def stop(self) -> None:
         """Close the receive stream. Never raises — it runs in `finally` blocks."""
+        self._stopped.set()
         stream, self._stream = self._stream, None
         if stream is not None:
             try:
@@ -205,7 +211,15 @@ class RadioAudioPipe:
             chunks, self._buffer = self._buffer, []
         return np.concatenate(chunks) if chunks else np.zeros(0)
 
-    def receive(self, timeout: float) -> np.ndarray | None:
+    def receive_limited(self, timeout: float,
+                        max_capture_seconds: float) -> np.ndarray | None:
+        """Receive a short control reply with a hard post-trigger bound."""
+        return self.receive(
+            timeout, max_capture_seconds=max_capture_seconds
+        )
+
+    def receive(self, timeout: float, *,
+                max_capture_seconds: float | None = None) -> np.ndarray | None:
         """Wait for a burst and return the audio around it, or None on timeout.
 
         Waits for the level to rise, then keeps collecting until it has been down
@@ -225,6 +239,11 @@ class RadioAudioPipe:
         wait_started = time.monotonic()
         block = max(1, int(rate * ANALYSIS_BLOCK_SECONDS))
         longest = self.longest_burst_samples() + int(rate * (HANGOVER_SECONDS + 0.5))
+        if max_capture_seconds is not None:
+            longest = min(
+                longest,
+                max(1, int(rate * max(0.1, float(max_capture_seconds)))),
+            )
         hangover = int(rate * HANGOVER_SECONDS)
         pretrigger = int(rate * PRETRIGGER_SECONDS)
 
@@ -237,6 +256,8 @@ class RadioAudioPipe:
         last_audio = time.monotonic()
 
         while True:
+            if self._stopped.is_set():
+                return None
             arrived = self._drain()
             if len(arrived):
                 pending = np.concatenate([pending, arrived])
@@ -484,6 +505,10 @@ class OfdmVhfBackend(PayloadBackend):
         self.on_release = on_release
         self._pipe_factory = pipe_factory
         self._transfer_lock = threading.Lock()
+        self._active_lock = threading.Lock()
+        self._cancelled = threading.Event()
+        self._active_msg_id: int | None = None
+        self._active_pipe = None
         #: Latest measurements, for the transfer panel to poll.
         selected = self.controller.profile
         self.status = OfdmStatus(
@@ -537,6 +562,7 @@ class OfdmVhfBackend(PayloadBackend):
             timeout_multiplier=self.timeout_multiplier,
             on_log=self.on_log,
             on_status=self._publish,
+            cancelled=self._cancelled.is_set,
             controller=self.controller,
             legacy_mode=self.legacy_mode,
             train_bursts=self.train_bursts,
@@ -563,6 +589,25 @@ class OfdmVhfBackend(PayloadBackend):
             arq_block_bytes=selected.arq_block_bytes,
         )
 
+    def _begin_transfer(self, msg) -> None:
+        with self._active_lock:
+            self._cancelled.clear()
+            self._active_msg_id = int(msg.msg_id)
+            self._active_pipe = None
+
+    def _set_active_pipe(self, pipe) -> None:
+        with self._active_lock:
+            self._active_pipe = pipe
+
+    def _end_transfer(self) -> None:
+        with self._active_lock:
+            self._active_msg_id = None
+            self._active_pipe = None
+
+    def _check_cancelled(self) -> None:
+        if self._cancelled.is_set():
+            raise RuntimeError("OFDM transfer cancelled")
+
     @staticmethod
     def _payload_of(msg) -> bytes:
         return (msg.payload_bytes if msg.payload_bytes is not None
@@ -571,9 +616,11 @@ class OfdmVhfBackend(PayloadBackend):
     # -- the PayloadBackend interface --------------------------------------
 
     def start_send(self, msg, done: DoneCb) -> None:
+        self._begin_transfer(msg)
         threading.Thread(target=self._send, args=(msg, done), daemon=True).start()
 
     def start_receive(self, msg, done: DoneCb) -> None:
+        self._begin_transfer(msg)
         threading.Thread(target=self._receive, args=(msg, done), daemon=True).start()
 
     def _send(self, msg, done: DoneCb) -> None:
@@ -583,14 +630,19 @@ class OfdmVhfBackend(PayloadBackend):
             self._reset_status("send")
             pipe = None
             try:
+                self._check_cancelled()
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
+                self._check_cancelled()
                 if self.on_qsy and self.on_qsy(msg) is False:
                     raise RuntimeError("working-channel QSY failed")
                 data = self._payload_of(msg)
                 pipe = self._make_pipe()
+                self._set_active_pipe(pipe)
+                self._check_cancelled()
                 pipe.start()
+                self._check_cancelled()
                 self.on_log(
                     f"Guardian G2 {self.waveform_family.upper()}: sending "
                     f"#{msg.msg_id} ({len(data)} bytes) on "
@@ -608,6 +660,7 @@ class OfdmVhfBackend(PayloadBackend):
                     _swallow(self.on_unqsy)
                 if acquired and self.on_release:
                     _swallow(self.on_release)
+                self._end_transfer()
         # done() may immediately send RECEIVED/CANCEL over AFSK, so it must run
         # only after the shared soundcard has been returned to that modem.
         done(success)
@@ -619,13 +672,18 @@ class OfdmVhfBackend(PayloadBackend):
             self._reset_status("receive")
             pipe = None
             try:
+                self._check_cancelled()
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
+                self._check_cancelled()
                 if self.on_receive_qsy and self.on_receive_qsy(msg) is False:
                     raise RuntimeError("working-channel QSY failed")
                 pipe = self._make_pipe()
+                self._set_active_pipe(pipe)
+                self._check_cancelled()
                 pipe.start()
+                self._check_cancelled()
                 self.on_log(f"OFDM VHF: waiting for payload #{msg.msg_id}")
                 received = self._make_link(pipe).receive_message(msg_id=msg.msg_id)
                 if received is not None:
@@ -647,13 +705,16 @@ class OfdmVhfBackend(PayloadBackend):
                     _swallow(self.on_unqsy)
                 if acquired and self.on_release:
                     _swallow(self.on_release)
+                self._end_transfer()
         done(success)
 
     def cancel(self, msg) -> None:
-        """No-op, as for VARA.
-
-        The orchestrator's `cancel_message` sends a CANCEL control frame and
-        never calls this; an in-flight transfer runs to its own conclusion. Wiring
-        a real abort means a stop flag the ARQ loop checks between blocks, which
-        is worth doing when the session layer grows a use for it.
-        """
+        """Abort the active ARQ loop and unblock a pending soundcard receive."""
+        with self._active_lock:
+            if self._active_msg_id != int(msg.msg_id):
+                return
+            self._cancelled.set()
+            pipe = self._active_pipe
+        if pipe is not None:
+            _swallow(pipe.stop)
+        self.on_log(f"OFDM VHF: payload #{msg.msg_id} cancelled")

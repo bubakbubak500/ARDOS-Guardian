@@ -597,10 +597,13 @@ class Orchestrator:
             return ""
         return locator[: beacon_locator_room(self.callsign)]
 
-    def cancel(self, msg_id: int) -> None:
+    def cancel(self, msg_id: int, *, notify: bool = True) -> None:
         msg = self.sessions.get(msg_id)
+        if msg and self.payload is not None:
+            self.payload.cancel(msg)
         if msg and not msg.state.terminal:
-            self._send(FrameType.CANCEL, msg)
+            if notify:
+                self._send(FrameType.CANCEL, msg)
             self._enter(msg, SessionState.CANCELLED)
             self._emit(msg, "cancelled by operator")
 
@@ -650,7 +653,7 @@ class Orchestrator:
     def notify_payload_delivered(self, msg_id: int, ok: bool = True) -> None:
         """Called (by VARA layer or sim) when an inbound payload finished."""
         msg = self.sessions.get(msg_id)
-        if not msg or msg.direction != "in":
+        if not msg or msg.direction != "in" or msg.state.terminal:
             return
         if not ok:
             self._send(FrameType.CANCEL, msg)
@@ -1315,6 +1318,8 @@ class Orchestrator:
     def _rx_cancel(self, f: ControlFrame) -> None:
         msg = self.sessions.get(f.message_id)
         if msg and not msg.state.terminal:
+            if self.payload is not None:
+                self.payload.cancel(msg)
             self._enter(msg, SessionState.CANCELLED)
             self._emit(msg, f"cancelled by {f.source}")
 

@@ -91,6 +91,28 @@ def test_a_pipe_pair_carries_samples_in_both_directions() -> None:
     assert near.receive(0.1) is not None
 
 
+def test_ack_wait_uses_a_short_hard_capture_limit_on_real_audio_pipes() -> None:
+    class LimitedPipe:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def receive_limited(self, timeout, max_capture_seconds):
+            self.calls.append((timeout, max_capture_seconds))
+            return None
+
+        def receive(self, timeout):  # noqa: ARG002
+            raise AssertionError("the unbounded DATA receive path was used")
+
+    pipe = LimitedPipe()
+    link = OfdmLink(BENCH, pipe, mcs_index=1, timeout_margin=1.0)
+
+    assert link._receive_reply(4.0, total_blocks=117) is None
+    assert len(pipe.calls) == 1
+    timeout, capture = pipe.calls[0]
+    assert timeout == 4.0
+    assert 1.0 <= capture < 3.0
+
+
 def test_each_direction_gets_its_own_noise() -> None:
     # Two radios do not share a noise generator, and a link that only worked
     # because they did would be a fiction.

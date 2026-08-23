@@ -161,6 +161,7 @@ class OfdmLink:
     decode_margin_per_burst: float = 1.5
     on_log: Callable[[str], None] | None = None
     on_status: Callable[[OfdmStatus], None] | None = None
+    cancelled: Callable[[], bool] | None = None
     controller: LinkAdaptationController | None = None
     legacy_mode: bool = False
     codec: BurstCodec | None = None
@@ -468,11 +469,46 @@ class OfdmLink:
         return ((airtime + 2.0 * self.ptt_turnaround + self.timeout_margin)
                 * max(0.5, float(self.timeout_multiplier)))
 
+    def _is_cancelled(self) -> bool:
+        return bool(self.cancelled is not None and self.cancelled())
+
+    def _reply_capture_seconds(self, total_blocks: int) -> float:
+        bitmap = AckBitmap(max(1, int(total_blocks)), frozenset()).encode()
+        header = PhyHeader(
+            OfdmFrameType.ACK, 0, block_count=max(1, int(total_blocks)),
+            payload_len=len(bitmap),
+        )
+        # Once squelch opens, a false trigger must not inherit the maximum DATA
+        # capture length. ACK airtime plus the existing decode margin is enough
+        # for the complete control waveform and its hangover.
+        return max(1.0, self._burst_duration(header) + self.timeout_margin)
+
+    def _receive_reply(self, timeout: float,
+                       total_blocks: int) -> np.ndarray | None:
+        limited = getattr(self.pipe, "receive_limited", None)
+        if limited is not None:
+            return limited(
+                timeout, self._reply_capture_seconds(total_blocks)
+            )
+        # Third-party/test pipes implementing the original protocol remain
+        # valid; only the real soundcard pipe needs the capture hard cap.
+        return self.pipe.receive(timeout)
+
+    def _guard_peer_receiver(self) -> None:
+        seconds = max(
+            0.0, float(getattr(self.pipe, "peer_turnaround_guard", 0.0))
+        )
+        if seconds and not self._is_cancelled():
+            time.sleep(seconds)
+
     # -- sending ---------------------------------------------------------
 
     def send_message(self, msg_id: int, payload: bytes) -> bool:
         self._started_at = time.monotonic()
         self.status.direction = "send"
+        if self._is_cancelled():
+            self._publish("failed")
+            return False
         if self.legacy_mode:
             return self._send_message_legacy(msg_id, payload)
         selected = self.controller.profile
@@ -502,6 +538,10 @@ class OfdmLink:
 
         next_sequence = 0
         while next_sequence < len(blocks):
+            if self._is_cancelled():
+                self._publish("failed")
+                self._log(f"OFDM: sending #{msg_id} cancelled")
+                return False
             selected = self.controller.profile
             base_capacity = min(MAX_SUBBLOCKS, max(
                 1, selected.burst_bytes // selected.arq_block_bytes
@@ -554,6 +594,9 @@ class OfdmLink:
         # minutes and delays the session-layer RECEIVED frame on the control
         # channel. A lost confirmation is harmless: the existing linger/re-ACK
         # path remains active until its normal timeout.
+        if self._is_cancelled():
+            self._publish("failed")
+            return False
         self._confirm_final_bitmap(state)
         self.status.last_block_ok = True
         self._publish("idle")
@@ -568,6 +611,8 @@ class OfdmLink:
         return True
 
     def _confirm_final_bitmap(self, state: BurstTxState) -> None:
+        if self._is_cancelled():
+            return
         confirmation = PhyHeader(
             OfdmFrameType.POLL,
             state.msg_id,
@@ -592,6 +637,8 @@ class OfdmLink:
         self.adaptation.blocks_sent += len(state.blocks)
         acknowledged: set[int] = set()
         for attempt in range(self.max_retries + 1):
+            if self._is_cancelled():
+                return False
             members = [SubBlock(sequence, state.blocks[sequence])
                        for sequence in sorted(state.pending)]
             fec = self.controller.fec_for_retry(attempt)
@@ -664,6 +711,7 @@ class OfdmLink:
                     f"{len(state.blocks)}/{len(state.blocks)} blocks, "
                     f"retries={attempt}"
                 )
+                self._guard_peer_receiver()
                 return True
             last = attempt == self.max_retries
             reason = (self.last_reply_reason if answer is None else
@@ -681,6 +729,8 @@ class OfdmLink:
         selected = self.controller.profile
         capacity = min(32, max(1, selected.burst_bytes // selected.arq_block_bytes))
         for attempt in range(self.max_retries + 1):
+            if self._is_cancelled():
+                return False
             sequences = sorted(state.pending)
             chunks = [sequences[index:index + capacity]
                       for index in range(0, len(sequences), capacity)]
@@ -727,6 +777,8 @@ class OfdmLink:
                 extra_timeout=len(headers) * self.decode_margin_per_burst,
             )
             if answer is None:
+                if self._is_cancelled():
+                    return False
                 poll = PhyHeader(
                     OfdmFrameType.POLL, state.msg_id, block_seq=final_id,
                     block_count=state.total_blocks,
@@ -771,6 +823,7 @@ class OfdmLink:
                     f"OFDM TRAIN COMPLETE #{state.burst_id}: "
                     f"{len(state.blocks)}/{len(state.blocks)} blocks, retries={attempt}"
                 )
+                self._guard_peer_receiver()
                 return True
             self._log(
                 f"OFDM TRAIN RETX #{state.burst_id}: "
@@ -808,10 +861,13 @@ class OfdmLink:
         heard = 0
         why = ""
         while True:
+            if self._is_cancelled():
+                self.last_reply_reason = "transfer cancelled"
+                return None
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 break
-            samples = self.pipe.receive(remaining)
+            samples = self._receive_reply(remaining, total_blocks)
             if samples is None:
                 break
             heard += 1
@@ -874,6 +930,10 @@ class OfdmLink:
         self.status.protocol_overhead_bytes = 0
         self.channel_seconds = 0.0
         while True:
+            if self._is_cancelled():
+                self._publish("failed")
+                self._log("OFDM: receive cancelled")
+                return None
             self._publish("synchronizing")
             samples = self.pipe.receive(wait)
             if samples is None:
@@ -998,6 +1058,8 @@ class OfdmLink:
             f"{self.reply_timeout(state.total_blocks):.1f} s for a lost ACK"
         )
         for _ in range(rounds):
+            if self._is_cancelled():
+                return
             samples = self.pipe.receive(self.reply_timeout(state.total_blocks))
             if samples is None:
                 return
@@ -1051,6 +1113,9 @@ class OfdmLink:
         self.channel_seconds = 0.0
         self._log(f"OFDM legacy: sending #{msg_id} as {len(blocks)} block(s)")
         for sequence, block in enumerate(blocks):
+            if self._is_cancelled():
+                self._publish("failed")
+                return False
             if not self._send_legacy_block(msg_id, sequence, len(blocks), block):
                 self.status.last_block_ok = False
                 self._publish("failed")
@@ -1071,6 +1136,8 @@ class OfdmLink:
         waveform = self._build_burst(header, block)
         self.adaptation.blocks_sent += 1
         for attempt in range(self.max_retries + 1):
+            if self._is_cancelled():
+                return False
             if attempt:
                 self.status.retries += 1
                 self.adaptation.retransmissions += 1
@@ -1087,7 +1154,11 @@ class OfdmLink:
                             sequence: int) -> OfdmFrameType | None:
         deadline = time.monotonic() + self.reply_timeout()
         while time.monotonic() < deadline:
-            samples = self.pipe.receive(deadline - time.monotonic())
+            if self._is_cancelled():
+                return None
+            samples = self._receive_reply(
+                deadline - time.monotonic(), 1
+            )
             if samples is None:
                 return None
             decoded = self._decode_burst(samples)
@@ -1106,6 +1177,9 @@ class OfdmLink:
         decoded = first
         expected: int | None = None
         while True:
+            if self._is_cancelled():
+                self._publish("failed")
+                return None
             header = decoded.header
             if (header is not None and header.frame_type is OfdmFrameType.DATA
                     and (msg_id is None or header.msg_id == msg_id)):
