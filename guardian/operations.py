@@ -138,6 +138,13 @@ PTT_TEST_MAX_SECONDS = 5.0
 # suppression while remaining compatible with the existing prefix-based mode.
 CALIBRATION_OFFER_MIN_INTERVAL = 9.0
 CALIBRATION_OFFER_ATTEMPTS = 3
+# A CAL_PROBE is decoded before the final AFSK samples have necessarily left
+# the peer's radio. Give the receiving worker time to discard that tail and
+# arm the payload recorder before the measuring waveform starts.
+CALIBRATION_RX_SETTLE_SECONDS = 0.35
+CALIBRATION_PROBE_GUARD_SECONDS = 0.85
+# A valid report returns in a few seconds; keep bounded DSP/AFSK headroom.
+CALIBRATION_REPORT_TIMEOUT = 8.0
 
 
 def control_mode_compatible(modem: str, mode: str) -> bool:
@@ -1383,29 +1390,43 @@ class Operations:
                     FrameType.CAL_PROBE, status.peer, status.session_id,
                     command.encode(),
                 )
+                control_flushed = True
                 if self.audio_transport is not None:
-                    self.audio_transport.wait_tx_idle(timeout=8.0)
+                    control_flushed = self.audio_transport.wait_tx_idle(timeout=8.0)
                 if endpoint is not None:
                     gain.set_endpoint_volume(endpoint)
+                # Give the peer's worker a short deterministic interval to swap
+                # from the AFSK control decoder to its payload recorder.
+                if control_flushed:
+                    time.sleep(CALIBRATION_PROBE_GUARD_SECONDS)
                 point_started = time.monotonic()
-                aired = self.transmit_test_burst(
-                    waveform_family=command.waveform,
-                    bandwidth=command.bandwidth,
-                    mcs_index=command.mcs, fec=command.fec,
-                    tx_scale=command.tx_scale, payload_bytes=512, repeats=1,
-                    seed=status.session_id ^ command.sequence,
+                aired = (
+                    self.transmit_test_burst(
+                        waveform_family=command.waveform,
+                        bandwidth=command.bandwidth,
+                        mcs_index=command.mcs, fec=command.fec,
+                        tx_scale=command.tx_scale, payload_bytes=512, repeats=1,
+                        seed=status.session_id ^ command.sequence,
+                    )
+                    if control_flushed else None
                 )
                 if windows_sweep:
                     gain.restore(snapshot)
                 status.state = CalibrationState.WAITING_REPORT.value
-                got = self._calibration_report_ready.wait(timeout=15.0)
+                got = (
+                    self._calibration_report_ready.wait(
+                        timeout=CALIBRATION_REPORT_TIMEOUT
+                    )
+                    if control_flushed else False
+                )
                 result = self._calibration_results.pop(command.sequence, None) if got else None
                 if result is None:
                     result = ProbeResult(
                         command.sequence, command.tx_scale, command.waveform,
                         command.mcs, command.fec, False,
                         wall_seconds=max(0.001, time.monotonic() - point_started),
-                        error="no calibration report",
+                        error=("no calibration report" if control_flushed
+                               else "control probe did not leave the radio"),
                         bandwidth=command.bandwidth,
                     )
                 else:
@@ -1423,10 +1444,16 @@ class Operations:
                 if status.mode == CalibrationMode.QUICK.value and len(report.results) >= 2:
                     if all(not item.safe or not item.frame_ok
                            for item in report.results[-2:]):
+                        stop_reason = "signal/clipping cliff"
                         break
+            else:
+                stop_reason = "complete"
             reason = ("cancelled" if self._calibration_cancel.is_set()
                       else "time limit" if time.monotonic() >= deadline
-                      else "complete")
+                      else stop_reason)
+            # A deliberately pruned or time-bounded plan is still finished.
+            # Do not leave the UI showing e.g. 2/12 after CAL_DONE succeeded.
+            status.total = status.progress
             report.finish(reason)
             paths = report.save()
             status.report_json, status.report_csv = map(str, paths)
@@ -1468,6 +1495,10 @@ class Operations:
         try:
             self._suspend_control()
             acquired = True
+            # CAL_PROBE can be decoded while the AFSK tail is still present.
+            # Opening the payload detector on that tail makes it return before
+            # the actual measuring burst. Let the control waveform clear first.
+            time.sleep(CALIBRATION_RX_SETTLE_SECONDS)
             pipe.start()
             samples = pipe.receive(timeout=12.0)
             if samples is None:
@@ -2704,6 +2735,13 @@ class Operations:
             self.audio_transport is None
             or self._payload_active.is_set()
             or self.scanner is not None
+            or self.station_lab.state in {
+                CalibrationState.OFFERING.value,
+                CalibrationState.WAITING_APPROVAL.value,
+                CalibrationState.PREPARING.value,
+                CalibrationState.MEASURING.value,
+                CalibrationState.WAITING_REPORT.value,
+            }
         ):
             return False
         return not any(

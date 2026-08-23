@@ -8,8 +8,11 @@ from guardian.operations import (
     ALERT_SWEEP_MAX_CHANNELS,
     CALIBRATION_OFFER_ATTEMPTS,
     CALIBRATION_OFFER_MIN_INTERVAL,
+    CALIBRATION_PROBE_GUARD_SECONDS,
+    CALIBRATION_REPORT_TIMEOUT,
     PTT_TEST_MAX_SECONDS,
     Operations,
+    StationLabStatus,
     control_mode_compatible,
     _ALERT_HISTORY,
 )
@@ -30,7 +33,12 @@ from guardian.session.orchestrator import (
     START_TIMEOUT,
     working_channel_token,
 )
-from guardian.station_lab import CalibrationState
+from guardian.station_lab import (
+    CalibrationMode,
+    CalibrationReport,
+    CalibrationState,
+    ProbeResult,
+)
 
 
 def test_idle_operations_never_transmit_and_keep_mail_queued(tmp_path) -> None:
@@ -161,6 +169,68 @@ def test_repeated_accepted_calibration_offer_resends_accept_not_busy(
         workers.close(wait=True)
 
 
+def test_quick_tune_arms_the_peer_and_finishes_a_pruned_plan(
+    tmp_path, monkeypatch
+) -> None:
+    operations, workers, _mailstore = _operations(
+        tmp_path, calibration_windows_gain=False
+    )
+    operations.station_lab = StationLabStatus(
+        state=CalibrationState.PREPARING.value,
+        peer="OK1AAA",
+        session_id=42,
+        mode=CalibrationMode.QUICK.value,
+    )
+    operations._calibration_initiator = True
+    operations.audio_transport = SimpleNamespace(
+        wait_tx_idle=lambda timeout: True
+    )
+    waits = []
+
+    class _Ready:
+        def clear(self):
+            pass
+
+        def wait(self, timeout):
+            waits.append(timeout)
+            return True
+
+    operations._calibration_report_ready = _Ready()
+    sleeps = []
+    monkeypatch.setattr("guardian.operations.time.sleep", sleeps.append)
+    monkeypatch.setattr(
+        "guardian.operations.WindowsGainController",
+        lambda _device: SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(supported=False)
+        ),
+    )
+    monkeypatch.setattr(
+        CalibrationReport, "save",
+        lambda self: (tmp_path / "report.json", tmp_path / "report.csv"),
+    )
+
+    def failed_burst(**_kwargs):
+        command = list(operations._calibration_commands.values())[-1]
+        operations._calibration_results[command.sequence] = ProbeResult(
+            command.sequence, command.tx_scale, command.waveform,
+            command.mcs, command.fec, False, bandwidth=command.bandwidth,
+        )
+        return 1.0
+
+    operations.transmit_test_burst = failed_burst
+    try:
+        report = operations._run_station_calibration()
+        assert len(report.results) == 2
+        assert report.stop_reason == "signal/clipping cliff"
+        assert operations.station_lab.progress == 2
+        assert operations.station_lab.total == 2
+        assert sleeps == [CALIBRATION_PROBE_GUARD_SECONDS] * 2
+        assert waits == [CALIBRATION_REPORT_TIMEOUT] * 2
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
 def test_guardian_compression_hands_a_compatible_bundle_to_either_transport(
     tmp_path, monkeypatch
 ) -> None:
@@ -268,6 +338,25 @@ def test_the_beacon_switch_actually_beacons_on_its_interval(tmp_path) -> None:
         assert len(sent) == 2
     finally:
         operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_station_calibration_temporarily_suppresses_beacons(tmp_path) -> None:
+    operations, workers, _mailstore = _operations(
+        tmp_path, beacon_enabled=True, beacon_interval=15.0
+    )
+    operations.audio_transport = SimpleNamespace()
+    sent = _spy_transmissions(operations)
+    try:
+        operations.station_lab.state = CalibrationState.MEASURING.value
+        operations._tick_beacon(1_000.0)
+        assert sent == []
+
+        operations.station_lab.state = CalibrationState.COMPLETE.value
+        operations._tick_beacon(1_000.0)
+        assert [frame.type for frame in sent] == [FrameType.BEACON]
+    finally:
         operations.close()
         workers.close(wait=True)
 
