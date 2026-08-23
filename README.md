@@ -214,19 +214,18 @@ Guardian supports both **VARA FM** and **VARA HF**.
 
 ### Compression, VARA encryption and final Morse ID
 
-* VARA keeps its native `COMPRESSION TEXT` baseline. The optional **VARA
-  FILES compression** setting switches the modem to its file-transfer codec
-  for Guardian's complete binary message bundle.
-* **Adaptive Guardian compression** works before the selected payload modem,
-  so it behaves the same over VARA and Guardian OFDM VHF. Its own selection
-  engine losslessly compares stored ZIP, DEFLATE, BZIP2 and LZMA, a Guardian
-  mixed strategy that chooses per entry, and bundled ZPAQ 7.15, PAQ8PX v187 and
-  LPAQ8 high-ratio candidates. Each external candidate must pass a bounded
-  decode plus SHA-256 round-trip before it may win. A small `GCP1` envelope is
-  used only after the next hop actively advertises the matching decoder;
-  otherwise the sender falls back to standard ZIP before payload transfer.
-  No LLM or online service is used. Native VARA FILES and Guardian compression
-  are mutually exclusive to avoid a counterproductive double-compression pass.
+* VARA keeps its native `COMPRESSION TEXT` baseline.
+  The alternative **VARA FILES compression** checkbox switches the vendor modem
+  to its binary file codec.
+* **Guardian compression** works before the selected payload modem, so it
+  behaves the same over VARA and Guardian OFDM VHF. A measured 250 kB
+  CSV/PDF/PNG/JPEG comparison selected one codec: standard-library BZIP2 at
+  level 9. Guardian runs it once and uses the result only when it is smaller
+  than the ordinary interoperable ZIP bundle. Already compressed PNG/JPEG data
+  therefore does not grow. There is no runtime candidate search, bundled
+  compressor executable, LLM, cloud service or lossy conversion.
+  VARA FILES and Guardian BZIP2 are mutually exclusive; either one or neither
+  may be selected.
 * VARA's optional **AES-256 encryption** can be configured for authorised
   non-amateur/commercial service. Both peers need the same fixed key. Observe
   the rules of the radio service and frequency in use; encrypted amateur-radio
@@ -472,10 +471,10 @@ This is how the modem gets tuned: a capture lets the whole receiver be re-run ov
 
 # Current status
 
-Guardian **2.3.4** is the current G2 release. It retains the 2.3.3 capacity-modem
-work and adds an entirely local, paired iOS/Android companion for station
-status, mail queueing, field notes and a deliberately narrow, explicitly armed
-emergency-send path. See [the 2.3.4 release notes](docs/RELEASE_NOTES_2.3.4.md),
+Guardian **2.3.5** is the current G2 build. It simplifies modem testing and
+compression, fixes radio AutoTune and removes the long wait before the
+post-transfer control acknowledgement. See
+[the 2.3.5 release notes](docs/RELEASE_NOTES_2.3.5.md),
 [current status](STATUS.md) and [G2 modem guide](docs/G2_MODEM.md).
 
 | Capability                      | Status                             |

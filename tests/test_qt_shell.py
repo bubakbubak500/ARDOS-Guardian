@@ -8,11 +8,12 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from guardian.i18n import Language, set_language
 from guardian.modem.recorder import RecordingSummary
 from guardian.ofdm.config import profile_or_default
-from guardian.qt.capture_dialog import CaptureResultDialog
+from guardian.operations import StationLabStatus
 from guardian.qt.runtime import ShellRuntime
 from guardian.services import MailboxSnapshot
 from guardian.qt.shell import GuardianMainWindow
 from guardian.qt.theme import DARK_TOKENS, LIGHT_TOKENS, ThemePreference
+from guardian.station_lab import CalibrationState
 
 
 def _application() -> QApplication:
@@ -113,6 +114,47 @@ def test_no_cat_header_shows_manual_frequency_and_qsy_defaults_to_cancel(
         assert "OK2IPW" in asked[0][0]
         assert "145.5500 MHz" in asked[0][0]
         assert asked[0][1] == QMessageBox.StandardButton.Cancel
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_incoming_autotune_offer_interrupts_any_workspace_and_can_be_accepted(
+    tmp_path, monkeypatch
+) -> None:
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-autotune-offer.ini"),
+        QSettings.Format.IniFormat,
+    )
+    runtime = ShellRuntime()
+    window = GuardianMainWindow(runtime, settings)
+    asked = []
+
+    def question(*args):
+        asked.append(args)
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(question))
+    try:
+        window._show_workspace("home")
+        runtime.operations.station_lab = StationLabStatus(
+            state=CalibrationState.WAITING_APPROVAL.value,
+            peer="OK1AAA",
+            session_id=22,
+            pending_offer=True,
+            message="incoming test",
+        )
+
+        window._poll_station_lab_offer()
+
+        assert len(asked) == 1
+        assert "OK1AAA" in asked[0][2]
+        assert window.workspace_stack.currentWidget() is window.workspace_names["station_lab"]
+        assert runtime.operations.station_lab.state == CalibrationState.PREPARING.value
+        assert not runtime.operations.station_lab.pending_offer
+        window._poll_station_lab_offer()
+        assert len(asked) == 1
     finally:
         window.close()
         runtime.close()
@@ -333,8 +375,10 @@ def _fake_recorder(runtime, monkeypatch, summary=None):
     state = {"active": False, "started": 0, "stopped": 0,
              "seconds": 0.0, "level": 0.0, "path": summary.path if summary else None}
 
-    def start():
+    def start(*, sample_rate=None, exclusive=False):
         state["started"] += 1
+        state["sample_rate"] = sample_rate
+        state["exclusive"] = exclusive
         state["active"] = summary is not None
         return summary.path if summary is not None else None
 
@@ -356,7 +400,7 @@ def _fake_recorder(runtime, monkeypatch, summary=None):
     return state
 
 
-def test_the_recording_control_toggles_from_the_home_page_and_the_menu(
+def test_the_recording_control_lives_in_modem_files(
     tmp_path, monkeypatch
 ) -> None:
     _application()
@@ -376,25 +420,21 @@ def test_the_recording_control_toggles_from_the_home_page_and_the_menu(
     )
     state = _fake_recorder(runtime, monkeypatch, summary)
     try:
-        assert window.record_button.text() == "Record received audio"
-        assert window.record_action.text() == "Record received audio"
-        # Started from the button, which is the one reached at the radio.
-        window.record_button.click()
+        workspace = window.workspace_names["modem"]
+        assert not hasattr(window, "record_button")
+        assert not hasattr(window, "record_action")
+        assert workspace.tabs.count() == 1
+        assert workspace.tabs.tabText(0) == "Files"
+        assert workspace.record_button.text() == "Record received audio"
+        workspace.record_button.click()
         assert state["started"] == 1
-        assert window.record_button.text() == "Stop recording"
-        assert window.record_action.text() == "Stop recording"
-        # Stopped from the menu: the two are one state, not two.
-        window.record_action.trigger()
+        assert state["sample_rate"] == workspace.selected_profile().sample_rate
+        assert state["exclusive"]
+        assert workspace.record_button.text() == "Stop recording"
+        workspace.record_button.click()
         assert state["stopped"] == 1
-        assert window.record_button.text() == "Record received audio"
-        assert window.record_action.text() == "Record received audio"
-        dialog = window.capture_dialog
-        assert isinstance(dialog, CaptureResultDialog)
-        assert str(summary.path) in dialog.path_label.text()
-        # The file is already closed on disk, so the report never blocks the
-        # station and closing it cannot lose the capture.
-        assert not dialog.isModal()
-        dialog.close()
+        assert workspace.record_button.text() == "Record received audio"
+        assert workspace._running == "modem-decode"
     finally:
         window.close()
         runtime.close()
@@ -415,17 +455,17 @@ def test_a_recording_that_will_not_start_never_claims_to_be_running(
     window = GuardianMainWindow(runtime, settings)
     state = _fake_recorder(runtime, monkeypatch, summary=None)
     try:
-        window.record_button.click()
+        workspace = window.workspace_names["modem"]
+        workspace.record_button.click()
         assert state["started"] == 1
         assert not state["active"]
-        assert window.record_button.text() == "Record received audio"
-        assert window.record_action.text() == "Record received audio"
-        assert window.recording_indicator.property("statusRole") == "inactive"
-        assert "could not start" in window.statusBar().currentMessage()
+        assert workspace.record_button.text() == "Record received audio"
+        assert workspace.recording_indicator.property("statusRole") == "inactive"
+        assert "could not start" in workspace.capture_status.text()
         assert getattr(window, "capture_dialog", None) is None
         # The poll must not talk it back into a recording state either.
-        window._apply_snapshot(runtime.snapshots.read())
-        assert window.record_button.text() == "Record received audio"
+        workspace.refresh()
+        assert workspace.record_button.text() == "Record received audio"
     finally:
         window.close()
         runtime.close()
@@ -453,33 +493,34 @@ def test_the_live_indicator_shows_elapsed_time_and_the_peak_level_so_far(
     )
     state = _fake_recorder(runtime, monkeypatch, summary)
     try:
-        window.record_button.click()
+        workspace = window.workspace_names["modem"]
+        workspace.record_button.click()
         state["seconds"], state["level"] = 12.5, 0.35
-        window._apply_snapshot(runtime.snapshots.read())
-        text = window.recording_indicator.text()
+        workspace.refresh()
+        text = workspace.recording_indicator.text()
         assert "12.5 s" in text
         assert "-9 dBFS" in text
-        assert window.recording_indicator.property("statusRole") == "success"
+        assert workspace.recording_indicator.property("statusRole") == "success"
 
         # At full scale the peaks are being flattened; say so, in danger colour.
         state["seconds"], state["level"] = 20.0, 1.0
-        window._apply_snapshot(runtime.snapshots.read())
-        text = window.recording_indicator.text()
+        workspace.refresh()
+        text = workspace.recording_indicator.text()
         assert "20.0 s" in text
         assert "clipping" in text
-        assert window.recording_indicator.property("statusRole") == "danger"
+        assert workspace.recording_indicator.property("statusRole") == "danger"
 
         # Below -60 dBFS nothing is connected, whatever the elapsed time says.
         state["level"] = 0.0005
-        window._apply_snapshot(runtime.snapshots.read())
-        assert "silent" in window.recording_indicator.text()
-        assert window.recording_indicator.property("statusRole") == "warning"
+        workspace.refresh()
+        assert "silent" in workspace.recording_indicator.text()
+        assert workspace.recording_indicator.property("statusRole") == "warning"
 
         # No sample at all is not a measurement of zero.
         state["level"] = 0.0
-        window._apply_snapshot(runtime.snapshots.read())
-        assert "unavailable" in window.recording_indicator.text()
-        assert "0 dBFS" not in window.recording_indicator.text()
+        workspace.refresh()
+        assert "unavailable" in workspace.recording_indicator.text()
+        assert "0 dBFS" not in workspace.recording_indicator.text()
     finally:
         window.close()
         runtime.close()
@@ -504,14 +545,14 @@ def test_the_recording_control_reads_in_czech_too(tmp_path, monkeypatch) -> None
     )
     state = _fake_recorder(runtime, monkeypatch, summary)
     try:
-        assert window.record_button.text() == "Nahrávat přijímaný zvuk"
-        assert window.record_action.text() == "Nahrávat přijímaný zvuk"
-        window.record_button.click()
-        assert window.record_button.text() == "Ukončit nahrávání"
+        workspace = window.workspace_names["modem"]
+        assert workspace.record_button.text() == "Nahrávat přijímaný zvuk"
+        workspace.record_button.click()
+        assert workspace.record_button.text() == "Ukončit nahrávání"
         state["seconds"], state["level"] = 4.0, 1.0
-        window._apply_snapshot(runtime.snapshots.read())
-        assert "Nahrávám 4.0 s" in window.recording_indicator.text()
-        assert "přebuzeno" in window.recording_indicator.text()
+        workspace.refresh()
+        assert "Nahrávám 4.0 s" in workspace.recording_indicator.text()
+        assert "přebuzeno" in workspace.recording_indicator.text()
     finally:
         window.close()
         runtime.close()
@@ -540,7 +581,7 @@ def test_closing_the_shell_closes_an_open_capture_file(
     )
     state = _fake_recorder(runtime, monkeypatch, summary)
     try:
-        window.record_button.click()
+        window.workspace_names["modem"].record_button.click()
         assert state["active"]
         window.close()
         assert state["stopped"] == 1

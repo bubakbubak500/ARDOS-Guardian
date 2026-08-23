@@ -967,6 +967,7 @@ class SettingsDialog(QDialog):
         form.addRow(self.vara_hf_bandwidth_label, self.vara_hf_bandwidth)
         self.vara_mode.currentTextChanged.connect(self._sync_bandwidth_row)
         self._ofdm_only_rows: list[tuple[QLabel | None, QWidget]] = []
+        self._ofdm_row_for: dict[QWidget, tuple[QLabel | None, QWidget]] = {}
         for text, widget in (
             (
                 dual("Guardian G2 waveform", "Vlnový průběh Guardian G2"),
@@ -1034,11 +1035,14 @@ class SettingsDialog(QDialog):
         ):
             label = QLabel(text)
             form.addRow(label, widget)
-            self._ofdm_only_rows.append((label, widget))
+            row = (label, widget)
+            self._ofdm_only_rows.append(row)
+            self._ofdm_row_for[widget] = row
         # Full width and no caption of its own: it is advice about the choice
         # above it, not another field.
         form.addRow(self.ofdm_profile_hint)
         self._ofdm_only_rows.append((None, self.ofdm_profile_hint))
+        self._ofdm_row_for[self.ofdm_profile_hint] = (None, self.ofdm_profile_hint)
         form.addRow(dual("Control-burst modem", "Modem řídicích rámců"), self.control_modem)
 
         form.addRow(self.vara_host_ptt)
@@ -1313,7 +1317,56 @@ class SettingsDialog(QDialog):
         self.ofdm_max_train.setEnabled(
             not legacy and int(self.ofdm_train_bursts.currentData()) > 1
         )
+        if hasattr(self, "_ofdm_row_for"):
+            self._sync_modulation_rows()
         self._sync_ofdm_summary()
+
+    def _sync_modulation_rows(self) -> None:
+        """Collapse inactive branches of the G2 modem configuration."""
+        if not hasattr(self, "_ofdm_row_for"):
+            return
+        payload_enabled = self.payload_backend.currentData() == "ofdm_vhf"
+        classic = self.g2_waveform.currentData() == "ofdm"
+        legacy = self.ofdm_legacy_mode.isChecked()
+        adaptive_fec = self.ofdm_adaptive_fec.isChecked()
+        adaptive_burst = self.ofdm_adaptive_burst.isChecked()
+        train = int(self.ofdm_train_bursts.currentData()) > 1
+        superframe = self.ofdm_superframe.isChecked()
+
+        visible = {
+            self.g2_waveform: True,
+            self.g2_mcs: not classic,
+            self.g2_bandwidth: not classic,
+            self.ofdm_profile: classic,
+            self.ofdm_mcs: classic,
+            self.ofdm_profile_hint: classic,
+            self.g2_adaptive_mcs: not legacy,
+            self.ofdm_adaptive_fec: not legacy,
+            self.ofdm_modern_ldpc: not legacy,
+            self.ofdm_fec: not legacy and not adaptive_fec,
+            self.ofdm_adaptive_burst: not legacy,
+            self.ofdm_burst_bytes: not legacy and not adaptive_burst,
+            self.ofdm_min_burst_bytes: not legacy and adaptive_burst,
+            self.ofdm_max_burst_bytes: not legacy and adaptive_burst,
+            self.ofdm_arq_block_bytes: not legacy,
+            self.ofdm_timeout_multiplier: True,
+            self.ofdm_train_bursts: not legacy,
+            self.ofdm_adaptive_train: not legacy and train,
+            self.ofdm_superframe: not legacy and train,
+            self.ofdm_train_gap: not legacy and train and not superframe,
+            self.ofdm_max_train: not legacy and train,
+            self.ofdm_legacy_mode: True,
+            self.ofdm_tx_lead: True,
+            self.ofdm_tx_tail: True,
+            self.ofdm_max_retries: True,
+            self.ofdm_summary: True,
+        }
+        for widget, row in self._ofdm_row_for.items():
+            show = payload_enabled and visible.get(widget, True)
+            label, field = row
+            field.setVisible(show)
+            if label is not None:
+                label.setVisible(show)
 
     def _sync_ofdm_summary(self) -> None:
         """Restate the waveform whenever the profile picker moves.
@@ -1428,6 +1481,7 @@ class SettingsDialog(QDialog):
             widget.setVisible(ofdm)
             if label is not None:
                 label.setVisible(ofdm)
+        self._sync_modulation_rows()
         self._sync_bandwidth_row(self.vara_mode.currentText())
 
     def _sync_bandwidth_row(self, mode: str) -> None:
@@ -1443,13 +1497,15 @@ class SettingsDialog(QDialog):
         form = self._page(
             dual("Compression & identification", "Komprese a identifikace"),
             dual(
-                "Choose one lossless compression layer. VARA FILES belongs to "
-                "the vendor modem; Guardian compression works identically over "
-                "VARA and OFDM and keeps the smallest safely decodable candidate. "
+                "Choose either native VARA FILES compression or Guardian's one-pass "
+                "BZIP2 compression; both may remain off, but they cannot be combined. "
+                "Guardian BZIP2 works over VARA and OFDM and leaves already packed "
+                "data unchanged when compression would make it larger. "
                 "Encryption is VARA's commercial/non-amateur AES mode.",
-                "Zvolte jednu bezeztrátovou kompresní vrstvu. VARA FILES patří "
-                "modemu dodavatele; komprese Guardian funguje shodně přes VARA i "
-                "OFDM a ponechá nejmenší bezpečně rozbalitelnou variantu. "
+                "Zvolte buď nativní kompresi VARA FILES, nebo jeden průchod Guardian "
+                "BZIP2; obě mohou zůstat vypnuté, ale nelze je kombinovat. Guardian "
+                "BZIP2 funguje přes VARA i OFDM a již komprimovaná data ponechá "
+                "beze změny, pokud by je komprese zvětšila. "
                 "Šifrování je komerční/neamatérský režim AES modemu VARA.",
             ),
         )
@@ -1459,23 +1515,21 @@ class SettingsDialog(QDialog):
         ))
         self.vara_file_compression.setChecked(self.config.vara_file_compression)
         self.vara_file_compression.setToolTip(dual(
-            "Switches VARA from its permanent COMPRESSION TEXT baseline to "
-            "COMPRESSION FILES for Guardian bundles.",
-            "Přepne VARA ze stálého základu COMPRESSION TEXT na COMPRESSION "
-            "FILES pro balíčky Guardianu.",
+            "Switches VARA from COMPRESSION TEXT to its binary FILES codec. "
+            "Available only as an alternative to Guardian compression.",
+            "Přepne VARA z COMPRESSION TEXT na jeho binární kodek FILES. "
+            "Je dostupný pouze jako alternativa ke kompresi Guardian.",
         ))
         self.guardian_compression = QCheckBox(dual(
-            "Use adaptive Guardian compression (VARA and OFDM)",
-            "Použít adaptivní kompresi Guardian (VARA i OFDM)",
+            "Use Guardian compression (BZIP2, VARA and OFDM)",
+            "Použít kompresi Guardian (BZIP2, VARA i OFDM)",
         ))
         self.guardian_compression.setChecked(self.config.guardian_compression)
         self.guardian_compression.setToolTip(dual(
-            "Losslessly compares stored, DEFLATE, BZIP2, LZMA, Guardian's "
-            "per-entry mix, ZPAQ, PAQ8PX and LPAQ8. High-ratio codecs must pass "
-            "a timed verification decode; no LLM, cloud or lossy conversion.",
-            "Bezeztrátově porovná ZIP varianty bez komprese, DEFLATE, BZIP2 a "
-            "LZMA, vlastní smíšenou strategii, ZPAQ, PAQ8PX a LPAQ8. Vysoce účinné "
-            "kodeky musí projít časově omezeným ověřovacím rozbalením; bez LLM, "
+            "Runs only BZIP2 once. The standard ZIP is retained when BZIP2 does "
+            "not reduce it; no candidate search, external tool, cloud or lossy conversion.",
+            "Spustí pouze jeden průchod BZIP2. Standardní ZIP zůstane zachován, "
+            "pokud jej BZIP2 nezmenší; bez hledání kandidátů, externích programů, "
             "cloudu a ztrátového převodu.",
         ))
 

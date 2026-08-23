@@ -158,7 +158,7 @@ def test_http_server_serves_shell_pairs_and_rejects_unpaired_state(controller):
     controller.poll()
     state = json.loads(opener.open(base + "/api/state?after=-1", timeout=2).read())
     assert state["station"] == "OK7PS"
-    assert state["version"] == "2.3.4"
+    assert state["version"] == "2.3.5"
 
 
 def test_wifi_direct_credentials_are_valid_and_station_specific():

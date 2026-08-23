@@ -909,8 +909,8 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Trasa k {destination} přes {next_hop} byla schválena pro asistované použití.",
     ),
     "network.live_topology": (
-        "Live topology (experimental)",
-        "Živá topologie (experimentální)",
+        "Live topology",
+        "Živá topologie",
     ),
     "network.discovery_auto_use": (
         "Use a discovered route immediately, without waiting for approval",
@@ -921,14 +921,14 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Automatické použití nic nedělá, dokud je hledání trasy vypnuté.",
     ),
     "network.link_advert_hint": (
-        "Experimental LINK_ADVERT: neighbours exchange direct observations and "
+        "LINK_ADVERT: neighbours exchange direct observations and "
         "the network draws its own map. Details are in Guardian help.",
-        "Experimentální LINK_ADVERT: sousedé si vyměňují přímá pozorování a síť "
+        "LINK_ADVERT: sousedé si vyměňují přímá pozorování a síť "
         "si kreslí vlastní mapu. Podrobnosti jsou v nápovědě Guardianu.",
     ),
     "network.link_advert_enabled": (
-        "Experimental: exchange LINK_ADVERT live topology",
-        "Experimentální: vyměňovat živou topologii LINK_ADVERT",
+        "Exchange LINK_ADVERT live topology",
+        "Vyměňovat živou topologii LINK_ADVERT",
     ),
     "network.link_advert_interval": ("Advertisement interval", "Interval oznámení"),
     "network.link_owner": ("Station", "Stanice"),

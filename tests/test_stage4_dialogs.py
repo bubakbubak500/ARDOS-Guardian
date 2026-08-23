@@ -704,6 +704,60 @@ def test_payload_selection_shows_only_the_rows_that_transport_uses() -> None:
         dialog.close()
 
 
+def test_g2_modulation_page_hides_every_inactive_configuration_branch() -> None:
+    _application()
+    config = StationConfig(
+        callsign="OK7PS",
+        payload_backend="ofdm_vhf",
+        g2_waveform="ofdm",
+        ofdm_adaptive_fec=True,
+        ofdm_adaptive_burst=True,
+        ofdm_train_bursts=1,
+    )
+    dialog = SettingsDialog(config, ThemePreference.SYSTEM)
+    try:
+        # Classic OFDM owns its profile and MCS; experimental geometry does not
+        # apply. Adaptive choices replace their fixed alternatives.
+        assert not dialog.ofdm_profile.isHidden()
+        assert not dialog.ofdm_mcs.isHidden()
+        assert dialog.g2_bandwidth.isHidden()
+        assert dialog.g2_mcs.isHidden()
+        assert dialog.ofdm_fec.isHidden()
+        assert dialog.ofdm_burst_bytes.isHidden()
+        assert not dialog.ofdm_min_burst_bytes.isHidden()
+        assert not dialog.ofdm_max_burst_bytes.isHidden()
+        assert dialog.ofdm_adaptive_train.isHidden()
+        assert dialog.ofdm_train_gap.isHidden()
+        assert dialog.ofdm_max_train.isHidden()
+
+        # Selecting another G2 family swaps only the waveform-specific rows.
+        dialog.g2_waveform.setCurrentIndex(
+            dialog.g2_waveform.findData("sc_fde_ftn")
+        )
+        assert dialog.ofdm_profile.isHidden()
+        assert dialog.ofdm_mcs.isHidden()
+        assert dialog.ofdm_profile_hint.isHidden()
+        assert not dialog.g2_bandwidth.isHidden()
+        assert not dialog.g2_mcs.isHidden()
+
+        # A fixed branch shows its one value, not the adaptive range beside it.
+        dialog.ofdm_adaptive_fec.setChecked(False)
+        dialog.ofdm_adaptive_burst.setChecked(False)
+        assert not dialog.ofdm_fec.isHidden()
+        assert not dialog.ofdm_burst_bytes.isHidden()
+        assert dialog.ofdm_min_burst_bytes.isHidden()
+        assert dialog.ofdm_max_burst_bytes.isHidden()
+
+        dialog.ofdm_train_bursts.setCurrentIndex(
+            dialog.ofdm_train_bursts.findData(4)
+        )
+        assert not dialog.ofdm_adaptive_train.isHidden()
+        assert not dialog.ofdm_superframe.isHidden()
+        assert not dialog.ofdm_max_train.isHidden()
+    finally:
+        dialog.close()
+
+
 def test_ofdm_summary_reports_the_resolved_profile_and_offers_no_dsp_fields() -> None:
     # The occupied RF bandwidth is still to be measured on real radios, so the
     # waveform geometry is reported, never offered as a field.

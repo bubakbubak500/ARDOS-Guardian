@@ -13,7 +13,6 @@ from pathlib import Path
 import numpy as np
 
 from .config import StationConfig, config_dir
-from .compression import external_codecs_available, is_guardian_envelope
 from .install.dependencies import find_vara_fm, find_vara_hf
 from .i18n import dual
 from .message import Folder, MessageStore, Status
@@ -133,6 +132,13 @@ ALERT_SWEEP_TX_WAIT = 30.0
 PTT_TEST_SECONDS = 2.0
 PTT_TEST_MAX_SECONDS = 5.0
 
+# Give a complete control-frame round trip time to finish before retrying, and
+# bound the attempts so an unanswered call cannot stay in "offering" forever.
+# Retries carry Q2/Q3 or F2/F3 tokens, avoiding the audio transport's duplicate
+# suppression while remaining compatible with the existing prefix-based mode.
+CALIBRATION_OFFER_MIN_INTERVAL = 9.0
+CALIBRATION_OFFER_ATTEMPTS = 3
+
 
 def control_mode_compatible(modem: str, mode: str) -> bool:
     """Whether one live control modem can be used on ``mode``.
@@ -189,6 +195,7 @@ class Operations:
         # Set while the operator is capturing received audio to a file.
         self._recorder: WavRecorder | None = None
         self._recorder_capture: AudioCapture | None = None
+        self._recording_suspended_control = False
         self._last_radio_poll = 0.0
         self._stored_inbound: set[int] = set()
         self._qsy_previous: int | None = None
@@ -217,6 +224,8 @@ class Operations:
         self._calibration_results: dict[int, ProbeResult] = {}
         self._calibration_last_rx_command: ProbeCommand | None = None
         self._calibration_initiator = False
+        self._calibration_offer_sent_at = 0.0
+        self._calibration_offer_attempts = 0
         self._restore_calibration_gain_after_crash()
 
     def _restore_calibration_gain_after_crash(self) -> None:
@@ -315,7 +324,6 @@ class Operations:
         net.channel_frequency = self.current_frequency
         net.ptt_delay_request = self._vara_keying_delay_request
         net.ofdm_payload_request = self._ofdm_payload_configured
-        net.guardian_codec_request = external_codecs_available
         net.on_final_ack_sent = self._on_final_ack_sent
         net.position = self.beacon_position
         net.working_channel_offer = self._working_channel_offer
@@ -775,7 +783,8 @@ class Operations:
     def recording_path(self) -> Path | None:
         return self._recorder.path if self._recorder is not None else None
 
-    def start_recording(self) -> Path | None:
+    def start_recording(self, *, sample_rate: int | None = None,
+                        exclusive: bool = False) -> Path | None:
         """Start writing received audio to a WAV file. Returns the path, or None.
 
         Two ways in, and the choice is not arbitrary. When the control channel is
@@ -804,9 +813,22 @@ class Operations:
         # bench would then reject it on the rate check and the session would have
         # to be repeated. When the control channel is being tapped its own rate
         # wins, because that stream is what is being copied.
+        suspended_control = False
+        if exclusive and self.audio_transport is not None:
+            try:
+                self._suspend_control()
+                suspended_control = True
+            except Exception as exc:  # noqa: BLE001 - refusal belongs in the log
+                self._log(f"Recording could not take the audio device: {exc}",
+                          LogLevel.ERROR, source="audio")
+                return None
+
         waveform = profile_or_default(self.config.ofdm_profile)
-        sample_rate = (self.audio_transport.fs if self.audio_transport is not None
-                       else waveform.sample_rate)
+        requested_rate = (waveform.sample_rate if sample_rate is None
+                          else max(1, int(sample_rate)))
+        tap_control = self.audio_transport is not None and not exclusive
+        sample_rate = (self.audio_transport.fs if tap_control
+                       else requested_rate)
         recorder = WavRecorder(
             capture_path(config_dir() / "captures"),
             sample_rate=sample_rate,
@@ -815,7 +837,7 @@ class Operations:
         capture = None
         try:
             recorder.start()
-            if self.audio_transport is not None:
+            if tap_control:
                 self.audio_transport.on_audio = recorder.write
                 source = self.audio_transport.actual_input_device_name or "control RX"
             else:
@@ -840,12 +862,15 @@ class Operations:
                 recorder.path.unlink(missing_ok=True)
             except OSError:
                 pass
+            if suspended_control:
+                self._resume_control()
             self._log(f"Recording could not start: {exc}", LogLevel.ERROR,
                       source="audio")
             return None
 
         self._recorder = recorder
         self._recorder_capture = capture
+        self._recording_suspended_control = suspended_control
         self._log(
             dual(
                 f"Recording received audio from {source} to {recorder.path.name} "
@@ -1013,6 +1038,7 @@ class Operations:
         self._calibration_initiator = True
         self._calibration_results.clear()
         self._calibration_commands.clear()
+        self._calibration_offer_attempts = 0
         self.station_lab = StationLabStatus(
             state=CalibrationState.OFFERING.value, peer=target,
             session_id=session_id, mode=selected_mode.value,
@@ -1021,11 +1047,42 @@ class Operations:
                 f"Volám {target} pro kalibraci stanice…",
             ),
         )
-        self.net.send_calibration_frame(
-            FrameType.CAL_OFFER, target, session_id,
-            "F1" if selected_mode is CalibrationMode.FULL else "Q1",
-        )
+        self._send_calibration_offer()
         return True
+
+    def _send_calibration_offer(self) -> None:
+        status = self.station_lab
+        attempt = self._calibration_offer_attempts + 1
+        self.net.send_calibration_frame(
+            FrameType.CAL_OFFER, status.peer, status.session_id,
+            f"{'F' if status.mode == CalibrationMode.FULL.value else 'Q'}{attempt}",
+        )
+        self._calibration_offer_attempts = attempt
+        self._calibration_offer_sent_at = time.monotonic()
+
+    def _tick_station_calibration(self, now: float) -> None:
+        """Retry the consent handshake and fail it cleanly when unanswered."""
+        status = self.station_lab
+        if status.state != CalibrationState.OFFERING.value:
+            return
+        interval = max(CALIBRATION_OFFER_MIN_INTERVAL, self.net.ack_timeout)
+        if now - self._calibration_offer_sent_at < interval:
+            return
+        if self._calibration_offer_attempts < CALIBRATION_OFFER_ATTEMPTS:
+            status.message = dual(
+                f"Calling {status.peer} again for station calibration…",
+                f"Znovu volám {status.peer} pro kalibraci stanice…",
+            )
+            self._send_calibration_offer()
+            return
+        self.net.send_calibration_frame(
+            FrameType.CAL_CANCEL, status.peer, status.session_id, "TIMEOUT"
+        )
+        status.state = CalibrationState.FAILED.value
+        status.error = dual(
+            f"{status.peer} did not answer the calibration request.",
+            f"{status.peer} neodpověděl na výzvu ke kalibraci.",
+        )
 
     def accept_station_calibration(self) -> bool:
         """Accept the pending offer locally; never called automatically by UI."""
@@ -1109,6 +1166,7 @@ class Operations:
         if frame.type is FrameType.CAL_ACCEPT:
             if status.state != CalibrationState.OFFERING.value:
                 return
+            self._calibration_offer_attempts = 0
             status.state = CalibrationState.PREPARING.value
             status.message = dual(
                 f"{status.peer} accepted; preparing the measurement.",
@@ -1185,6 +1243,31 @@ class Operations:
 
     def _calibration_offer(self, frame: ControlFrame) -> None:
         source = frame.source.strip().upper()
+        status = self.station_lab
+        same_offer = (
+            source
+            and source == status.peer
+            and frame.message_id == status.session_id
+        )
+        if same_offer:
+            # A repeated offer means either the first offer overlapped noise or
+            # our CAL_ACCEPT was lost. Preserve a pending operator decision; once
+            # accepted, re-ACK it instead of incorrectly telling the caller BUSY.
+            if status.pending_offer:
+                return
+            if (
+                not self._calibration_initiator
+                and status.state in {
+                    CalibrationState.PREPARING.value,
+                    CalibrationState.MEASURING.value,
+                    CalibrationState.WAITING_REPORT.value,
+                }
+            ):
+                self.net.send_calibration_frame(
+                    FrameType.CAL_ACCEPT, status.peer, status.session_id,
+                    "F1" if status.mode == CalibrationMode.FULL.value else "Q1",
+                )
+                return
         if not source or self.payload_active() or self.station_lab.state not in {
             CalibrationState.IDLE.value, CalibrationState.COMPLETE.value,
             CalibrationState.CANCELLED.value, CalibrationState.FAILED.value,
@@ -1511,13 +1594,22 @@ class Operations:
         """Close the capture and return its `RecordingSummary`, or None."""
         recorder, self._recorder = self._recorder, None
         capture, self._recorder_capture = self._recorder_capture, None
+        suspended_control, self._recording_suspended_control = (
+            self._recording_suspended_control, False
+        )
         if recorder is None:
+            if suspended_control:
+                self._resume_control()
             return None
         if self.audio_transport is not None and self.audio_transport.on_audio is not None:
             self.audio_transport.on_audio = None
-        if capture is not None:
-            capture.stop()
-        summary = recorder.stop()
+        try:
+            if capture is not None:
+                capture.stop()
+            summary = recorder.stop()
+        finally:
+            if suspended_control:
+                self._resume_control()
         self._log(
             dual(
                 f"Recording stopped: {summary.verdict()}",
@@ -1766,8 +1858,9 @@ class Operations:
         modem on whatever it was given at connect time.
 
         `CHAT OFF` bounds VARA's idle loops. TEXT compression remains the
-        baseline; the opt-in FILES mode is selected for binary bundles only
-        when the operator asks for it. Bandwidth and `P2P SESSION` are HF/SAT only -- the
+        baseline unless the operator selects VARA FILES. Guardian's BZIP2 layer
+        is the mutually exclusive transport-independent alternative. Bandwidth
+        and `P2P SESSION` are HF/SAT only -- the
         reference is explicit that P2P "must be used for P2P connections, not
         for Gateways connections", and FM answers WRONG to a BW command.
         """
@@ -2453,7 +2546,6 @@ class Operations:
         bundle: bytes,
         *,
         flags: Flags = Flags.NONE,
-        fallback_payload_bytes: bytes | None = None,
     ) -> None:
         self.net.send_message(
             final_dest=mail.final_dest,
@@ -2463,7 +2555,6 @@ class Operations:
             ttl=self.config.default_ttl,
             flags=flags,
             payload_bytes=bundle,
-            fallback_payload_bytes=fallback_payload_bytes,
         )
         self._log(
             dual(
@@ -2539,14 +2630,17 @@ class Operations:
                     self._announce_prepared_mail(mail, baseline)
                     return
                 encoding = result.value
-                flags = Flags.COMPRESSED if encoding.method != "stored" else Flags.NONE
-                high_ratio = is_guardian_envelope(encoding.data)
+                flags = (
+                    Flags.COMPRESSED
+                    if encoding.method == "bzip2"
+                    else Flags.NONE
+                )
                 self._log(
                     dual(
-                        f"Guardian compression selected {encoding.method} for "
+                        f"Guardian BZIP2 compression produced {encoding.method} for "
                         f"message #{mail.msg_id}: {encoding.baseline_size} → "
                         f"{len(encoding.data)} B ({encoding.saved_percent:.1f}% saved).",
-                        f"Komprese Guardian zvolila {encoding.method} pro zprávu "
+                        f"Komprese Guardian BZIP2 vytvořila {encoding.method} pro zprávu "
                         f"#{mail.msg_id}: {encoding.baseline_size} → "
                         f"{len(encoding.data)} B (úspora {encoding.saved_percent:.1f} %).",
                     ),
@@ -2556,12 +2650,11 @@ class Operations:
                     mail,
                     encoding.data,
                     flags=flags,
-                    fallback_payload_bytes=baseline if high_ratio else None,
                 )
 
             queued = self.workers.submit(
                 task_name,
-                mail.to_adaptive_bundle,
+                lambda: mail.to_guardian_bundle(baseline),
                 compressed,
             )
             if not queued:
@@ -2569,8 +2662,8 @@ class Operations:
                 return False
             self._log(
                 dual(
-                    f"Testing lossless Guardian codecs for message #{mail.msg_id}…",
-                    f"Testuji bezeztrátové kodeky Guardian pro zprávu #{mail.msg_id}…",
+                    f"Compressing message #{mail.msg_id} with Guardian BZIP2…",
+                    f"Komprimuji zprávu #{mail.msg_id} pomocí Guardian BZIP2…",
                 ),
                 source="payload",
             )
@@ -2592,6 +2685,7 @@ class Operations:
         if self.audio_transport is not None:
             self.audio_transport.pump()
         self.net.tick(now)
+        self._tick_station_calibration(now)
         self._tick_beacon(now)
         self._tick_auto_deliver(now)
         self._tick_scanner(now)

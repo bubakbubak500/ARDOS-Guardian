@@ -447,7 +447,7 @@ def test_the_send_lifecycle_matches_the_vara_backend_hook_for_hook() -> None:
                   lambda ok: events.append(("done", ok)))
 
     assert events == [
-        "acquire", ("qsy", "OK1AAA"), "pipe-open", "air",
+        "acquire", ("qsy", "OK1AAA"), "pipe-open", "air", "air",
         "pipe-close", "restore", "release", ("done", True),
     ]
 

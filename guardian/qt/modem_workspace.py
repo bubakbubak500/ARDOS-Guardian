@@ -40,6 +40,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from math import log10
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -64,6 +65,7 @@ from PySide6.QtWidgets import (
 
 from ..config import config_dir
 from ..i18n import dual, tr
+from ..modem.recorder import CLIP_THRESHOLD
 from ..ofdm import MCS_TABLE
 from ..ofdm import bench
 from ..ofdm.adaptation import AdaptationConfig, BURST_LADDER
@@ -87,6 +89,8 @@ SWEEP_TASK = "modem-sweep"
 FILE_TASK = "modem-test-file"
 DECODE_TASK = "modem-decode"
 TRANSMIT_TASK = "modem-transmit"
+
+_SILENT_LEVEL = 1e-3
 
 #: The gap `Operations.transmit_test_burst` leaves between bursts, and before the
 #: first one. It does not pass `gap_seconds`, so it gets `make_test_burst`'s own
@@ -118,6 +122,8 @@ class ModemWorkspace(QWidget):
         # keyed right now.
         self._transmit_started: float | None = None
         self._transmit_expected = 0.0
+        self._recording_profile = None
+        self._recording_bench = None
         # Worker threads never touch a widget. They put a line or a finished
         # sweep point here and the UI thread drains it, which is the same
         # arrangement `WorkerPool` itself uses for completions.
@@ -140,10 +146,11 @@ class ModemWorkspace(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
-        self.tabs.addTab(self._burst_page(), tr("modem.tab_burst"))
-        # These two pages simulate both ends entirely in memory. Retain their
+        # These pages simulate both ends entirely in memory. Retain their
         # implementation for development regression tests without presenting
         # them as tools that measure an operator's radio path.
+        self._developer_burst_page = self._burst_page()
+        self._developer_burst_page.hide()
         self._developer_transfer_page = self._transfer_page()
         self._developer_transfer_page.hide()
         self.sweep_page = self._sweep_page()
@@ -939,11 +946,19 @@ class ModemWorkspace(QWidget):
         layout.addWidget(open_hint)
 
         open_row = QHBoxLayout()
+        self.record_button = QPushButton(tr("record.start"))
+        self.record_button.clicked.connect(self.toggle_recording)
+        open_row.addWidget(self.record_button)
         self.open_button = QPushButton(tr("modem.open_wav"))
         self.open_button.clicked.connect(self.open_capture)
         open_row.addWidget(self.open_button)
         open_row.addStretch()
         layout.addLayout(open_row)
+
+        self.recording_indicator = QLabel(tr("record.idle"))
+        self.recording_indicator.setWordWrap(True)
+        self.recording_indicator.setProperty("statusRole", "inactive")
+        layout.addWidget(self.recording_indicator)
 
         self.capture_status = QLabel(tr("modem.idle"))
         self.capture_status.setWordWrap(True)
@@ -1176,6 +1191,71 @@ class ModemWorkspace(QWidget):
             self._render_capture,
         )
 
+    def toggle_recording(self) -> None:
+        """Record and immediately decode with the waveform selected above."""
+        operations = self.runtime.operations
+        if operations.recording_active():
+            summary = operations.stop_recording()
+            self._update_recording_indicator()
+            if summary is not None:
+                entry = self._recording_profile or self.selected_profile()
+                selected_bench = self._recording_bench or self.selected_bench()
+                self._recording_profile = None
+                self._recording_bench = None
+                self._submit(
+                    DECODE_TASK,
+                    lambda: selected_bench.decode_capture(entry, summary.path),
+                    self.capture_status,
+                    self._render_capture,
+                )
+            return
+        entry = self.selected_profile()
+        selected_bench = self.selected_bench()
+        started = operations.start_recording(
+            sample_rate=int(entry.sample_rate), exclusive=True
+        )
+        if started is not None:
+            self._recording_profile = entry
+            self._recording_bench = selected_bench
+        self._update_recording_indicator()
+        if started is None:
+            self.capture_status.setText(tr("record.start_failed"))
+            self.capture_status.setProperty("statusRole", "warning")
+        else:
+            self.capture_status.setText(dual(
+                f"Recording to {started.name} with {self.selected_profile().name}.",
+                f"Nahrávám do {started.name} pro {self.selected_profile().name}.",
+            ))
+            self.capture_status.setProperty("statusRole", "info")
+        repolish(self.capture_status)
+
+    def _update_recording_indicator(self) -> None:
+        operations = self.runtime.operations
+        active = operations.recording_active()
+        self._set_selection_enabled(not active and self._running is None)
+        self.record_button.setText(tr("record.stop") if active else tr("record.start"))
+        if not active:
+            self.recording_indicator.setText(tr("record.idle"))
+            self.recording_indicator.setProperty("statusRole", "inactive")
+            repolish(self.recording_indicator)
+            return
+        level = float(operations.recording_level())
+        text = tr(
+            "record.live",
+            seconds=f"{operations.recording_seconds():.1f}",
+            peak=(f"{20.0 * log10(level):.0f} dBFS"
+                  if level > 0.0 else tr("record.unavailable")),
+        )
+        if level >= CLIP_THRESHOLD:
+            role, note = "danger", tr("record.live_clipping")
+        elif level < _SILENT_LEVEL:
+            role, note = "warning", tr("record.live_silent")
+        else:
+            role, note = "success", ""
+        self.recording_indicator.setText(f"{text}  ·  {note}" if note else text)
+        self.recording_indicator.setProperty("statusRole", role)
+        repolish(self.recording_indicator)
+
     def _render_capture(self, result: bench.CaptureResult) -> None:
         metrics = result.metrics
         fields = self.capture_fields
@@ -1280,13 +1360,22 @@ class ModemWorkspace(QWidget):
         idle = task is None
         for button in (self.burst_button, self.transfer_button,
                        self.sweep_button, self.save_button,
-                       self.transmit_button, self.open_button):
+                       self.transmit_button, self.open_button,
+                       self.record_button):
             button.setEnabled(idle)
         self.sweep_cancel.setEnabled(task == SWEEP_TASK)
+        self._set_selection_enabled(idle and not self.runtime.operations.recording_active())
         if task != TRANSMIT_TASK:
             # Nothing is on the air, so nothing may still be counting -- even if
             # the transmission ended by failing rather than by finishing.
             self._transmit_started = None
+
+    def _set_selection_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.family_picker, self.profile_picker, self.mcs_picker,
+            self.fec_picker, self.burst_picker,
+        ):
+            widget.setEnabled(enabled)
 
     def _drain_pending(self) -> None:
         """Move whatever the worker thread produced into the widgets."""
@@ -1310,6 +1399,7 @@ class ModemWorkspace(QWidget):
         Only the filling-in as it happens depends on being looked at.
         """
         self._drain_pending()
+        self._update_recording_indicator()
         if self._running == TRANSMIT_TASK:
             self._show_transmit_progress()
 

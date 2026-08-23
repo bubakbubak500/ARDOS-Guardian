@@ -48,7 +48,6 @@ version = {attr = "guardian._version.__version__"}
 include = ["guardian*"]
 
 [tool.setuptools.package-data]
-"guardian.codecs" = ["vendor/*"]
 "guardian.companion.web" = ["*.html", "*.css", "*.js", "*.json", "*.webmanifest", "*.svg"]
 
 [tool.pytest.ini_options]

@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -443,6 +444,49 @@ def test_a_clean_sweep_says_no_block_was_ever_delivered_corrupted() -> None:
 
 # -- files ------------------------------------------------------------------- #
 
+def test_live_recording_uses_and_keeps_the_profile_selected_in_modem_test(
+    tmp_path, monkeypatch
+) -> None:
+    runtime, workspace = _workspace("WIDE_10K")
+    path = tmp_path / "selected-profile.wav"
+    state = {"active": False, "rates": [], "decoded": []}
+
+    def start(*, sample_rate, exclusive=False):
+        state["active"] = True
+        state["rates"].append(sample_rate)
+        state["exclusive"] = exclusive
+        return path
+
+    def stop():
+        state["active"] = False
+        return SimpleNamespace(path=path)
+
+    monkeypatch.setattr(runtime.operations, "recording_active",
+                        lambda: state["active"])
+    monkeypatch.setattr(runtime.operations, "recording_seconds", lambda: 0.0)
+    monkeypatch.setattr(runtime.operations, "recording_level", lambda: 0.0)
+    monkeypatch.setattr(runtime.operations, "start_recording", start)
+    monkeypatch.setattr(runtime.operations, "stop_recording", stop)
+    monkeypatch.setattr(
+        bench, "decode_capture",
+        lambda profile, source: state["decoded"].append((profile.name, source)),
+    )
+    monkeypatch.setattr(
+        workspace, "_submit",
+        lambda task, work, status, render: (work(), True)[1],
+    )
+    try:
+        selected = workspace.selected_profile()
+        workspace.record_button.click()
+        assert state["rates"] == [selected.sample_rate]
+        assert state["exclusive"]
+        assert not workspace.profile_picker.isEnabled()
+
+        workspace.record_button.click()
+        assert state["decoded"] == [(selected.name, path)]
+    finally:
+        runtime.close()
+
 def test_saving_a_transmit_test_file_writes_a_clean_decodable_waveform(
     tmp_path, monkeypatch
 ) -> None:
@@ -809,14 +853,14 @@ def test_the_shell_offers_the_modem_test_as_a_workspace(tmp_path) -> None:
         assert window.workspace_stack.currentWidget() is workspace
         assert window.workspace_actions["modem"].isChecked()
         assert "Modem test" in window.statusBar().currentMessage()
-        # Listed in Tools as well, where an operator looks for something that
-        # measures the station.
-        menu_entries = {
-            entry.text()
+        menus = {
+            menu.title().replace("&", ""): [
+                entry.text().replace("&", "") for entry in menu.actions()
+            ]
             for menu in window.menuBar().findChildren(QMenu)
-            for entry in menu.actions()
         }
-        assert "Modem test" in menu_entries
+        assert menus["View"].count("Modem test") == 1
+        assert "Modem test" not in menus["Tools"]
     finally:
         window.close()
         runtime.close()
@@ -874,10 +918,8 @@ def test_the_workspace_is_bilingual() -> None:
         )
         assert "datových" in workspace.facts_fields["carriers"].text()
         assert "pilotních" in workspace.facts_fields["carriers"].text()
-        assert workspace.tabs.count() == 2
-        assert [workspace.tabs.tabText(index) for index in range(2)] == [
-            "Jedno vysílání", "Soubory"
-        ]
+        assert workspace.tabs.count() == 1
+        assert workspace.tabs.tabText(0) == "Soubory"
         assert all("přenos" not in workspace.tabs.tabText(index).lower()
                    for index in range(workspace.tabs.count()))
         assert all("odstup" not in workspace.tabs.tabText(index).lower()
