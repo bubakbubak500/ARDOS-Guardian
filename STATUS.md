@@ -1,6 +1,6 @@
 # Guardian G2 — current status
 
-_Updated for release 2.3.4 on 2026-08-13._
+_Updated for release 2.3.7 on 2026-08-24._
 
 This is the canonical snapshot of what is implemented and what has actually
 been verified. Open work belongs in
@@ -9,7 +9,7 @@ history belongs in `docs/RELEASE_NOTES_*.md`.
 
 ## Current release
 
-Guardian G2 2.3.4 is the private experimental line. It retains Guardian's
+Guardian G2 2.3.7 is the private experimental line. It retains Guardian's
 ARDOS control plane, routing, store-and-forward mail and VARA FM/HF transport,
 and adds two G2 facilities:
 
@@ -37,8 +37,8 @@ VARA remains the compatible default payload transport.
 - SC-HS, SC-FTN, SC-FDE-FTN and SEFDM waveform families;
 - width profiles from 1K2 through 20K, a wider MCS ladder, modern LDPC,
   soft HARQ combining, adaptive MCS/train and protocol-v3 superframes;
-- Station Test, Quick Tune, Full Characterizer, raw WAV evidence and
-  deterministic FM-model reports;
+- Station Test with a bidirectional ten-level Quick Tune, automatic per-waveform
+  Guardian volume, raw WAV evidence and JSON/CSV reports;
 - the 2.3.4 offline phone companion: one-use pairing, revocable sessions,
   inbox/status view, safe queueing, explicitly armed emergency RF action,
   field notes and check-in timer.

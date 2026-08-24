@@ -55,6 +55,9 @@ def test_workspace_has_single_start_flow_and_incoming_consent(tmp_path, monkeypa
         lambda *args, **kwargs: QMessageBox.StandardButton.Ok,
     )
     try:
+        assert len(workspace.segments) == 10
+        assert not hasattr(workspace, "windows_gain")
+        assert not hasattr(workspace, "mode")
         workspace.peer.setText("ok2ipw")
         workspace.start.click()
         assert operations.started == ("OK2IPW", "quick")
@@ -73,4 +76,3 @@ def test_workspace_has_single_start_flow_and_incoming_consent(tmp_path, monkeypa
         assert operations.accepted
     finally:
         workspace.close()
-

@@ -392,40 +392,39 @@ def help_topics() -> list[HelpTopic]:
             "6a. Test stanice a AutoTune",
             """
             <h2>Station test and AutoTune</h2>
-            <p>Open <b>Operation → Station test &amp; AutoTune</b>, enter one
-            directly reachable Guardian callsign and choose Quick Tune or Full
-            characterizer. The peer sees an offer and must accept it locally.
-            Guardian then sends bounded measuring bursts in both directions and
-            records frame validity, SNR, EVM, level, clipping and goodput.</p>
-            <p>Quick Tune varies the modem's digital drive. On Windows it may
-            also vary the selected dedicated radio output, but first performs an
-            A/B check to prove that this mixer really changes the remote level.
-            The original mixer state is restored on completion, cancel, timeout
-            and failure. AutoTune cannot certify RF occupied bandwidth; verify
-            final deviation and adjacent-channel emissions with appropriate
-            radio or measurement equipment.</p>
-            <p>Every result is saved as JSON and CSV. Unsafe or unreliable rows
-            cannot become the recommendation, and nothing is permanently
-            applied until you review the report and press <b>Apply measured
-            profile</b>.</p>
+            <p>Open <b>Operation → Station test &amp; AutoTune</b> and enter one
+            directly reachable Guardian callsign. The peer sees an offer and
+            must accept it locally.</p>
+            <p>Quick Tune keeps the currently configured waveform, bandwidth,
+            modulation and FEC. It sends exactly ten otherwise identical bursts
+            at Guardian output levels from 10% to 100%. The peer measures all ten
+            bursts and returns one selected index. Guardian saves that level,
+            then the stations repeat the same procedure in the reverse direction.
+            Quick Tune does not change the Windows output mixer.</p>
+            <p>The ten-step result and received diagnostics are saved as JSON and
+            CSV, with raw WAV captures for decoded measuring bursts. A CRC-bad,
+            clipped or otherwise unsafe point cannot be selected. If no safe point
+            exists, the previous Guardian volume is retained. AutoTune cannot
+            certify RF occupied bandwidth; verify final deviation and
+            adjacent-channel emissions with appropriate equipment.</p>
             """,
             """
             <h2>Test stanice a AutoTune</h2>
-            <p>Otevřete <b>Provoz → Test stanice a AutoTune</b>, zadejte značku
-            přímo dostupného Guardianu a vyberte Rychlé ladění nebo Úplný test.
-            Protistanice uvidí nabídku a musí ji místně přijmout. Guardian pak
-            vyšle omezenou sadu měřicích burstů v obou směrech a zaznamená
-            platnost rámce, SNR, EVM, úroveň, clipping a goodput.</p>
-            <p>Rychlé ladění mění digitální úroveň modemu. Ve Windows může měnit
-            i vyhrazený výstup rádia, nejprve však A/B testem ověří, že tento
-            mixer opravdu mění vzdálenou úroveň. Původní stav mixeru obnoví po
-            dokončení, zrušení, timeoutu i chybě. AutoTune neumí certifikovat
-            obsazenou RF šířku; konečný zdvih a emise do sousedního kanálu ověřte
-            rádiem nebo vhodným měřidlem.</p>
-            <p>Každý výsledek se uloží do JSON a CSV. Nebezpečný nebo
-            nespolehlivý bod se nemůže stát doporučením a trvale se nic nezmění,
-            dokud report nezkontrolujete a nestisknete <b>Použít změřený
-            profil</b>.</p>
+            <p>Otevřete <b>Provoz → Test stanice a AutoTune</b> a zadejte značku
+            přímo dostupného Guardianu. Protistanice uvidí nabídku a musí ji
+            místně přijmout.</p>
+            <p>Quick Tune ponechá právě nastavený waveform, šířku, modulaci a FEC.
+            Vyšle přesně deset jinak shodných burstů s hlasitostí Guardianu od
+            10 do 100 %. Protistanice změří všech deset burstů a vrátí jediný
+            index vybrané úrovně. Guardian tuto úroveň uloží a stanice stejný
+            postup zopakují opačným směrem. Quick Tune nemění hlasitost výstupu
+            Windows.</p>
+            <p>Deset kroků a diagnostika příjmu se uloží do JSON a CSV; pro
+            dekódované měřicí bursty se ukládá také surový WAV. Bod s chybným CRC,
+            ořezem nebo jiným bezpečnostním problémem nelze vybrat. Když není
+            bezpečný žádný bod, zůstane zachována předchozí hlasitost Guardianu.
+            AutoTune neumí certifikovat obsazenou RF šířku; konečný zdvih a emise
+            do sousedního kanálu ověřte vhodným měřidlem.</p>
             """,
             "autotune station lab calibration windows volume deviation clipping kalibrace hlasitost zdvih",
         ),

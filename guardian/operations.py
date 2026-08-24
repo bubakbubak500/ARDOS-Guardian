@@ -43,6 +43,7 @@ from .station_lab import (
     GainJournal,
     ProbeCommand,
     ProbeResult,
+    QUICK_TUNE_LEVELS,
     WindowsGainController,
     full_plan,
     quick_plan,
@@ -105,6 +106,14 @@ class StationLabStatus:
     error: str = ""
 
 
+@dataclass
+class QuickSweepMeasurement:
+    """All ten local measurements plus the single result sent to the peer."""
+
+    report: CalibrationReport
+    selected: ProbeResult
+
+
 # The banner shows the newest; the rest stay for the log and for the operator
 # scrolling back after a busy few minutes.
 _ALERT_HISTORY = 20
@@ -145,6 +154,10 @@ CALIBRATION_RX_SETTLE_SECONDS = 0.35
 CALIBRATION_PROBE_GUARD_SECONDS = 0.85
 # A valid report returns in a few seconds; keep bounded DSP/AFSK headroom.
 CALIBRATION_REPORT_TIMEOUT = 8.0
+# The receiver has finished DSP slightly before the sender has restored its
+# AFSK stream. Delay the one sweep report so its preamble is never sent into
+# that last payload tail.
+CALIBRATION_SWEEP_REPORT_GUARD = 0.75
 
 
 def control_mode_compatible(modem: str, mode: str) -> bool:
@@ -1200,13 +1213,19 @@ class Operations:
                                     CalibrationState.MEASURING.value}:
                 return
             status.state = CalibrationState.MEASURING.value
+            status.total = (len(QUICK_TUNE_LEVELS)
+                            if status.mode == CalibrationMode.QUICK.value else 1)
+            status.progress = 0
             status.current = dual(
                 f"Receiving {command.waveform} MCS{command.mcs}",
                 f"Přijímám {command.waveform} MCS{command.mcs}",
             )
             self._calibration_last_rx_command = command
             self.workers.submit(
-                "station-calibration-rx", lambda: self._receive_calibration_probe(command),
+                "station-calibration-rx",
+                (lambda: self._receive_quick_calibration(command))
+                if status.mode == CalibrationMode.QUICK.value
+                else (lambda: self._receive_calibration_probe(command)),
                 self._station_calibration_rx_finished,
             )
         elif frame.type is FrameType.CAL_REPORT:
@@ -1316,23 +1335,9 @@ class Operations:
             report.host_api = str(host["name"])
         except Exception:  # noqa: BLE001 - diagnostic metadata is optional
             report.host_api = "unknown"
-        if status.mode == CalibrationMode.FULL.value:
-            plan = full_plan()
-        else:
-            from .ofdm.coding import fec_profile
-            fec = int(fec_profile(self.config.ofdm_fec))
-            base = quick_plan(
-                self.config.g2_waveform,
-                self.config.ofdm_mcs if self.config.g2_waveform == "ofdm"
-                else self.config.g2_mcs,
-                fec,
-                self.config.g2_bandwidth,
-            )
-            plan = [ProbeCommand(index, item.waveform, item.mcs, item.fec,
-                                 item.tx_scale, item.bandwidth)
-                    for index, item in enumerate(
-                        candidate for item in base for candidate in (item, item)
-                    )]
+        if status.mode == CalibrationMode.QUICK.value:
+            return self._run_quick_station_calibration(report)
+        plan = full_plan()
         status.total = len(plan)
         gain = WindowsGainController(self.config.audio_output)
         snapshot = gain.snapshot()
@@ -1469,6 +1474,341 @@ class Operations:
                 finally:
                     journal.clear()
 
+    def _quick_calibration_plan(self) -> list[ProbeCommand]:
+        from .ofdm.coding import fec_profile
+
+        return quick_plan(
+            self.config.g2_waveform,
+            self.config.ofdm_mcs if self.config.g2_waveform == "ofdm"
+            else self.config.g2_mcs,
+            int(fec_profile(self.config.ofdm_fec)),
+            self.config.g2_bandwidth,
+        )
+
+    def _calibration_profile_codec(self, command: ProbeCommand):
+        from .ofdm.link import OfdmBurstCodec
+        from .waveforms.framing import ExperimentalBurstCodec
+
+        if command.waveform == "ofdm":
+            return profile_or_default(self.config.ofdm_profile), OfdmBurstCodec()
+        return (
+            experimental_profile_for(command.waveform, command.bandwidth),
+            ExperimentalBurstCodec(),
+        )
+
+    def _build_calibration_waveform(self, command: ProbeCommand,
+                                    total: int) -> tuple[object, object, np.ndarray]:
+        from .ofdm.framing import OfdmFrameType, PhyHeader
+
+        profile, codec = self._calibration_profile_codec(command)
+        size = min(512, int(profile.block_size))
+        payload = np.random.default_rng(
+            self.station_lab.session_id
+        ).integers(0, 256, size, dtype=np.uint8).tobytes()
+        header = PhyHeader(
+            OfdmFrameType.DATA,
+            self.station_lab.session_id,
+            block_seq=command.sequence,
+            block_count=total,
+            mcs=command.mcs,
+            fec=command.fec,
+            payload_len=len(payload),
+        )
+        waveform = codec.build_burst(profile, header, payload)
+        return profile, codec, np.asarray(waveform, dtype=np.float64)
+
+    def _transmit_quick_calibration(self,
+                                    plan: list[ProbeCommand]) -> int:
+        output = resolve_device(self.config.audio_output, "output")
+        if not isinstance(output, int):
+            raise RuntimeError("the configured calibration output is unavailable")
+        completed = 0
+        acquired = False
+        try:
+            self._suspend_control()
+            acquired = True
+            sd = _import_sounddevice()
+            for index, command in enumerate(plan, 1):
+                if self._calibration_cancel.is_set():
+                    break
+                profile, _codec, waveform = self._build_calibration_waveform(
+                    command, len(plan)
+                )
+                sd.check_output_settings(
+                    device=output, samplerate=profile.sample_rate, channels=1
+                )
+                self.station_lab.current = dual(
+                    f"Level {index}/10: {command.tx_scale * 100:.0f}%",
+                    f"Úroveň {index}/10: {command.tx_scale * 100:.0f}%",
+                )
+                self._log(
+                    f"Quick Tune TX {index}/10: {command.waveform} "
+                    f"MCS{command.mcs}, volume={command.tx_scale * 100:.0f}%",
+                    source="station-lab",
+                )
+                transmit_waveform(
+                    sd, waveform * command.tx_scale,
+                    device=output,
+                    sample_rate=profile.sample_rate,
+                    ptt=self._payload_ptt,
+                    lead_seconds=max(
+                        self.config.ofdm_tx_lead_ms / 1000.0,
+                        PTT_LEAD_SECONDS,
+                    ),
+                    tail_seconds=max(
+                        self.config.ofdm_tx_tail_ms / 1000.0,
+                        PTT_TAIL_SECONDS,
+                    ),
+                )
+                completed = index
+                self.station_lab.progress = index
+            return completed
+        finally:
+            if acquired:
+                self._resume_control()
+
+    def _apply_quick_station_level(self, waveform: str, scale: float) -> None:
+        value = min(1.0, max(0.05, float(scale)))
+        self.config.g2_tx_scales[waveform] = value
+        payload = self.net.payload
+        if isinstance(payload, NegotiatedPayload):
+            backend = payload.backends.get("ofdm_vhf")
+        else:
+            backend = payload
+        if backend is not None and hasattr(backend, "tx_scale"):
+            backend.tx_scale = value
+        self.config.save()
+
+    def _run_quick_station_calibration(
+        self, report: CalibrationReport
+    ) -> CalibrationReport:
+        status = self.station_lab
+        plan = self._quick_calibration_plan()
+        status.total = len(plan)
+        status.progress = 0
+        self._calibration_commands = {item.sequence: item for item in plan}
+        self._calibration_results.clear()
+        self._calibration_report_ready.clear()
+        status.state = CalibrationState.MEASURING.value
+        self.net.send_calibration_frame(
+            FrameType.CAL_PROBE, status.peer, status.session_id, plan[0].encode()
+        )
+        control_flushed = (
+            self.audio_transport.wait_tx_idle(timeout=8.0)
+            if self.audio_transport is not None else True
+        )
+        if control_flushed:
+            time.sleep(CALIBRATION_PROBE_GUARD_SECONDS)
+            completed = self._transmit_quick_calibration(plan)
+        else:
+            completed = 0
+        status.progress = completed
+        status.state = CalibrationState.WAITING_REPORT.value
+        status.current = dual(
+            "Waiting for the peer's selected level",
+            "Čekám na vybranou úroveň protistanice",
+        )
+        got = (
+            self._calibration_report_ready.wait(CALIBRATION_REPORT_TIMEOUT)
+            if completed == len(plan) else False
+        )
+        selected = None
+        if got:
+            selected = next(iter(self._calibration_results.values()), None)
+        for command in plan:
+            if selected is not None and command.sequence == selected.sequence:
+                selected.payload_bytes = 512
+                report.results.append(selected)
+            else:
+                report.results.append(ProbeResult(
+                    command.sequence, command.tx_scale, command.waveform,
+                    command.mcs, command.fec, False,
+                    error="tested; peer selected another level",
+                    bandwidth=command.bandwidth,
+                ))
+        report.finish(
+            "complete" if selected is not None
+            else "peer did not return a sweep result"
+        )
+        if report.recommendation is not None:
+            self._apply_quick_station_level(
+                report.recommendation.waveform,
+                report.recommendation.tx_scale,
+            )
+            report.applied = True
+            status.message = dual(
+                f"Quick Tune selected and saved "
+                f"{report.recommendation.tx_scale * 100:.0f}%.",
+                f"Quick Tune vybral a uložil "
+                f"{report.recommendation.tx_scale * 100:.0f}%.",
+            )
+            self._log(
+                f"Quick Tune selected {report.recommendation.tx_scale * 100:.0f}% "
+                f"for {report.recommendation.waveform} MCS{report.recommendation.mcs}",
+                source="station-lab",
+            )
+        paths = report.save()
+        status.report_json, status.report_csv = map(str, paths)
+        self.net.send_calibration_frame(
+            FrameType.CAL_DONE, status.peer, status.session_id,
+            "TURN" if self._calibration_initiator else "DONE",
+        )
+        return report
+
+    def _receive_quick_calibration(
+        self, first: ProbeCommand
+    ) -> QuickSweepMeasurement:
+        from .ofdm.bench import write_wav
+        from .payload.ofdm_vhf import RadioAudioPipe
+
+        plan = [ProbeCommand(
+            index, first.waveform, first.mcs, first.fec, scale, first.bandwidth
+        ) for index, scale in enumerate(QUICK_TUNE_LEVELS)]
+        profile, codec, _waveform = self._build_calibration_waveform(
+            plan[0], len(plan)
+        )
+        pipe = RadioAudioPipe(
+            profile,
+            input_device=resolve_device(self.config.audio_input, "input"),
+            output_device=resolve_device(self.config.audio_output, "output"),
+            ptt=self._payload_ptt,
+            codec=codec,
+            tx_lead_ms=self.config.ofdm_tx_lead_ms,
+            tx_tail_ms=self.config.ofdm_tx_tail_ms,
+        )
+        started_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        report = CalibrationReport(
+            self.station_lab.session_id, self.station_lab.peer,
+            CalibrationMode.QUICK.value, "inbound", started_utc,
+            radio=self.config.radio,
+            audio_input=self.config.audio_input,
+            audio_output=self.config.audio_output,
+            frequency_hz=self.current_frequency(),
+        )
+        expected = 8.0
+        for command in plan:
+            candidate_profile, _candidate_codec, candidate = (
+                self._build_calibration_waveform(command, len(plan))
+            )
+            expected += len(candidate) / candidate_profile.sample_rate
+            expected += max(
+                self.config.ofdm_tx_lead_ms / 1000.0, PTT_LEAD_SECONDS
+            )
+            expected += max(
+                self.config.ofdm_tx_tail_ms / 1000.0, PTT_TAIL_SECONDS
+            )
+        deadline = time.monotonic() + expected
+        observed: dict[int, ProbeResult] = {}
+        acquired = False
+        try:
+            self._suspend_control()
+            acquired = True
+            time.sleep(CALIBRATION_RX_SETTLE_SECONDS)
+            pipe.start()
+            while (time.monotonic() < deadline
+                   and not self._calibration_cancel.is_set()):
+                remaining = deadline - time.monotonic()
+                samples = pipe.receive(timeout=min(3.0, remaining))
+                if samples is None:
+                    continue
+                decoded = codec.decode_burst(profile, samples)
+                header = decoded.header
+                if (header is None
+                        or header.msg_id != self.station_lab.session_id
+                        or not 0 <= header.block_seq < len(plan)):
+                    self._log(
+                        "Quick Tune RX ignored a key-up transient or unreadable capture",
+                        source="station-lab",
+                    )
+                    continue
+                command = plan[header.block_seq]
+                metrics = decoded.metrics
+                peak = float(np.max(np.abs(samples))) if len(samples) else 0.0
+                rms = float(np.sqrt(np.mean(np.asarray(samples) ** 2))) if len(samples) else 0.0
+                clipped = int(np.count_nonzero(np.abs(samples) >= 0.999))
+                raw_path = write_wav(
+                    config_dir() / "station-lab" / "captures" / (
+                        f"cal-{self.station_lab.session_id:08x}-{command.sequence:03d}-"
+                        f"{command.waveform}-{command.bandwidth}-mcs{command.mcs}.wav"
+                    ),
+                    samples,
+                    profile.sample_rate,
+                )
+                result = ProbeResult(
+                    command.sequence, command.tx_scale, command.waveform,
+                    command.mcs, command.fec, bool(decoded.ok),
+                    header_ok=True,
+                    snr_db=metrics.residual_snr_db or metrics.snr_db,
+                    evm_rms=metrics.evm_rms,
+                    audio_peak=(metrics.audio_rms * 10 ** (
+                        (metrics.crest_factor_db or 0) / 20
+                    ) if metrics.audio_rms is not None else peak),
+                    audio_rms=(metrics.audio_rms
+                               if metrics.audio_rms is not None else rms),
+                    clipped_samples=clipped,
+                    flat_top=clipped >= 3,
+                    sync_confidence=metrics.sync_confidence,
+                    cfo_hz=metrics.cfo_hz,
+                    payload_bytes=header.payload_len,
+                    wall_seconds=len(samples) / profile.sample_rate,
+                    error=metrics.error or "",
+                    bandwidth=command.bandwidth,
+                    capture_path=str(raw_path),
+                )
+                observed[command.sequence] = result
+                self.station_lab.progress = max(
+                    self.station_lab.progress, command.sequence + 1
+                )
+                self.station_lab.current = dual(
+                    f"Measured level {command.sequence + 1}/10: "
+                    f"{command.tx_scale * 100:.0f}%",
+                    f"Změřena úroveň {command.sequence + 1}/10: "
+                    f"{command.tx_scale * 100:.0f}%",
+                )
+                self._log(
+                    f"Quick Tune RX {command.sequence + 1}/10: "
+                    f"volume={command.tx_scale * 100:.0f}%, "
+                    f"CRC={'OK' if result.frame_ok else 'fail'}, "
+                    f"peak={result.audio_peak}, SNR={result.snr_db}, EVM={result.evm_rms}",
+                    source="station-lab",
+                )
+                if command.sequence == len(plan) - 1:
+                    break
+            for command in plan:
+                report.results.append(observed.get(command.sequence) or ProbeResult(
+                    command.sequence, command.tx_scale, command.waveform,
+                    command.mcs, command.fec, False,
+                    error="measuring burst was not decoded",
+                    bandwidth=command.bandwidth,
+                ))
+            report.finish("complete")
+            report.save()
+            if report.recommendation is not None:
+                selected = next(
+                    item for item in report.results
+                    if item.tx_scale == report.recommendation.tx_scale
+                )
+            else:
+                selected = max(
+                    report.results,
+                    key=lambda item: (
+                        item.frame_ok, item.header_ok,
+                        item.sync_confidence or 0.0,
+                        -(item.evm_rms if item.evm_rms is not None else 999.0),
+                    ),
+                )
+            self._log(
+                f"Quick Tune RX selected level {selected.sequence + 1}/10 "
+                f"({selected.tx_scale * 100:.0f}%, "
+                f"CRC={'OK' if selected.frame_ok else 'fail'})",
+                source="station-lab",
+            )
+            return QuickSweepMeasurement(report, selected)
+        finally:
+            pipe.stop()
+            if acquired:
+                self._resume_control()
+
     def _receive_calibration_probe(self, command: ProbeCommand) -> ProbeResult:
         from .ofdm.link import OfdmBurstCodec
         from .payload.ofdm_vhf import RadioAudioPipe
@@ -1551,6 +1891,19 @@ class Operations:
 
     def _station_calibration_rx_finished(self, task: TaskResult) -> None:
         status = self.station_lab
+        if isinstance(task.value, QuickSweepMeasurement):
+            if (self._calibration_cancel.is_set()
+                    or status.state == CalibrationState.CANCELLED.value):
+                return
+            measurement = task.value
+            time.sleep(CALIBRATION_SWEEP_REPORT_GUARD)
+            self.net.send_calibration_frame(
+                FrameType.CAL_REPORT, status.peer, status.session_id,
+                measurement.selected.encode_report(),
+            )
+            status.progress = len(QUICK_TUNE_LEVELS)
+            status.state = CalibrationState.PREPARING.value
+            return
         if task.error is not None:
             command = self._calibration_last_rx_command or ProbeCommand(
                 0, self.config.g2_waveform, 0, 0, 0.05
@@ -1593,10 +1946,19 @@ class Operations:
             return
         else:
             status.state = CalibrationState.COMPLETE.value
-        status.message = dual(
-            "Measurement complete. Review the report before applying it.",
-            "Měření dokončeno. Před použitím zkontrolujte report.",
-        )
+        if (status.report is not None
+                and status.report.mode == CalibrationMode.QUICK.value):
+            status.message = dual(
+                "Quick Tune complete. The selected Guardian volume was saved "
+                "automatically.",
+                "Quick Tune je dokončen. Vybraná hlasitost Guardianu byla "
+                "automaticky uložena.",
+            )
+        else:
+            status.message = dual(
+                "Measurement complete. Review the report before applying it.",
+                "Měření dokončeno. Před použitím zkontrolujte report.",
+            )
 
     def _close_recording_losing_its_source(self, reason: str) -> None:
         """End a tapped recording whose audio source is about to disappear.

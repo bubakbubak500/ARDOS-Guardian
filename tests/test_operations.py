@@ -1,6 +1,8 @@
 import time
 from types import SimpleNamespace
 
+import numpy as np
+
 from guardian.config import StationConfig
 from guardian.message import Folder, MailMessage, MessageStore, Status
 from guardian.operations import (
@@ -169,11 +171,11 @@ def test_repeated_accepted_calibration_offer_resends_accept_not_busy(
         workers.close(wait=True)
 
 
-def test_quick_tune_arms_the_peer_and_finishes_a_pruned_plan(
+def test_quick_tune_sends_one_command_and_applies_one_of_ten_levels(
     tmp_path, monkeypatch
 ) -> None:
     operations, workers, _mailstore = _operations(
-        tmp_path, calibration_windows_gain=False
+        tmp_path, calibration_windows_gain=True
     )
     operations.station_lab = StationLabStatus(
         state=CalibrationState.PREPARING.value,
@@ -185,6 +187,7 @@ def test_quick_tune_arms_the_peer_and_finishes_a_pruned_plan(
     operations.audio_transport = SimpleNamespace(
         wait_tx_idle=lambda timeout: True
     )
+    sent = _spy_transmissions(operations)
     waits = []
 
     class _Ready:
@@ -193,6 +196,13 @@ def test_quick_tune_arms_the_peer_and_finishes_a_pruned_plan(
 
         def wait(self, timeout):
             waits.append(timeout)
+            command = operations._calibration_commands[6]
+            operations._calibration_results[6] = ProbeResult(
+                command.sequence, command.tx_scale, command.waveform,
+                command.mcs, command.fec, True, header_ok=True,
+                snr_db=24.0, evm_rms=0.08, audio_peak=0.65,
+                sync_confidence=0.95, bandwidth=command.bandwidth,
+            )
             return True
 
     operations._calibration_report_ready = _Ready()
@@ -200,33 +210,162 @@ def test_quick_tune_arms_the_peer_and_finishes_a_pruned_plan(
     monkeypatch.setattr("guardian.operations.time.sleep", sleeps.append)
     monkeypatch.setattr(
         "guardian.operations.WindowsGainController",
-        lambda _device: SimpleNamespace(
-            snapshot=lambda: SimpleNamespace(supported=False)
+        lambda _device: (_ for _ in ()).throw(
+            AssertionError("Quick Tune must not touch Windows gain")
         ),
     )
     monkeypatch.setattr(
         CalibrationReport, "save",
         lambda self: (tmp_path / "report.json", tmp_path / "report.csv"),
     )
+    transmitted = []
 
-    def failed_burst(**_kwargs):
-        command = list(operations._calibration_commands.values())[-1]
-        operations._calibration_results[command.sequence] = ProbeResult(
-            command.sequence, command.tx_scale, command.waveform,
-            command.mcs, command.fec, False, bandwidth=command.bandwidth,
-        )
-        return 1.0
+    def transmit(plan):
+        transmitted.extend(plan)
+        operations.station_lab.progress = len(plan)
+        return len(plan)
 
-    operations.transmit_test_burst = failed_burst
+    operations._transmit_quick_calibration = transmit
     try:
         report = operations._run_station_calibration()
-        assert len(report.results) == 2
-        assert report.stop_reason == "signal/clipping cliff"
-        assert operations.station_lab.progress == 2
-        assert operations.station_lab.total == 2
-        assert sleeps == [CALIBRATION_PROBE_GUARD_SECONDS] * 2
-        assert waits == [CALIBRATION_REPORT_TIMEOUT] * 2
+        assert len(transmitted) == 10
+        assert [item.tx_scale for item in transmitted] == [
+            index / 10 for index in range(1, 11)
+        ]
+        assert [frame.type for frame in sent] == [
+            FrameType.CAL_PROBE, FrameType.CAL_DONE
+        ]
+        assert len(report.results) == 10
+        assert sum(item.frame_ok for item in report.results) == 1
+        assert report.stop_reason == "complete"
+        assert report.recommendation is not None
+        assert report.recommendation.tx_scale == 0.7
+        assert report.applied
+        assert operations.config.g2_tx_scales["ofdm"] == 0.7
+        assert operations.station_lab.progress == 10
+        assert operations.station_lab.total == 10
+        assert sleeps == [CALIBRATION_PROBE_GUARD_SECONDS]
+        assert waits == [CALIBRATION_REPORT_TIMEOUT]
     finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_quick_tune_plan_uses_only_the_current_waveform_and_modulation(
+    tmp_path,
+) -> None:
+    operations, workers, _mailstore = _operations(
+        tmp_path,
+        g2_waveform="sc_ftn",
+        g2_bandwidth="1K2",
+        g2_mcs=7,
+        ofdm_mcs=1,
+        ofdm_fec="2/3",
+    )
+    try:
+        plan = operations._quick_calibration_plan()
+
+        assert len(plan) == 10
+        assert {item.waveform for item in plan} == {"sc_ftn"}
+        assert {item.bandwidth for item in plan} == {"1K2"}
+        assert {item.mcs for item in plan} == {7}
+        assert {item.fec for item in plan} == {1}
+        assert [item.tx_scale for item in plan] == [
+            index / 10 for index in range(1, 11)
+        ]
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_quick_receiver_ignores_keyup_transient_and_reports_only_best_level(
+    tmp_path, monkeypatch
+) -> None:
+    from guardian.ofdm.framing import OfdmFrameType, PhyHeader
+    from guardian.operations import QuickSweepMeasurement
+
+    operations, workers, _mailstore = _operations(tmp_path)
+    operations.station_lab = StationLabStatus(
+        state=CalibrationState.MEASURING.value,
+        peer="OK1AAA", session_id=77, mode=CalibrationMode.QUICK.value,
+    )
+    operations.audio_transport = SimpleNamespace(
+        wait_tx_idle=lambda timeout: True,
+        stop=lambda: None,
+        start=lambda: None,
+    )
+    plan = operations._quick_calibration_plan()
+    profile = SimpleNamespace(sample_rate=100, block_size=512)
+
+    class Codec:
+        def decode_burst(self, _profile, samples):
+            marker = round(float(samples[0]) * 100)
+            metrics = SimpleNamespace(
+                residual_snr_db=None,
+                snr_db=(None if marker == 0 else 20.0 - abs((marker - 1) - 6)),
+                evm_rms=(None if marker == 0 else 0.08),
+                audio_rms=(None if marker == 0 else 0.55),
+                crest_factor_db=0.0,
+                sync_confidence=(None if marker == 0 else 0.95),
+                cfo_hz=0.0,
+                error=("no header" if marker == 0 else ""),
+            )
+            header = None if marker == 0 else PhyHeader(
+                OfdmFrameType.DATA, 77, block_seq=marker - 1,
+                block_count=10, mcs=1, fec=1, payload_len=512,
+            )
+            return SimpleNamespace(header=header, metrics=metrics, ok=header is not None)
+
+    codec = Codec()
+    captures = [np.asarray([0.0])] + [
+        np.asarray([index / 100.0]) for index in range(1, 11)
+    ]
+
+    class Pipe:
+        def __init__(self, *args, **kwargs):  # noqa: ARG002
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def receive(self, timeout):  # noqa: ARG002
+            return captures.pop(0) if captures else None
+
+    monkeypatch.setattr(
+        operations, "_build_calibration_waveform",
+        lambda command, total: (
+            profile, codec, np.ones(10, dtype=np.float64) * (command.sequence + 1)
+        ),
+    )
+    monkeypatch.setattr("guardian.payload.ofdm_vhf.RadioAudioPipe", Pipe)
+    monkeypatch.setattr(
+        "guardian.ofdm.bench.write_wav",
+        lambda path, samples, sample_rate: tmp_path / f"{samples[0]:.2f}.wav",
+    )
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda seconds: None)
+    sent = _spy_transmissions(operations)
+    try:
+        measurement = operations._receive_quick_calibration(plan[0])
+
+        assert isinstance(measurement, QuickSweepMeasurement)
+        assert len(measurement.report.results) == 10
+        assert measurement.report.recommendation is not None
+        assert measurement.selected.sequence == 6
+        assert measurement.selected.tx_scale == 0.7
+
+        operations._station_calibration_rx_finished(
+            SimpleNamespace(value=measurement, error=None)
+        )
+        reports = [frame for frame in sent if frame.type is FrameType.CAL_REPORT]
+        assert len(reports) == 1
+        decoded = ProbeResult.decode_report(reports[0].next_hop, plan[6])
+        assert decoded.sequence == 6
+        assert decoded.frame_ok
+    finally:
+        operations.audio_transport = None
         operations.close()
         workers.close(wait=True)
 

@@ -1,7 +1,7 @@
 # Guardian G2 soundcard modem
 
 This is the current operating and measurement guide for the modem shipped in
-Guardian G2 2.3.4. Dated waveform and station-lab reports remain useful
+Guardian G2 2.3.7. Dated waveform and station-lab reports remain useful
 evidence, but this document defines the current choices and compatibility
 boundary.
 
@@ -42,10 +42,9 @@ independently protected ARQ blocks.
 2. Run Quick Tune and retain its WAV and JSON/CSV evidence.
 3. Compare SC-FTN and SC-FDE-FTN at the same digital RMS and approximate RF
    deviation.
-4. Run Full Characterizer before opening a wider profile or denser MCS.
-5. Enable modern LDPC, then adaptive MCS, adaptive train and finally
+4. Enable modern LDPC, then adaptive MCS, adaptive train and finally
    Superframe v3.
-6. Back off immediately if header failures, clipping, unstable EVM/GMI or
+5. Back off immediately if header failures, clipping, unstable EVM/GMI or
    retransmissions rise.
 
 Select a mode by valid wall-clock goodput and completion probability, not raw

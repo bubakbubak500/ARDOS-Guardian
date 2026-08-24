@@ -13,6 +13,7 @@ from guardian.station_lab import (
     full_plan,
     quick_plan,
     recommend,
+    recommend_quick,
 )
 from guardian.protocol import FrameType
 from guardian.session import LoopbackBus, Orchestrator
@@ -69,9 +70,28 @@ def test_unsafe_or_unreliable_points_are_rejected():
 
 def test_plans_are_bounded_and_start_low():
     quick = quick_plan("sc_ftn", 6, 3)
-    assert quick[0].tx_scale == 0.2
+    assert [item.tx_scale for item in quick] == [index / 10 for index in range(1, 11)]
     assert all(a.tx_scale < b.tx_scale for a, b in zip(quick, quick[1:]))
     assert len(full_plan()) <= 96
+
+
+def test_quick_recommendation_uses_receive_quality_not_fixed_burst_goodput():
+    results = [
+        ProbeResult(
+            sequence=index, tx_scale=(index + 1) / 10,
+            waveform="ofdm", mcs=1, fec=1,
+            frame_ok=True, header_ok=True,
+            snr_db=20.0 - abs(index - 6), evm_rms=0.12,
+            audio_peak=0.55, sync_confidence=0.9,
+        )
+        for index in range(10)
+    ]
+
+    selected = recommend_quick(results)
+
+    assert selected is not None
+    assert selected.tx_scale == 0.7
+    assert selected.endpoint_volume is None
 
 
 def test_report_persists_raw_json_and_csv(tmp_path):

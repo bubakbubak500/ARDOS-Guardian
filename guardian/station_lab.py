@@ -30,6 +30,10 @@ MAX_CALIBRATION_SECONDS = 15 * 60
 MAX_CALIBRATION_BURSTS = 96
 MAX_DUTY_CYCLE = 0.50
 MIN_DIGITAL_HEADROOM_DB = 1.0
+# Quick Tune is deliberately a fixed ten-step volume dial. Keeping this in
+# one place makes the receiver, sender progress, report and UI agree on both
+# the number and meaning of every segment.
+QUICK_TUNE_LEVELS = tuple(index / 10.0 for index in range(1, 11))
 
 _FAMILY_ID = {
     "ofdm": 0, "sc_hs": 1, "sc_ftn": 2, "sefdm": 3,
@@ -130,6 +134,7 @@ class ProbeResult:
     endpoint_volume: float | None = None
     session_volume: float | None = None
     bandwidth: str = "2K7"
+    capture_path: str = ""
 
     @property
     def safe(self) -> bool:
@@ -217,7 +222,10 @@ class CalibrationReport:
     def finish(self, reason: str = "") -> None:
         self.completed_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.stop_reason = reason
-        self.recommendation = recommend(self.results)
+        self.recommendation = (
+            recommend_quick(self.results)
+            if self.mode == CalibrationMode.QUICK.value else recommend(self.results)
+        )
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, ensure_ascii=False)
@@ -244,10 +252,9 @@ class CalibrationReport:
 
 def quick_plan(waveform: str, mcs: int, fec: int,
                bandwidth: str = "2K7") -> list[ProbeCommand]:
-    """Conservative low-to-high ladder with a useful point at every step."""
-    scales = (0.20, 0.28, 0.40, 0.56, 0.72, 0.88)
+    """The ten positions of the Guardian output-volume dial, low to high."""
     return [ProbeCommand(i, waveform, mcs, fec, scale, bandwidth)
-            for i, scale in enumerate(scales)]
+            for i, scale in enumerate(QUICK_TUNE_LEVELS)]
 
 
 def full_plan(waveforms: list[str] | None = None,
@@ -310,6 +317,45 @@ def recommend(results: list[ProbeResult]) -> RecommendedPoint | None:
         waveform, mcs, fec, tx_scale, endpoint, score, margin,
         "lowest safe drive within 0.5 dB of the best measured goodput",
         bandwidth,
+    )
+
+
+def recommend_quick(results: list[ProbeResult]) -> RecommendedPoint | None:
+    """Select the cleanest byte-valid point from a ten-level volume sweep.
+
+    All Quick Tune bursts carry the same bytes at the same MCS, so comparing
+    goodput is meaningless. Rank actual receive quality instead: decoded SNR
+    (or EVM-derived SNR), sync confidence and audio headroom. An unsafe or
+    CRC-bad point is never eligible; exact ties favour the quieter setting.
+    """
+    eligible = [item for item in results if item.safe and item.frame_ok]
+    if not eligible:
+        return None
+
+    def quality(item: ProbeResult) -> float:
+        if item.snr_db is not None and math.isfinite(item.snr_db):
+            signal = float(item.snr_db)
+        elif item.evm_rms is not None and item.evm_rms > 0.0:
+            signal = -20.0 * math.log10(item.evm_rms)
+        else:
+            signal = 0.0
+        sync = 2.0 * float(item.sync_confidence or 0.0)
+        peak = item.audio_peak
+        headroom_penalty = 0.0
+        if peak is not None:
+            if peak < 0.15:
+                headroom_penalty += (0.15 - peak) * 20.0
+            elif peak > 0.90:
+                headroom_penalty += (peak - 0.90) * 40.0
+        return signal + sync - headroom_penalty
+
+    chosen = max(eligible, key=lambda item: (quality(item), -item.tx_scale))
+    score = quality(chosen)
+    return RecommendedPoint(
+        chosen.waveform, chosen.mcs, chosen.fec, chosen.tx_scale, None,
+        score, 0.0,
+        "best byte-valid receive quality with clipping and headroom guard",
+        chosen.bandwidth,
     )
 
 

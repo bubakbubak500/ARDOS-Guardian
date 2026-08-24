@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -18,7 +13,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -46,12 +40,12 @@ class StationLabWorkspace(QWidget):
         title.setObjectName("PanelHeader")
         outer.addWidget(title)
         intro = QLabel(dual(
-            "Guardian calls one consenting peer, measures the complete radio/audio "
-            "path in both directions, and proposes a safe modem drive. Nothing is "
-            "applied until you approve the final report.",
-            "Guardian zavolá jedné souhlasící protistanici, změří celou rádiovou a "
-            "zvukovou cestu a navrhne bezpečnou úroveň modemu. Nic se nepoužije, "
-            "dokud neschválíte finální report.",
+            "Guardian tests ten output levels using the currently selected waveform "
+            "and modulation. The peer returns one best level, Guardian saves it, "
+            "then both stations repeat the same sweep in the reverse direction.",
+            "Guardian otestuje deset úrovní aktuálně vybraného waveformu a modulace. "
+            "Protistanice vrátí jednu nejlepší úroveň, Guardian ji uloží a obě "
+            "stanice zopakují stejný sweep opačným směrem.",
         ))
         intro.setWordWrap(True)
         intro.setObjectName("Metadata")
@@ -64,21 +58,6 @@ class StationLabWorkspace(QWidget):
         self.peer.setMaxLength(12)
         self.peer.setPlaceholderText("OK2IPW")
         form.addRow(dual("Other station", "Protistanice"), self.peer)
-        self.mode = QComboBox()
-        self.mode.addItem(dual("Quick Tune (recommended)", "Rychlé ladění (doporučeno)"),
-                          "quick")
-        self.mode.addItem(dual("Full radio characterizer", "Úplný test rádia"), "full")
-        form.addRow(dual("Test", "Test"), self.mode)
-        self.windows_gain = QCheckBox(dual(
-            "Temporarily tune Windows volume for the dedicated radio output",
-            "Dočasně ladit hlasitost Windows pro vyhrazený výstup rádia",
-        ))
-        self.windows_gain.setChecked(bool(runtime.config.calibration_windows_gain))
-        self.windows_gain.setToolTip(dual(
-            "Guardian snapshots and restores the mixer on cancel, error, and completion.",
-            "Guardian uloží stav mixeru a obnoví jej při zrušení, chybě i dokončení.",
-        ))
-        form.addRow("", self.windows_gain)
         outer.addWidget(setup)
 
         actions = QHBoxLayout()
@@ -123,12 +102,18 @@ class StationLabWorkspace(QWidget):
         ))
         self.detail.setWordWrap(True)
         self.detail.setObjectName("Metadata")
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
-        self.progress.setValue(0)
+        self.segments = []
+        segment_row = QHBoxLayout()
+        segment_row.setSpacing(4)
+        for index in range(1, 11):
+            segment = QLabel(str(index))
+            segment.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            segment.setMinimumHeight(24)
+            segment_row.addWidget(segment, 1)
+            self.segments.append(segment)
         progress_layout.addWidget(self.state)
         progress_layout.addWidget(self.detail)
-        progress_layout.addWidget(self.progress)
+        progress_layout.addLayout(segment_row)
         outer.addWidget(progress_card)
 
         self.report_button = QPushButton(dual(
@@ -148,26 +133,23 @@ class StationLabWorkspace(QWidget):
                      "Zadejte volací značku protistanice."),
             )
             return
-        full = self.mode.currentData() == "full"
         answer = QMessageBox.question(
             self, dual("Start on-air station test?", "Spustit test stanice on-air?"),
             dual(
                 f"Guardian will call {peer} and, after they accept, key this radio "
-                f"for a {'full' if full else 'quick'} calibration. PTT and mixer "
-                "settings are restored on every exit path.",
+                "for a ten-level Quick Tune using the currently selected waveform "
+                "and modulation. The selected Guardian volume is saved automatically.",
                 f"Guardian zavolá {peer} a po přijetí zaklíčuje toto rádio pro "
-                f"{'úplnou' if full else 'rychlou'} kalibraci. PTT i mixer se "
-                "obnoví při každém ukončení.",
+                "desetistupňové rychlé ladění aktuálního waveformu a modulace. "
+                "Vybraná hlasitost Guardianu se uloží automaticky.",
             ),
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
         if answer != QMessageBox.StandardButton.Ok:
             return
-        self.runtime.config.calibration_windows_gain = self.windows_gain.isChecked()
-        self.runtime.config.save()
         if not self.runtime.operations.start_station_calibration(
-            peer, str(self.mode.currentData())
+            peer, "quick"
         ):
             QMessageBox.warning(
                 self, dual("Station test", "Test stanice"),
@@ -187,12 +169,19 @@ class StationLabWorkspace(QWidget):
         }
         self.start.setEnabled(not active and not status.pending_offer)
         self.peer.setEnabled(not active and not status.pending_offer)
-        self.mode.setEnabled(not active and not status.pending_offer)
-        self.windows_gain.setEnabled(not active and not status.pending_offer)
         self.cancel.setVisible(active)
-        total = max(1, int(status.total))
-        self.progress.setRange(0, total)
-        self.progress.setValue(min(total, int(status.progress)))
+        progress = max(0, min(10, int(status.progress)))
+        for index, segment in enumerate(self.segments, 1):
+            if index <= progress:
+                colours = ("#159a70", "#ffffff")
+            elif index == progress + 1 and active:
+                colours = ("#2879c7", "#ffffff")
+            else:
+                colours = ("#263442", "#9eb0c0")
+            segment.setStyleSheet(
+                f"background: {colours[0]}; color: {colours[1]}; "
+                "border-radius: 4px; padding: 3px;"
+            )
         label = {
             "idle": dual("Ready", "Připraveno"),
             "offering": dual("Calling the peer", "Volám protistanici"),
@@ -237,50 +226,28 @@ class StationLabReportDialog(QDialog):
         summary.setWordWrap(True)
         if recommendation is None:
             summary.setText(dual(
-                "No point met the safety and reliability gates. Nothing can be applied.",
-                "Žádný bod nesplnil bezpečnostní a spolehlivostní podmínky. "
-                "Nelze nic použít.",
+                "The peer could not identify a byte-valid, unclipped level. "
+                "The previous Guardian volume was kept.",
+                "Protistanice nenašla úroveň s platným rámcem bez ořezu. "
+                "Původní hlasitost Guardianu zůstala zachována.",
             ))
         else:
             summary.setText(dual(
-                f"Recommended: {recommendation.waveform} MCS{recommendation.mcs}, "
-                f"digital drive {recommendation.tx_scale * 100:.1f}%, measured "
-                f"goodput {recommendation.score_bps / 1000:.2f} kbit/s.",
-                f"Doporučeno: {recommendation.waveform} MCS{recommendation.mcs}, "
-                f"digitální úroveň {recommendation.tx_scale * 100:.1f} %, naměřený "
-                f"goodput {recommendation.score_bps / 1000:.2f} kbit/s.",
+                f"Selected and saved automatically: level "
+                f"{recommendation.tx_scale * 100:.0f}% for "
+                f"{recommendation.waveform} {recommendation.bandwidth}, "
+                f"MCS{recommendation.mcs}.",
+                f"Automaticky vybráno a uloženo: úroveň "
+                f"{recommendation.tx_scale * 100:.0f} % pro "
+                f"{recommendation.waveform} {recommendation.bandwidth}, "
+                f"MCS{recommendation.mcs}.",
             ))
         outer.addWidget(summary)
 
-        settings = QFrame()
-        settings.setObjectName("SurfaceCard")
-        form = QFormLayout(settings)
-        self.scale = QDoubleSpinBox()
-        self.scale.setRange(5.0, 100.0)
-        self.scale.setDecimals(1)
-        self.scale.setSuffix(" %")
-        self.scale.setValue((recommendation.tx_scale * 100.0)
-                            if recommendation is not None else 100.0)
-        form.addRow(dual("Digital drive", "Digitální úroveň"), self.scale)
-        self.endpoint = QDoubleSpinBox()
-        self.endpoint.setRange(1.0, 100.0)
-        self.endpoint.setDecimals(1)
-        self.endpoint.setSuffix(" %")
-        self.endpoint.setValue(
-            recommendation.endpoint_volume * 100.0
-            if recommendation is not None and recommendation.endpoint_volume is not None
-            else 100.0
-        )
-        self.endpoint.setEnabled(
-            recommendation is not None and recommendation.endpoint_volume is not None
-        )
-        form.addRow(dual("Windows endpoint", "Výstup Windows"), self.endpoint)
-        outer.addWidget(settings)
-
         columns = [
-            dual("Waveform", "Waveform"), "MCS", dual("Drive", "Úroveň"),
-            dual("Windows", "Windows"), "CRC", "SNR", "EVM", "Peak",
-            dual("Clipped", "Clip"), dual("Goodput", "Goodput"),
+            dual("Step", "Krok"), dual("Guardian volume", "Hlasitost Guardianu"),
+            dual("Result", "Výsledek"), "SNR", "EVM", "Peak",
+            dual("Sync", "Sync"), "CFO",
         ]
         table = QTableWidget(len(report.results), len(columns))
         table.setHorizontalHeaderLabels(columns)
@@ -288,14 +255,27 @@ class StationLabReportDialog(QDialog):
         table.horizontalHeader().setStretchLastSection(True)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         for row, item in enumerate(report.results):
+            selected = (
+                recommendation is not None
+                and abs(item.tx_scale - recommendation.tx_scale) < 1e-6
+            )
+            if selected:
+                outcome = dual("SELECTED", "VYBRÁNO")
+            elif item.error.startswith("tested; peer selected"):
+                outcome = dual("tested", "otestováno")
+            elif item.frame_ok and item.safe:
+                outcome = dual("valid", "platné")
+            elif item.header_ok:
+                outcome = dual("CRC error", "chyba CRC")
+            else:
+                outcome = dual("not decoded", "nedekódováno")
             values = (
-                item.waveform, str(item.mcs), f"{item.tx_scale * 100:.0f}%",
-                "—" if item.endpoint_volume is None else f"{item.endpoint_volume * 100:.0f}%",
-                dual("OK", "OK") if item.frame_ok else dual("fail", "chyba"),
+                str(item.sequence + 1), f"{item.tx_scale * 100:.0f}%", outcome,
                 "—" if item.snr_db is None else f"{item.snr_db:.1f} dB",
                 "—" if item.evm_rms is None else f"{item.evm_rms * 100:.1f}%",
                 "—" if item.audio_peak is None else f"{item.audio_peak:.3f}",
-                str(item.clipped_samples), f"{item.expected_goodput_bps / 1000:.2f} kbit/s",
+                "—" if item.sync_confidence is None else f"{item.sync_confidence * 100:.0f}%",
+                "—" if item.cfo_hz is None else f"{item.cfo_hz:.0f} Hz",
             )
             for column, value in enumerate(values):
                 table.setItem(row, column, QTableWidgetItem(value))
@@ -312,30 +292,5 @@ class StationLabReportDialog(QDialog):
         outer.addWidget(files)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        self.apply = buttons.addButton(
-            dual("Apply measured profile", "Použít změřený profil"),
-            QDialogButtonBox.ButtonRole.AcceptRole,
-        )
-        self.apply.setEnabled(recommendation is not None)
-        self.apply.clicked.connect(self._apply)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
-
-    def _apply(self) -> None:
-        recommendation = self.report.recommendation
-        if recommendation is None:
-            return
-        endpoint = (self.endpoint.value() / 100.0
-                    if recommendation.endpoint_volume is not None else None)
-        self.report.recommendation = replace(
-            recommendation, tx_scale=self.scale.value() / 100.0,
-            endpoint_volume=endpoint,
-            reason=recommendation.reason + "; operator-reviewed final value",
-        )
-        if self.runtime.operations.apply_station_calibration():
-            QMessageBox.information(
-                self, dual("Profile applied", "Profil použit"),
-                dual("The profile was saved. Future payload transfers use it.",
-                     "Profil byl uložen. Další datové přenosy jej použijí."),
-            )
-            self.apply.setEnabled(False)

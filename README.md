@@ -432,7 +432,7 @@ Once the required software and map data are present, the core messaging system o
 
 # Guardian G2 soundcard modem — waveforms of Guardian's own
 
-Guardian **2.3.4** includes the experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
+Guardian **2.3.7** includes the experimental payload transport that needs no VARA at all. Guardian generates the waveform itself, puts it on the air through the soundcard and keys the radio through its own PTT.
 
 Select it in *Settings → Payload* as **Guardian G2 soundcard modem (Experimental)**. VARA P2P stays the default, and a G2 modem station and a VARA station can talk to each other: the two peers agree on a transport during the ordinary control handshake, and unless *both* are configured for the built-in modem the pair falls back to VARA before anything is transmitted.
 
@@ -440,9 +440,10 @@ The established OFDM implementation remains the compatibility baseline.
 Separately selectable SC-HS, SC-FTN, SC-FDE-FTN and SEFDM families reuse the
 same CRC-protected framing and selective-repeat ARQ. Version 2.3.3 adds width
 profiles through 20K, a denser MCS ladder, modern LDPC, soft HARQ combining,
-adaptive MCS/train control and an opt-in protocol-v3 superframe. Station Test,
-Quick Tune and Full Characterizer retain raw WAV and JSON/CSV evidence and do
-not apply a recommendation without operator review.
+adaptive MCS/train control and an opt-in protocol-v3 superframe. Station Test's
+Quick Tune keeps the selected waveform and modulation, tests ten Guardian output
+levels, records raw WAV and JSON/CSV evidence, and automatically saves the one
+safe level selected by the peer.
 
 These modes are experiments, not on-air speed claims. Start with frame v2,
 classic FEC and a 2K7 profile; enable Modern LDPC and Superframe v3 only when
@@ -471,10 +472,10 @@ This is how the modem gets tuned: a capture lets the whole receiver be re-run ov
 
 # Current status
 
-Guardian **2.3.6** is the current G2 build. It makes long OFDM attachment
-transfers recover promptly from missed acknowledgements and stops an active
-payload when station control is switched off. See
-[the 2.3.6 release notes](docs/RELEASE_NOTES_2.3.6.md),
+Guardian **2.3.7** is the current G2 build. It replaces the former short
+characterizer with a deterministic ten-level, bidirectional Quick Tune and a
+single peer selection per direction. See
+[the 2.3.7 release notes](docs/RELEASE_NOTES_2.3.7.md),
 [current status](STATUS.md) and [G2 modem guide](docs/G2_MODEM.md).
 
 | Capability                      | Status                             |
