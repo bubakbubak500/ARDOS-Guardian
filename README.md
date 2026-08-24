@@ -102,6 +102,14 @@ No Internet connection and no central mailbox are required.
 
 ---
 
+### 📊 Visible, efficient payload transfer
+
+The header shows genuine VARA byte progress for both outgoing and incoming messages. Optional payload settings provide either native **VARA FILES** compression or Guardian's single-pass **BZIP2** compression; the two modes are mutually exclusive and BZIP2 keeps the standard ZIP whenever compression would make it larger.
+
+After the final acknowledgement, the destination can optionally append both callsigns as a **40 WPM Morse ID**.
+
+---
+
 ### 🔁 Store-and-forward networks
 
 A station that cannot reach the destination directly can hand the message to another Guardian station.
@@ -224,7 +232,7 @@ Radios without CAT can still be used through an operator-confirmed tuning workfl
 
 # The Guardian workspace
 
-Guardian 1.0 provides task-oriented workspaces instead of exposing protocol internals to the operator.
+Guardian 1.1 provides task-oriented workspaces instead of exposing protocol internals to the operator.
 
 ### Home
 
@@ -379,7 +387,7 @@ Once the required software and map data are present, the core messaging system o
 
 # Current status
 
-Guardian **1.0.0** is the first release where the interface and documentation have been consolidated around the radio functionality developed and tested throughout the 0.6 series.
+Guardian **1.1.0** adds optional VARA FILES or Guardian BZIP2 compression, visible send/receive progress, an optional trailing Morse identification, and safe mailbox updates during an active VARA transfer.
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |
@@ -559,5 +567,7 @@ Bug reports and development discussions are welcome through **[GitHub Issues](..
 **Messages when the network isn't there.**
 
 From HAMs to HAMs
+
+OK7PS / OK2IPW / OK6LZ / OK2MTV
 
 </div>

@@ -332,6 +332,9 @@ class Orchestrator:
         # asked at call time so a mode change needs no rebuild. The owner sets
         # it only when it applies (VARA FM, operator configured a delay).
         self.ptt_delay_request: Callable[[], int] | None = None
+        # Optional final-destination hook. Control ACK frames are already
+        # queued when it fires, allowing the transport to append a Morse ID.
+        self.on_final_ack_sent: Callable[[Message], None] | None = None
         # This station's Maidenhead locator for the beacon, or "" to keep the
         # position off the air. Asked at beacon time so a change in Settings
         # needs no rebuild.
@@ -630,6 +633,11 @@ class Orchestrator:
         self._send(FrameType.RECEIVED, msg)
         if self.callsign == msg.final_dest:
             self._send_delivery_receipt(msg, msg.source)
+            if self.on_final_ack_sent is not None:
+                try:
+                    self.on_final_ack_sent(msg)
+                except Exception as exc:  # noqa: BLE001 - optional ID cannot fail delivery
+                    self._emit(msg, f"post-ACK identification failed: {exc}")
             self._enter(msg, SessionState.DELIVERED)
             self._emit(msg, "payload received — I am the final destination")
         else:

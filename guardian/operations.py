@@ -19,6 +19,7 @@ from .payload import make_backend
 from .protocol import (
     MAX_CONTROL_FRAME_BYTES,
     MAX_PTT_DELAY_MS,
+    Flags,
     Priority,
     alert_kind,
     decode_alert,
@@ -226,6 +227,7 @@ class Operations:
         net.on_discovery_event = self._on_discovery_event
         net.channel_frequency = self.current_frequency
         net.ptt_delay_request = self._vara_keying_delay_request
+        net.on_final_ack_sent = self._on_final_ack_sent
         net.position = self.beacon_position
         net.working_channel_offer = self._working_channel_offer
         net.working_channel_accept = self._working_channel_accept
@@ -348,6 +350,35 @@ class Operations:
         if self.config.vara_mode.upper() != "FM":
             return 0
         return max(0, min(int(self.config.vara_ptt_delay_ms or 0), MAX_PTT_DELAY_MS))
+
+    def _on_final_ack_sent(self, message) -> None:
+        """Append one 40 WPM CW ID after the final destination's ACK frames."""
+        if not self.config.morse_id_after_ack:
+            return
+        transport = self.audio_transport
+        sender = getattr(message, "source", "").strip().upper()
+        mine = self.config.callsign.strip().upper()
+        if transport is None or not sender or not mine or mine == "NOCALL":
+            self._log(
+                dual(
+                    "Post-transfer Morse ID skipped: the live control audio "
+                    "channel and both callsigns are required.",
+                    "Morse identifikace po přenosu byla přeskočena: je nutný "
+                    "živý zvukový řídicí kanál a obě volací značky.",
+                ),
+                LogLevel.WARNING,
+                source="session",
+            )
+            return
+        text = f"{sender} DE {mine}"
+        if transport.send_morse_after_pending(text, wpm=40.0):
+            self._log(
+                dual(
+                    f"Queued final Morse ID: {text} (40 WPM).",
+                    f"Zařazena závěrečná Morse identifikace: {text} (40 WPM).",
+                ),
+                source="session",
+            )
 
     # ----- net-wide alerts ------------------------------------------------
 
@@ -840,9 +871,10 @@ class Operations:
         Guardian's config, so before 0.6.33 changing the HF bandwidth left the
         modem on whatever it was given at connect time.
 
-        `CHAT OFF` bounds VARA's idle loops. Compression stays on: Guardian
-        pads every envelope to MIN_WIRE_SIZE and that padding is otherwise
-        pure airtime. Bandwidth and `P2P SESSION` are HF/SAT only -- the
+        `CHAT OFF` bounds VARA's idle loops. TEXT compression remains the
+        baseline unless the operator selects VARA FILES. Guardian's BZIP2
+        option is applied to the bundle before it reaches VARA. Bandwidth and
+        `P2P SESSION` are HF/SAT only -- the
         reference is explicit that P2P "must be used for P2P connections, not
         for Gateways connections", and FM answers WRONG to a BW command.
         """
@@ -861,7 +893,11 @@ class Operations:
             )
             return False
         self.vara.send_command("PUBLIC ON")
-        self.vara.send_command("COMPRESSION TEXT")
+        self.vara.send_command(
+            "COMPRESSION FILES"
+            if self.config.vara_file_compression
+            else "COMPRESSION TEXT"
+        )
         self.vara.send_command("CHAT OFF")
         if self.config.vara_mode.upper() == "HF":
             self.vara.send_command(self.config.vara_hf_bandwidth)
@@ -921,7 +957,10 @@ class Operations:
 
     def vara_tuning(self) -> tuple:
         """Settings VARA holds per session. A change here can be re-sent."""
-        return (self.config.vara_hf_bandwidth,)
+        return (
+            self.config.vara_hf_bandwidth,
+            self.config.vara_file_compression,
+        )
 
     def _make_payload_backend(self):
         return make_backend(
@@ -1398,6 +1437,32 @@ class Operations:
         ), source="control")
         self._update_network_snapshot()
 
+    def _announce_prepared_mail(
+        self,
+        mail,
+        bundle: bytes,
+        *,
+        flags: Flags = Flags.NONE,
+    ) -> None:
+        self.net.send_message(
+            final_dest=mail.final_dest,
+            body=mail.subject,
+            msg_id=mail.msg_id,
+            priority=Priority(mail.priority),
+            ttl=self.config.default_ttl,
+            flags=flags,
+            payload_bytes=bundle,
+        )
+        self._log(
+            dual(
+                f"Message #{mail.msg_id} to {mail.final_dest} announced "
+                f"({mail.content_size()} B payload).",
+                f"Zpráva #{mail.msg_id} pro {mail.final_dest} oznámena "
+                f"(datový obsah {mail.content_size()} B).",
+            ),
+            source="mail",
+        )
+
     def send_queued(self, message_id: int) -> bool:
         if self.audio_transport is None:
             self._log(
@@ -1443,23 +1508,65 @@ class Operations:
                 )
                 return False
         self.mailstore.set_status(message_id, status=Status.SENDING)
-        self.net.send_message(
-            final_dest=mail.final_dest,
-            body=mail.subject,
-            msg_id=mail.msg_id,
-            priority=Priority(mail.priority),
-            ttl=self.config.default_ttl,
-            payload_bytes=mail.to_bundle(),
-        )
-        self._log(
-            dual(
-                f"Message #{mail.msg_id} to {mail.final_dest} announced "
-                f"({mail.content_size()} B payload).",
-                f"Zpráva #{mail.msg_id} pro {mail.final_dest} oznámena "
-                f"(datový obsah {mail.content_size()} B).",
-            ),
-            source="mail",
-        )
+        baseline = mail.to_bundle()
+        if self.config.guardian_compression and not self.config.vara_file_compression:
+            task_name = f"mail-compress-{mail.msg_id}"
+
+            def compressed(result: TaskResult) -> None:
+                if result.error:
+                    self._log(
+                        dual(
+                            f"Guardian compression failed for message #{mail.msg_id}; "
+                            "sending the standard ZIP bundle.",
+                            f"Komprese Guardian pro zprávu #{mail.msg_id} selhala; "
+                            "odesílám standardní ZIP balíček.",
+                        ),
+                        LogLevel.WARNING,
+                        source="payload",
+                    )
+                    self._announce_prepared_mail(mail, baseline)
+                    return
+                encoding = result.value
+                flags = Flags.COMPRESSED if encoding.method == "bzip2" else Flags.NONE
+                self._log(
+                    dual(
+                        f"Guardian BZIP2 compression produced {encoding.method} for "
+                        f"message #{mail.msg_id}: {encoding.baseline_size} → "
+                        f"{len(encoding.data)} B ({encoding.saved_percent:.1f}% saved).",
+                        f"Komprese Guardian BZIP2 vytvořila {encoding.method} pro "
+                        f"zprávu #{mail.msg_id}: {encoding.baseline_size} → "
+                        f"{len(encoding.data)} B (úspora {encoding.saved_percent:.1f} %).",
+                    ),
+                    source="payload",
+                )
+                self._announce_prepared_mail(mail, encoding.data, flags=flags)
+
+            queued = self.workers.submit(
+                task_name,
+                lambda: mail.to_guardian_bundle(baseline),
+                compressed,
+            )
+            if not queued:
+                self.mailstore.set_status(message_id, status=Status.QUEUED)
+                return False
+            self._log(
+                dual(
+                    f"Compressing message #{mail.msg_id} with Guardian BZIP2…",
+                    f"Komprimuji zprávu #{mail.msg_id} pomocí Guardian BZIP2…",
+                ),
+                source="payload",
+            )
+            return True
+        if self.config.guardian_compression:
+            self._log(
+                dual(
+                    "Guardian compression was not stacked with VARA FILES compression.",
+                    "Komprese Guardian nebyla vrstvena přes kompresi VARA FILES.",
+                ),
+                LogLevel.WARNING,
+                source="payload",
+            )
+        self._announce_prepared_mail(mail, baseline)
         return True
 
     def tick(self) -> None:
@@ -1619,6 +1726,9 @@ class Operations:
                 tx_bitrate_bps=state.tx_bitrate_bps,
                 data_bytes_written=state.data_bytes_written,
                 data_bytes_read=state.data_bytes_read,
+                transfer_direction=state.transfer_direction,
+                rx_transfer_bytes=state.rx_transfer_bytes,
+                rx_transfer_total=state.rx_transfer_total,
                 data_socket_generation=state.data_socket_generation,
                 data_local_endpoint=state.data_local_endpoint,
                 data_peer_endpoint=state.data_peer_endpoint,

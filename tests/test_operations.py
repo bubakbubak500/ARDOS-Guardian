@@ -12,7 +12,7 @@ from guardian.operations import (
     _ALERT_HISTORY,
 )
 from guardian.modem import make_modem
-from guardian.protocol import ControlFrame, FrameType, Priority, encode_alert
+from guardian.protocol import ControlFrame, Flags, FrameType, Priority, encode_alert
 from guardian.radio.base import RadioState
 from guardian.routing import HeardStations, Route, RouteTable
 from guardian.services import (
@@ -101,6 +101,57 @@ def _spy_transmissions(operations) -> list:
 
     transport.send = record
     return sent
+
+
+def test_guardian_compression_hands_a_compatible_bundle_to_vara(
+    tmp_path, monkeypatch
+) -> None:
+    operations, workers, mailstore = _operations(
+        tmp_path, guardian_compression=True
+    )
+    mail = MailMessage(
+        msg_id=mailstore.next_id("OK7PS"),
+        source="OK7PS",
+        final_dest="OK1AAA",
+        subject="report",
+        body="same situation line\n" * 10_000,
+        folder=Folder.OUTBOX,
+        status=Status.QUEUED,
+    )
+    mailstore.add(mail)
+    announced = []
+    monkeypatch.setattr(
+        operations.net, "send_message", lambda **kwargs: announced.append(kwargs)
+    )
+    operations.audio_transport = SimpleNamespace()
+    try:
+        assert operations.send_queued(mail.msg_id)
+        while workers.is_active(f"mail-compress-{mail.msg_id}"):
+            time.sleep(0.001)
+        workers.drain()
+        assert len(announced) == 1
+        assert announced[0]["flags"] & Flags.COMPRESSED
+        restored = MailMessage.from_bundle(announced[0]["payload_bytes"])
+        assert restored.body == mail.body
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_final_ack_queues_one_sender_de_receiver_morse_id(tmp_path) -> None:
+    operations, workers, _ = _operations(tmp_path, morse_id_after_ack=True)
+    queued = []
+    operations.audio_transport = SimpleNamespace(
+        send_morse_after_pending=lambda text, wpm: queued.append((text, wpm)) or True
+    )
+    try:
+        operations._on_final_ack_sent(SimpleNamespace(source="ok2xxx"))
+        assert queued == [("OK2XXX DE OK7PS", 40.0)]
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
 
 
 def test_beacon_and_auto_delivery_stay_silent_without_a_control_channel(
@@ -1118,6 +1169,21 @@ def test_fm_is_never_sent_a_bandwidth_or_p2p_command(tmp_path) -> None:
         assert not [c for c in operations.vara.commands if c.startswith("BW")]
         assert "P2P SESSION" not in operations.vara.commands
         assert "CHAT OFF" in operations.vara.commands
+        assert "COMPRESSION TEXT" in operations.vara.commands
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_vara_files_compression_replaces_text_mode(tmp_path) -> None:
+    operations, workers, _ = _operations(
+        tmp_path, vara_mode="FM", vara_file_compression=True
+    )
+    operations.vara = _FakeVara()
+    try:
+        assert operations.apply_vara_session_settings()
+        assert "COMPRESSION FILES" in operations.vara.commands
+        assert "COMPRESSION TEXT" not in operations.vara.commands
     finally:
         operations.close()
         workers.close(wait=True)

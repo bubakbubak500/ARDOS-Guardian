@@ -37,6 +37,9 @@ class VaraSnapshot:
     tx_bitrate_bps: int | None = None
     data_bytes_written: int = 0
     data_bytes_read: int = 0
+    transfer_direction: str = ""
+    rx_transfer_bytes: int = 0
+    rx_transfer_total: int = 0
     data_socket_generation: int = 0
     data_local_endpoint: str | None = None
     data_peer_endpoint: str | None = None

@@ -210,6 +210,16 @@ class StationConfig:
     # out of the production UI until the operator asks for them.
     separate_working_channels: bool = False
 
+    # Optional vendor-side binary bundle compression. It is mutually exclusive
+    # with Guardian BZIP2, but both may remain off.
+    vara_file_compression: bool = False
+    # One measured BZIP2 pass over the Guardian ZIP bundle, used only when its
+    # result is smaller than the standard bundle.
+    guardian_compression: bool = False
+    # After the final destination has queued its last control acknowledgement,
+    # identify the two stations once in 40 WPM Morse. Off by default.
+    morse_id_after_ack: bool = False
+
     # Control burst behaviour
     default_ttl: int = 5
 

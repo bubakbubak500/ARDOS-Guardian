@@ -16,6 +16,9 @@
   "vara_host": "127.0.0.1",
   "vara_cmd_port": 8300,
   "vara_data_port": 8301,
+  "vara_file_compression": false,
+  "guardian_compression": false,
+  "morse_id_after_ack": false,
   "default_ttl": 5,
   "appearance": "System"
 }

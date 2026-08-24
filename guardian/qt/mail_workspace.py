@@ -701,15 +701,27 @@ class MailWorkspace(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.runtime.mailstore.delete(self.selected_id)
-        self.runtime.events.publish(
-            tr("event.mail_deleted", id=self.selected_id),
-            source="mail",
-        )
+        message_id = self.selected_id
         self.selected_id = None
         self.reader.clear()
-        self.runtime.refresh()
-        self.refresh()
+
+        def completed(result) -> None:
+            if result.error is not None:
+                QMessageBox.warning(self, tr("mail.delete"), str(result.error))
+                return
+            self.runtime.events.publish(
+                tr("event.mail_deleted", id=message_id),
+                source="mail",
+            )
+            self.runtime.refresh()
+            self.refresh()
+
+        if not self.runtime.workers.submit(
+            f"mail-delete-{message_id}",
+            lambda: self.runtime.mailstore.delete(message_id),
+            completed,
+        ):
+            self.selected_id = message_id
 
     def send_selected(self) -> None:
         if self.selected_id is None:

@@ -24,6 +24,25 @@ BUNDLE_VERSION = 1
 _EST_BYTES_PER_SEC = 250.0
 
 
+@dataclass(frozen=True)
+class BundleEncoding:
+    """The single Guardian BZIP2 result or its standard ZIP fallback."""
+
+    data: bytes
+    method: str
+    baseline_size: int
+
+    @property
+    def saved_bytes(self) -> int:
+        return max(0, self.baseline_size - len(self.data))
+
+    @property
+    def saved_percent(self) -> float:
+        if not self.baseline_size:
+            return 0.0
+        return 100.0 * self.saved_bytes / self.baseline_size
+
+
 class Folder:
     DRAFT = "draft"
     OUTBOX = "outbox"
@@ -113,7 +132,7 @@ class MailMessage:
         return f"#{self.msg_id} {self.source}->{self.final_dest} \"{self.subject}\"{a}"
 
     # ------------------------------------------------------------------ #
-    def to_bundle(self) -> bytes:
+    def _bundle_entries(self) -> list[tuple[str, bytes]]:
         taken: set[str] = set()
         names = [
             _unique_name(safe_attachment_name(a.name), taken)
@@ -130,13 +149,45 @@ class MailMessage:
             "hops": self.hops,
             "attachments": names,
         }
+        entries = [
+            ("manifest.json", json.dumps(manifest).encode("utf-8")),
+            ("body.txt", self.body.encode("utf-8")),
+        ]
+        entries.extend(
+            (f"att/{name}", attachment.data)
+            for name, attachment in zip(names, self.attachments)
+        )
+        return entries
+
+    def _bundle_with(self, compression: int, *, compresslevel: int | None = None) -> bytes:
         buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("manifest.json", json.dumps(manifest))
-            zf.writestr("body.txt", self.body.encode("utf-8"))
-            for name, a in zip(names, self.attachments):
-                zf.writestr(f"att/{name}", a.data)
+        options = {"compression": compression}
+        if compresslevel is not None:
+            options["compresslevel"] = compresslevel
+        with zipfile.ZipFile(buf, "w", **options) as zf:
+            for name, data in self._bundle_entries():
+                zf.writestr(name, data)
         return buf.getvalue()
+
+    def to_bundle(self) -> bytes:
+        """Return the stable baseline bundle used for local mailbox storage."""
+        return self._bundle_with(zipfile.ZIP_DEFLATED)
+
+    def to_guardian_bundle(self, baseline: bytes | None = None) -> BundleEncoding:
+        """Use one BZIP2 pass only when it beats the standard ZIP bundle."""
+        standard = baseline if baseline is not None else self.to_bundle()
+        compressed = self._bundle_with(zipfile.ZIP_BZIP2, compresslevel=9)
+        if len(compressed) < len(standard):
+            return BundleEncoding(
+                data=compressed,
+                method="bzip2",
+                baseline_size=len(standard),
+            )
+        return BundleEncoding(
+            data=standard,
+            method="standard",
+            baseline_size=len(standard),
+        )
 
     @classmethod
     def from_bundle(cls, data: bytes) -> "MailMessage":

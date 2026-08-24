@@ -20,7 +20,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
-from ..i18n import tr
+from ..i18n import dual, tr
 from .theme import DARK_TOKENS, ThemeTokens
 
 SEGMENTS = 20
@@ -36,6 +36,8 @@ class TransferState:
     active: bool = False
     sent_bytes: int = 0
     total_bytes: int = 0
+    direction: str = "send"
+    goodput_bps: float | None = None
 
     @property
     def fraction(self) -> float:
@@ -54,12 +56,31 @@ def transfer_state(snapshot, payload_active: bool) -> TransferState:
     than guessing.
     """
     vara = snapshot.vara
+    if not payload_active:
+        return TransferState()
+    direction = str(getattr(vara, "transfer_direction", "") or "")
+    if direction == "receive":
+        total = int(getattr(vara, "rx_transfer_total", 0) or 0)
+        received = int(getattr(vara, "rx_transfer_bytes", 0) or 0)
+        return TransferState(
+            active=True,
+            sent_bytes=max(0, min(total, received)),
+            total_bytes=total,
+            direction="receive",
+            goodput_bps=getattr(vara, "tx_bitrate_bps", None),
+        )
     total = int(getattr(vara, "data_bytes_written", 0) or 0)
-    if not payload_active or total <= 0:
+    if total <= 0:
         return TransferState()
     queued = getattr(vara, "tx_buffer_bytes", None)
     sent = 0 if queued is None else max(0, min(total, total - int(queued)))
-    return TransferState(active=True, sent_bytes=sent, total_bytes=total)
+    return TransferState(
+        active=True,
+        sent_bytes=sent,
+        total_bytes=total,
+        direction="send",
+        goodput_bps=getattr(vara, "tx_bitrate_bps", None),
+    )
 
 
 class SegmentedBar(QWidget):
@@ -149,12 +170,29 @@ class TransferPanel(QWidget):
             self.bar.set_fraction(0.0)
             self.detail.clear()
             return
-        self.bar.set_fraction(state.fraction)
-        self.detail.setText(
+        self.title.setText(
             tr(
-                "transfer.detail",
+                "transfer.title_receive"
+                if state.direction == "receive"
+                else "transfer.title_send",
+                transport="VARA",
+            )
+        )
+        self.bar.set_fraction(state.fraction)
+        if state.direction == "receive" and state.total_bytes <= 0:
+            detail = tr("transfer.detail_receive_waiting")
+        else:
+            detail = tr(
+                "transfer.detail_receive"
+                if state.direction == "receive"
+                else "transfer.detail_send",
                 sent=state.sent_bytes,
                 total=state.total_bytes,
                 percent=round(state.fraction * 100),
             )
+        speed = (
+            dual("measuring", "měří se")
+            if state.goodput_bps is None
+            else f"{state.goodput_bps:.0f} bit/s"
         )
+        self.detail.setText(f"{detail}\n{tr('transfer.speed', speed=speed)}")

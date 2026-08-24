@@ -1,6 +1,10 @@
 import io
 import zipfile
+import json
+import os
 from pathlib import Path
+import threading
+import time
 
 from guardian.message import Attachment, Folder, MailMessage, MessageStore, Status
 
@@ -168,3 +172,38 @@ def test_clear_removes_every_message_but_keeps_the_id_counter(tmp_path: Path) ->
     # no reason to mint ids the net has seen from us before.
     after = MessageStore(tmp_path).next_id("OK7PS")
     assert (after & 0xFFFFF) == (before & 0xFFFFF) + 1
+
+
+def test_delete_waits_for_an_inflight_transfer_index_update(tmp_path, monkeypatch) -> None:
+    store = MessageStore(tmp_path)
+    active = _mail(41)
+    stale = _mail(42)
+    store.add(active)
+    store.add(stale)
+    replacing = threading.Event()
+    release = threading.Event()
+    real_replace = os.replace
+
+    def delayed_replace(source, target):
+        if not replacing.is_set():
+            replacing.set()
+            assert release.wait(2.0)
+        return real_replace(source, target)
+
+    monkeypatch.setattr("guardian.message.store.os.replace", delayed_replace)
+    update = threading.Thread(
+        target=lambda: store.set_status(active.msg_id, status=Status.SENDING)
+    )
+    update.start()
+    assert replacing.wait(2.0)
+    deletion = threading.Thread(target=lambda: store.delete(stale.msg_id))
+    deletion.start()
+    time.sleep(0.02)
+    assert deletion.is_alive(), "delete must not overlap the transfer's index write"
+    release.set()
+    update.join(2.0)
+    deletion.join(2.0)
+
+    assert store.get(active.msg_id).status == Status.SENDING
+    assert store.get(stale.msg_id) is None
+    json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))

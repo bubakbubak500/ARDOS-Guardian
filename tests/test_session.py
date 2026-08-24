@@ -45,6 +45,23 @@ def test_direct_session_reaches_delivered_without_changing_payload_contract() ->
     assert sender.learned_paths["OK1AAA"] == "OK1AAA"
 
 
+def test_only_final_destination_gets_the_post_ack_identification_hook() -> None:
+    bus = LoopbackBus()
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    receiver = Orchestrator(
+        "OK1AAA", bus.endpoint("receiver"), auto_complete=True, auto_route=False
+    )
+    callbacks = []
+    receiver.on_final_ack_sent = callbacks.append
+
+    sender.send_message("OK1AAA", "hello", msg_id=104, next_hop="OK1AAA")
+    _drain(bus, sender, receiver)
+
+    assert len(callbacks) == 1
+    assert callbacks[0].source == "OK7PS"
+    assert callbacks[0].final_dest == "OK1AAA"
+
+
 def test_default_session_emits_no_working_channel_negotiation() -> None:
     bus = LoopbackBus()
     sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)

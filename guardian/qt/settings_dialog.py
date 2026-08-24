@@ -154,6 +154,7 @@ class SettingsDialog(QDialog):
         self._build_radio()
         self._build_audio()
         self._build_vara()
+        self._build_payload_options()
         self._build_network()
         self._build_appearance(theme)
 
@@ -940,6 +941,67 @@ class SettingsDialog(QDialog):
         self.vara_hf_bandwidth.setVisible(visible)
         self.vara_hf_bandwidth_label.setVisible(visible)
 
+    def _build_payload_options(self) -> None:
+        form = self._page(
+            dual("Compression & identification", "Komprese a identifikace"),
+            dual(
+                "Choose either native VARA FILES compression or Guardian's "
+                "one-pass BZIP2 compression; both may remain off, but they "
+                "cannot be combined. Guardian BZIP2 leaves already packed data "
+                "unchanged when compression would make it larger.",
+                "Zvolte buď nativní kompresi VARA FILES, nebo jeden průchod "
+                "Guardian BZIP2; obě mohou zůstat vypnuté, ale nelze je "
+                "kombinovat. Guardian BZIP2 ponechá již komprimovaná data beze "
+                "změny, pokud by je komprese zvětšila.",
+            ),
+        )
+        self.vara_file_compression = QCheckBox(dual(
+            "Use native VARA FILES compression",
+            "Použít nativní kompresi VARA FILES",
+        ))
+        self.vara_file_compression.setChecked(self.config.vara_file_compression)
+        self.vara_file_compression.setToolTip(dual(
+            "Switches VARA from COMPRESSION TEXT to its binary FILES codec.",
+            "Přepne VARA z COMPRESSION TEXT na jeho binární kodek FILES.",
+        ))
+        self.guardian_compression = QCheckBox(dual(
+            "Use Guardian compression (BZIP2)",
+            "Použít kompresi Guardian (BZIP2)",
+        ))
+        self.guardian_compression.setChecked(self.config.guardian_compression)
+        self.guardian_compression.setToolTip(dual(
+            "Runs BZIP2 once and keeps the standard ZIP when it is not smaller.",
+            "Spustí BZIP2 jednou a ponechá standardní ZIP, pokud není menší.",
+        ))
+        self.morse_id_after_ack = QCheckBox(dual(
+            "After the final ACK, send both callsigns in Morse at 40 WPM",
+            "Po posledním ACK odvysílat obě značky Morse rychlostí 40 WPM",
+        ))
+        self.morse_id_after_ack.setChecked(self.config.morse_id_after_ack)
+        self.morse_id_after_ack.setToolTip(dual(
+            "Only the final destination transmits once: SENDER DE RECEIVER.",
+            "Pouze cílová stanice odvysílá jednou: ODESÍLATEL DE PŘÍJEMCE.",
+        ))
+        form.addRow(self.vara_file_compression)
+        form.addRow(self.guardian_compression)
+        form.addRow(self.morse_id_after_ack)
+        self.vara_file_compression.toggled.connect(self._native_compression_toggled)
+        self.guardian_compression.toggled.connect(self._guardian_compression_toggled)
+        if self.vara_file_compression.isChecked():
+            self._native_compression_toggled(True)
+        elif self.guardian_compression.isChecked():
+            self._guardian_compression_toggled(True)
+
+    def _native_compression_toggled(self, checked: bool) -> None:
+        if checked:
+            self.guardian_compression.setChecked(False)
+        self.guardian_compression.setEnabled(not checked)
+
+    def _guardian_compression_toggled(self, checked: bool) -> None:
+        if checked:
+            self.vara_file_compression.setChecked(False)
+        self.vara_file_compression.setEnabled(not checked)
+
     def _build_network(self) -> None:
         form = self._page(
             tr("settings.network"),
@@ -1078,6 +1140,11 @@ class SettingsDialog(QDialog):
                     "Při řízení přes Hamlib vyberte podporovaný model rádia.",
                 )
             )
+        if self.vara_file_compression.isChecked() and self.guardian_compression.isChecked():
+            errors.append(dual(
+                "Choose VARA FILES compression or Guardian compression, not both.",
+                "Zvolte kompresi VARA FILES, nebo kompresi Guardian, nikoli obě.",
+            ))
         for label, field in (
             ("rigctld", self.rigctld_path),
             ("VARA FM", self.vara_fm_path),
@@ -1122,6 +1189,9 @@ class SettingsDialog(QDialog):
         cfg.control_modem = self.control_modem.currentData()
         cfg.vara_hf_bandwidth = self.vara_hf_bandwidth.currentData()
         cfg.vara_host_ptt = self.vara_host_ptt.isChecked()
+        cfg.vara_file_compression = self.vara_file_compression.isChecked()
+        cfg.guardian_compression = self.guardian_compression.isChecked()
+        cfg.morse_id_after_ack = self.morse_id_after_ack.isChecked()
         cfg.apply_vara_mode(self.vara_mode.currentText())
         cfg.default_ttl = self.default_ttl.value()
         cfg.auto_route = self.auto_route.isChecked()
