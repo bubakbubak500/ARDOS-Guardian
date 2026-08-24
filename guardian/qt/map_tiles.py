@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,9 @@ from ..config import config_dir
 
 TILE_PIXELS = 256
 MAX_CACHE_MEGABYTES = 512.0
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+PNG_HEADER_BYTES = 24
+MAX_LOCAL_ZOOM = 30
 
 
 @dataclass(frozen=True)
@@ -38,8 +42,23 @@ class TileSource:
     # Optional coverage in south, west, north, east order. Bulk offline work is
     # clipped to it instead of asking a regional provider for the whole world.
     bounds: tuple[float, float, float, float] | None = None
+    # A manually installed XYZ tree. When set, Guardian reads
+    # <directory>/<z>/<x>/<y>.png directly and never sends a network request.
+    directory: Path | None = None
+
+    @property
+    def is_local(self) -> bool:
+        return self.directory is not None
+
+    def tile_path(self, zoom: int, x: int, y: int) -> Path | None:
+        if self.directory is None:
+            return None
+        return self.directory / str(zoom) / str(x) / f"{y}.png"
 
     def tile_url(self, zoom: int, x: int, y: int) -> str:
+        path = self.tile_path(zoom, x, y)
+        if path is not None:
+            return path.resolve().as_uri()
         return self.url.format(z=zoom, x=x, y=y)
 
 
@@ -58,6 +77,100 @@ CUZK_ZTM = TileSource(
 )
 
 SOURCES: tuple[TileSource, ...] = (CUZK_ZTM,)
+
+
+def application_maps_directory() -> Path:
+    """Directory operators populate beside the installed Guardian executable."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "maps"
+    return Path(__file__).resolve().parents[2] / "maps"
+
+
+def _sample_xyz_png(zoom_directory: Path, zoom: int) -> Path | None:
+    """Find one structurally valid PNG without walking the whole tile tree."""
+    try:
+        x_directories = sorted(
+            (
+                child
+                for child in zoom_directory.iterdir()
+                if child.is_dir() and child.name.isdecimal()
+            ),
+            key=lambda child: int(child.name),
+        )
+    except OSError:
+        return None
+    tile_limit = 2 ** zoom
+    for x_directory in x_directories:
+        x = int(x_directory.name)
+        if not 0 <= x < tile_limit:
+            continue
+        try:
+            candidates = sorted(
+                (
+                    child
+                    for child in x_directory.iterdir()
+                    if child.is_file()
+                    and child.suffix.lower() == ".png"
+                    and child.stem.isdecimal()
+                ),
+                key=lambda child: int(child.stem),
+            )
+        except OSError:
+            continue
+        for candidate in candidates:
+            y = int(candidate.stem)
+            if not 0 <= y < tile_limit:
+                continue
+            try:
+                with candidate.open("rb") as stream:
+                    header = stream.read(PNG_HEADER_BYTES)
+                    width = int.from_bytes(header[16:20], "big")
+                    height = int.from_bytes(header[20:24], "big")
+                    if (
+                        header.startswith(PNG_SIGNATURE)
+                        and header[12:16] == b"IHDR"
+                        and width == TILE_PIXELS
+                        and height == TILE_PIXELS
+                    ):
+                        return candidate
+            except OSError:
+                continue
+    return None
+
+
+def discover_local_tile_source(
+    maps_directory: Path | str | None = None,
+) -> TileSource | None:
+    """Recognise the exact manually supplied maps/tiles/z/x/y.png layout."""
+    maps_root = (
+        Path(maps_directory)
+        if maps_directory is not None
+        else application_maps_directory()
+    )
+    tiles_root = maps_root / "tiles"
+    try:
+        zoom_directories = [
+            child
+            for child in tiles_root.iterdir()
+            if child.is_dir() and child.name.isdecimal()
+        ]
+    except OSError:
+        return None
+    valid_zooms = []
+    for directory in zoom_directories:
+        zoom = int(directory.name)
+        if 0 <= zoom <= MAX_LOCAL_ZOOM and _sample_xyz_png(directory, zoom):
+            valid_zooms.append(zoom)
+    if not valid_zooms:
+        return None
+    return TileSource(
+        key="manual-local-xyz",
+        label="Manual local XYZ map",
+        url="",
+        attribution="operator-supplied tiles",
+        max_zoom=max(valid_zooms),
+        directory=tiles_root.resolve(),
+    )
 
 
 def tile_for(latitude: float, longitude: float, zoom: int) -> tuple[int, int]:

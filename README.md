@@ -173,7 +173,7 @@ The map can show:
 
 A station can be selected directly on the map to start composing a message.
 
-The map can also be prepared for offline operation and exported as PNG.
+The map can also be prepared for offline operation and exported as PNG. Guardian 1.1.1 additionally recognises a manually supplied XYZ tile tree at `maps\tiles\<zoom>\<x>\<y>.png` beside the installed application. It remains unused until the operator selects **Use manually installed map** in the map window and confirms the choice; without both the files and that consent, the normal ČÚZK background behaves exactly as before.
 
 ---
 
@@ -387,7 +387,7 @@ Once the required software and map data are present, the core messaging system o
 
 # Current status
 
-Guardian **1.1.0** adds optional VARA FILES or Guardian BZIP2 compression, visible send/receive progress, an optional trailing Morse identification, and safe mailbox updates during an active VARA transfer.
+Guardian **1.1.1** preserves the 1.1.0 radio, messaging and map behaviour and adds only an explicitly confirmed, manually installed XYZ map alternative. The existing ČÚZK background remains the default.
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |

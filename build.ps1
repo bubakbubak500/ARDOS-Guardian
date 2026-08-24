@@ -15,6 +15,8 @@ if (-not $python) {
 $spec = Join-Path $root "Guardian.spec"
 $versionInfo = Join-Path $root "build\version_info.txt"
 $executable = Join-Path $root "dist\Guardian\Guardian.exe"
+$mapsDirectory = Join-Path $root "dist\Guardian\maps"
+$mapsReadme = Join-Path $root "installer\MAPS_README.txt"
 $buildTemp = Join-Path $root ".build-temp"
 
 if (-not $python -or -not (Test-Path -LiteralPath $python)) {
@@ -56,6 +58,8 @@ try {
     if (-not (Test-Path -LiteralPath $executable)) {
         throw "PyInstaller completed without producing Guardian.exe."
     }
+    New-Item -ItemType Directory -Force -Path $mapsDirectory | Out-Null
+    Copy-Item -LiteralPath $mapsReadme -Destination (Join-Path $mapsDirectory "README.txt") -Force
 
     $version = & $python -c "from guardian import __version__; print(__version__)"
     $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()

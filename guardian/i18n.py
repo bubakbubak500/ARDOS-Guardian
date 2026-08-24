@@ -798,6 +798,41 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "registrace. Zobrazené dlaždice zůstávají na disku; viditelnou oblast "
         "lze také vědomě uložit pro pozdější použití bez sítě.",
     ),
+    "map.local_background": (
+        "Use manually installed map",
+        "Použít ručně nahranou mapu",
+    ),
+    "map.local_background_hint": (
+        "Use the local XYZ tiles found in {path}\\tiles. Enabling this option "
+        "requires explicit confirmation and never downloads map data.",
+        "Použije lokální XYZ dlaždice nalezené v {path}\\tiles. Zapnutí vyžaduje "
+        "výslovné potvrzení a nikdy nestahuje mapová data.",
+    ),
+    "map.local_background_missing": (
+        "No manual map found. Copy the tiles folder into {path}, then reopen "
+        "the map window.",
+        "Ručně nahraná mapa nebyla nalezena. Zkopírujte složku tiles do {path} "
+        "a znovu otevřete okno mapy.",
+    ),
+    "map.local_confirm_title": (
+        "Use manually installed map?",
+        "Použít ručně nahranou mapu?",
+    ),
+    "map.local_confirm_body": (
+        "Guardian found an operator-supplied XYZ tile tree in:\n\n"
+        "{path}\\tiles\n\n"
+        "Use it instead of the normal ČÚZK background? Guardian will read "
+        "these files locally and will not verify their origin or licence.",
+        "Guardian našel uživatelem dodanou XYZ sadu dlaždic v:\n\n"
+        "{path}\\tiles\n\n"
+        "Použít ji místo běžného podkladu ČÚZK? Guardian bude soubory číst "
+        "pouze místně a neověřuje jejich původ ani licenci.",
+    ),
+    "map.local_attribution": (
+        "Manual local XYZ map · {path} · offline/read-only · maximum zoom {zoom}",
+        "Ručně nahraná lokální XYZ mapa · {path} · offline/pouze čtení · "
+        "nejvyšší zoom {zoom}",
+    ),
     "map.background_off": (
         "Map background off — stations are drawn on the graticule alone.",
         "Mapový podklad vypnut — stanice se kreslí jen do souřadnicové sítě.",

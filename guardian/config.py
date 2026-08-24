@@ -195,6 +195,9 @@ class StationConfig:
     # is on screen and kept in %APPDATA%\Guardian\maps, so ground the operator
     # has already looked at stays available with no network.
     map_background: bool = True
+    # Use a manually installed maps/tiles/z/x/y.png tree only after the
+    # operator explicitly confirms that choice in the map window.
+    map_local_tiles: bool = False
     # Optional operational overlays in the station map. Locator precision is
     # 0 (off), 4 (field/square) or 6 (subsquare).
     map_locator_grid: int = 0

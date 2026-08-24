@@ -12,6 +12,8 @@ from guardian.qt.map_tiles import (
     TILE_PIXELS,
     TileCache,
     TileSource,
+    application_maps_directory,
+    discover_local_tile_source,
     tile_for,
     tiles_for_bounds,
 )
@@ -206,6 +208,67 @@ def test_the_tile_url_is_the_service_we_verified() -> None:
     assert CUZK_ZTM.tile_url(10, 553, 346).endswith("/tile/10/346/553")
     assert "cuzk" in CUZK_ZTM.url
     assert "ČÚZK" in CUZK_ZTM.attribution
+
+
+def test_manual_map_detection_requires_the_exact_xyz_png_tree(tmp_path) -> None:
+    _application()
+    maps = tmp_path / "maps"
+    invalid = maps / "tiles" / "10" / "553" / "346.png"
+    invalid.parent.mkdir(parents=True)
+    invalid.write_text("not a PNG", encoding="utf-8")
+    assert discover_local_tile_source(maps) is None
+
+    wrong_size = QPixmap(32, 32)
+    wrong_size.fill(QColor("#568042"))
+    assert wrong_size.save(str(invalid), "PNG")
+    assert discover_local_tile_source(maps) is None
+
+    tile = QPixmap(256, 256)
+    tile.fill(QColor("#568042"))
+    assert tile.save(str(invalid), "PNG")
+    source = discover_local_tile_source(maps)
+
+    assert source is not None
+    assert source.is_local
+    assert source.directory == (maps / "tiles").resolve()
+    assert source.max_zoom == 10
+    assert source.tile_path(10, 553, 346) == invalid.resolve()
+    assert source.tile_url(10, 553, 346).startswith("file:")
+
+
+def test_frozen_application_looks_for_maps_beside_guardian_exe(
+    tmp_path, monkeypatch
+) -> None:
+    import guardian.qt.map_tiles as map_tiles
+
+    executable = tmp_path / "installed" / "Guardian.exe"
+    monkeypatch.setattr(map_tiles.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(map_tiles.sys, "executable", str(executable))
+
+    assert application_maps_directory() == executable.resolve().parent / "maps"
+
+
+def test_manual_tiles_are_read_directly_without_cache_or_network(tmp_path) -> None:
+    _application()
+    maps = tmp_path / "maps"
+    path = maps / "tiles" / "10" / "553" / "346.png"
+    path.parent.mkdir(parents=True)
+    tile = QPixmap(256, 256)
+    tile.fill(QColor("#2468a0"))
+    assert tile.save(str(path), "PNG")
+    source = discover_local_tile_source(maps)
+    assert source is not None
+    canvas = _canvas()
+    canvas.set_source(source)
+
+    loaded = canvas._tile(10, 553, 346)
+    missing = canvas._tile(10, 553, 347)
+
+    assert loaded is not None and not loaded.isNull()
+    assert missing is None
+    assert canvas.cache is None
+    assert canvas._pending == set()
+    canvas.set_source(None)
 
 
 def test_station_markers_have_a_thick_contrast_ring_and_are_clickable() -> None:

@@ -14,6 +14,7 @@ window depends on.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, Signal
@@ -65,6 +66,8 @@ from .map_tiles import (
     TILE_PIXELS,
     TileCache,
     TileSource,
+    application_maps_directory,
+    discover_local_tile_source,
     tile_for,
     tiles_for_bounds,
 )
@@ -134,6 +137,7 @@ class MapCanvas(QWidget):
         self._drag_from: QPointF | None = None
         self._dragged = False
         self.source: TileSource | None = None
+        self._source_generation = 0
         self._cache: TileCache | None = None
         self._pixmaps: dict[tuple[int, int, int], QPixmap] = {}
         self._pending: set[tuple[int, int, int]] = set()
@@ -153,13 +157,18 @@ class MapCanvas(QWidget):
     # --- tiles ------------------------------------------------------------ #
     def set_source(self, source: TileSource | None) -> None:
         self.cancel_prefetch()
+        self._source_generation += 1
+        for reply in self._network.findChildren(QNetworkReply):
+            if reply.isRunning():
+                reply.abort()
+        self._pending.clear()
         if self._cache is not None:
             self._cache.close()
             self._cache = None
         self.source = source
         self._pixmaps.clear()
         self._missing.clear()
-        if source is not None:
+        if source is not None and not source.is_local:
             self._cache = TileCache(source)
         self.update()
 
@@ -176,7 +185,7 @@ class MapCanvas(QWidget):
         return max(0, min(zoom, self.source.max_zoom))
 
     def _draw_tiles(self, painter: QPainter) -> None:
-        if self.source is None or self._cache is None:
+        if self.source is None:
             return
         zoom = self.tile_zoom()
         count = 2 ** zoom
@@ -208,7 +217,21 @@ class MapCanvas(QWidget):
         key = (zoom, x, y)
         if key in self._pixmaps:
             return self._pixmaps[key]
-        if self._cache is None or key in self._missing:
+        if key in self._missing or self.source is None:
+            return None
+        if self.source.is_local:
+            path = self.source.tile_path(zoom, x, y)
+            pixmap = (
+                QPixmap(str(path))
+                if path is not None and path.is_file()
+                else QPixmap()
+            )
+            if pixmap.isNull():
+                self._missing.add(key)
+                return None
+            self._pixmaps[key] = pixmap
+            return pixmap
+        if self._cache is None:
             return None
         data = self._cache.get(zoom, x, y)
         if data is not None:
@@ -231,6 +254,8 @@ class MapCanvas(QWidget):
             return
         if self.source is None:
             return
+        if self.source.is_local:
+            return
         zoom, x, y = key
         request = QNetworkRequest(QUrl(self.source.tile_url(zoom, x, y)))
         request.setHeader(
@@ -238,7 +263,8 @@ class MapCanvas(QWidget):
             f"Guardian/{__version__} (ARDOS emergency messaging)",
         )
         request.setAttribute(
-            QNetworkRequest.Attribute.User, f"{zoom}/{x}/{y}"
+            QNetworkRequest.Attribute.User,
+            f"{self._source_generation}/{zoom}/{x}/{y}",
         )
         self._pending.add(key)
         self._network.get(request)
@@ -246,9 +272,13 @@ class MapCanvas(QWidget):
     def _tile_arrived(self, reply) -> None:
         try:
             coordinates = reply.request().attribute(QNetworkRequest.Attribute.User)
-            zoom, x, y = (int(part) for part in str(coordinates).split("/"))
+            generation, zoom, x, y = (
+                int(part) for part in str(coordinates).split("/")
+            )
             key = (zoom, x, y)
             self._pending.discard(key)
+            if generation != self._source_generation:
+                return
             if reply.error() != reply.error().NoError:
                 self._missing.add(key)
                 return
@@ -1083,6 +1113,8 @@ class MapWindow(QDialog):
         *,
         location_request_factory=None,
         location_consent=None,
+        maps_directory=None,
+        local_map_consent=None,
     ) -> None:
         super().__init__(parent)
         self._compose_requested.connect(
@@ -1094,6 +1126,16 @@ class MapWindow(QDialog):
             location_request_factory or WindowsLocationRequest
         )
         self._location_consent = location_consent or self._ask_location_consent
+        self._maps_directory = (
+            application_maps_directory()
+            if maps_directory is None
+            else Path(maps_directory)
+        )
+        self._local_map_consent = local_map_consent or self._ask_local_map_consent
+        self._local_source = discover_local_tile_source(self._maps_directory)
+        if self.runtime.config.map_local_tiles and self._local_source is None:
+            self.runtime.config.map_local_tiles = False
+            self.runtime.config.save()
         self._location_request = None
         self._detected_fix: LocationFix | None = None
         self._detected_grid = ""
@@ -1270,13 +1312,35 @@ class MapWindow(QDialog):
         self.status_colours.setChecked(self.canvas.status_colours)
         self.status_colours.toggled.connect(self._status_colours_toggled)
         overlay_controls.addWidget(self.status_colours)
+        overlay_controls.addStretch(1)
+        tools_layout.addLayout(overlay_controls)
+
+        background_controls = QHBoxLayout()
+        background_controls.setSpacing(8)
         self.background = QCheckBox(tr("map.background"))
         self.background.setChecked(self.runtime.config.map_background)
         self.background.setToolTip(tr("map.background_hint"))
         self.background.toggled.connect(self._background_toggled)
-        overlay_controls.addWidget(self.background)
-        overlay_controls.addStretch(1)
-        tools_layout.addLayout(overlay_controls)
+        background_controls.addWidget(self.background)
+        self.local_map = QCheckBox(tr("map.local_background"))
+        self.local_map.setChecked(
+            bool(self.runtime.config.map_local_tiles and self._local_source)
+        )
+        self.local_map.setEnabled(
+            bool(self.background.isChecked() and self._local_source)
+        )
+        self.local_map.setToolTip(
+            tr(
+                "map.local_background_hint"
+                if self._local_source
+                else "map.local_background_missing",
+                path=str(self._maps_directory),
+            )
+        )
+        self.local_map.toggled.connect(self._local_map_toggled)
+        background_controls.addWidget(self.local_map)
+        background_controls.addStretch(1)
+        tools_layout.addLayout(background_controls)
 
         action_controls = QHBoxLayout()
         action_controls.setSpacing(8)
@@ -1777,7 +1841,9 @@ class MapWindow(QDialog):
             self._prefetch_dialog.close()
             self._prefetch_dialog.deleteLater()
             self._prefetch_dialog = None
-        self.offline_button.setEnabled(self.canvas.source is not None)
+        self.offline_button.setEnabled(
+            bool(self.canvas.source is not None and not self.canvas.source.is_local)
+        )
         if cancelled:
             text = tr("map.offline_cancelled")
         elif errors:
@@ -1869,8 +1935,67 @@ class MapWindow(QDialog):
     def _background_toggled(self, enabled: bool) -> None:
         self.runtime.config.map_background = enabled
         self.runtime.config.save()
-        self.canvas.set_source(SOURCES[0] if enabled else None)
-        self.offline_button.setEnabled(enabled)
+        self.local_map.setEnabled(bool(enabled and self._local_source))
+        self._apply_background_source()
+        self._describe_background()
+
+    def _ask_local_map_consent(self, path: Path) -> bool:
+        answer = QMessageBox.question(
+            self,
+            tr("map.local_confirm_title"),
+            tr("map.local_confirm_body", path=str(path)),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _local_map_toggled(self, enabled: bool) -> None:
+        if enabled and (
+            self._local_source is None
+            or not self._local_map_consent(self._maps_directory)
+        ):
+            self.local_map.blockSignals(True)
+            self.local_map.setChecked(False)
+            self.local_map.blockSignals(False)
+            enabled = False
+        self.runtime.config.map_local_tiles = bool(enabled)
+        self.runtime.config.save()
+        self._apply_background_source()
+        self._describe_background()
+
+    def _apply_background_source(self) -> None:
+        if not self.background.isChecked():
+            source = None
+        elif self.local_map.isChecked() and self._local_source is not None:
+            source = self._local_source
+        else:
+            source = SOURCES[0]
+        self.canvas.set_source(source)
+        self.offline_button.setEnabled(
+            bool(source is not None and not source.is_local)
+        )
+
+    def _refresh_local_source(self) -> None:
+        discovered = discover_local_tile_source(self._maps_directory)
+        if discovered == self._local_source:
+            return
+        self._local_source = discovered
+        self.local_map.setToolTip(
+            tr(
+                "map.local_background_hint"
+                if discovered
+                else "map.local_background_missing",
+                path=str(self._maps_directory),
+            )
+        )
+        self.local_map.setEnabled(bool(self.background.isChecked() and discovered))
+        if discovered is None and self.local_map.isChecked():
+            self.local_map.blockSignals(True)
+            self.local_map.setChecked(False)
+            self.local_map.blockSignals(False)
+            self.runtime.config.map_local_tiles = False
+            self.runtime.config.save()
+        self._apply_background_source()
         self._describe_background()
 
     def _describe_background(self) -> None:
@@ -1878,6 +2003,15 @@ class MapWindow(QDialog):
         source = self.canvas.source
         if source is None:
             self.attribution.setText(tr("map.background_off"))
+            return
+        if source.is_local:
+            self.attribution.setText(
+                tr(
+                    "map.local_attribution",
+                    path=str(self._maps_directory / "tiles"),
+                    zoom=source.max_zoom,
+                )
+            )
             return
         cache = self.canvas.cache
         self.attribution.setText(
@@ -1895,6 +2029,7 @@ class MapWindow(QDialog):
         # computed from the window's shape -- framing it in __init__ used the
         # size hint and then never corrected itself.
         super().showEvent(event)
+        self._refresh_local_source()
         if not self._framed:
             self._framed = True
             self._centre()

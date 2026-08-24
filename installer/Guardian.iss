@@ -79,6 +79,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "..\dist\Guardian\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\guardian\assets\guardian.ico"; DestDir: "{app}"; DestName: "Guardian.ico"; Flags: ignoreversion
 
+[Dirs]
+; The operator owns this directory. Setup creates it but never supplies map
+; tiles or removes a manually copied tiles tree during an update.
+Name: "{app}\maps"
+
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\Guardian.ico"; AppUserModelID: "OK7PS.ARDOSGuardian"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"

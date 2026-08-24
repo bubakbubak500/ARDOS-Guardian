@@ -1112,6 +1112,100 @@ def test_map_overlay_choices_are_persisted_and_measurement_is_ephemeral() -> Non
         runtime.close()
 
 
+def _write_manual_map_tile(maps_directory, zoom=10, x=553, y=346) -> None:
+    from PySide6.QtGui import QColor, QPixmap
+
+    path = maps_directory / "tiles" / str(zoom) / str(x) / f"{y}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tile = QPixmap(256, 256)
+    tile.fill(QColor("#568042"))
+    assert tile.save(str(path), "PNG")
+
+
+def test_manual_map_cannot_activate_without_files_or_confirmation(tmp_path) -> None:
+    _application()
+    from guardian.qt.map_tiles import CUZK_ZTM
+    from guardian.qt.map_window import MapWindow
+
+    runtime = ShellRuntime()
+    runtime.config.map_background = True
+    runtime.config.map_local_tiles = True
+    missing = tmp_path / "missing-maps"
+    window = MapWindow(runtime, maps_directory=missing)
+    try:
+        assert not window.local_map.isEnabled()
+        assert not window.local_map.isChecked()
+        assert runtime.config.map_local_tiles is False
+        assert window.canvas.source == CUZK_ZTM
+    finally:
+        window.close()
+        runtime.close()
+
+    maps = tmp_path / "available-maps"
+    _write_manual_map_tile(maps)
+    decisions = []
+    runtime = ShellRuntime()
+    runtime.config.map_background = True
+    runtime.config.map_local_tiles = False
+    window = MapWindow(
+        runtime,
+        maps_directory=maps,
+        local_map_consent=lambda path: decisions.append(path) or False,
+    )
+    try:
+        assert window.local_map.isEnabled()
+        window.local_map.setChecked(True)
+        assert decisions == [maps]
+        assert not window.local_map.isChecked()
+        assert runtime.config.map_local_tiles is False
+        assert window.canvas.source == CUZK_ZTM
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_confirmed_manual_map_replaces_only_the_raster_source(tmp_path) -> None:
+    _application()
+    from guardian.qt.map_tiles import CUZK_ZTM
+    from guardian.qt.map_window import MapWindow
+
+    maps = tmp_path / "maps"
+    _write_manual_map_tile(maps)
+    runtime = ShellRuntime()
+    runtime.config.map_background = True
+    runtime.config.map_local_tiles = False
+    window = MapWindow(
+        runtime,
+        maps_directory=maps,
+        local_map_consent=lambda _path: True,
+    )
+    try:
+        original_overlays = (
+            window.canvas.locator_grid_chars,
+            window.canvas.range_rings,
+            window.canvas.status_colours,
+        )
+        window.local_map.setChecked(True)
+        assert runtime.config.map_local_tiles is True
+        assert window.canvas.source is not None
+        assert window.canvas.source.is_local
+        assert window.canvas.cache is None
+        assert not window.offline_button.isEnabled()
+        assert (
+            window.canvas.locator_grid_chars,
+            window.canvas.range_rings,
+            window.canvas.status_colours,
+        ) == original_overlays
+
+        window.local_map.setChecked(False)
+        assert runtime.config.map_local_tiles is False
+        assert window.canvas.source == CUZK_ZTM
+        assert window.offline_button.isEnabled()
+    finally:
+        window.close()
+        runtime.close()
+
+
 def test_offline_area_dialog_plans_only_the_visible_cuzk_area() -> None:
     _application()
     from guardian.qt.map_window import OfflineAreaDialog, MapWindow

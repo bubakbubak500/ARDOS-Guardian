@@ -25,6 +25,9 @@ def test_installer_is_per_user_upgrade_safe_and_preserves_data() -> None:
     assert "VARAFM.exe" in script
     assert "VARA.exe" in script
     assert "rigctld.exe" in script
+    assert 'Name: "{app}\\maps"' in script
+    assert "MAPS_README.txt" in (ROOT / "build.ps1").read_text(encoding="utf-8")
+    assert (ROOT / "installer" / "MAPS_README.txt").is_file()
 
 
 def test_release_workflow_builds_manifest_checksums_and_attestation() -> None:

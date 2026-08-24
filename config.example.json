@@ -19,6 +19,7 @@
   "vara_file_compression": false,
   "guardian_compression": false,
   "morse_id_after_ack": false,
+  "map_local_tiles": false,
   "default_ttl": 5,
   "appearance": "System"
 }
