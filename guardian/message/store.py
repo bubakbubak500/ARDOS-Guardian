@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 
 from ..config import config_dir
 from ..protocol import crc16
@@ -67,13 +68,22 @@ class MessageStore:
         return self.root / f"{msg_id}.bundle"
 
     def _meta(self, mail: MailMessage, size: int) -> dict:
-        return {
+        meta = {
             "msg_id": mail.msg_id, "source": mail.source, "final_dest": mail.final_dest,
             "subject": mail.subject, "priority": mail.priority, "created": mail.created,
             "folder": mail.folder, "status": mail.status, "next_hop": mail.next_hop,
             "hops": mail.hops, "size": size, "att": len(mail.attachments),
             "read": getattr(mail, "read", True),
         }
+        # received_at/sent_at are deliberately local index metadata. They do
+        # not belong in the transferable bundle and therefore never cross RF.
+        # Rebuilding an entry (for example when a relay re-stores a bundle)
+        # must not erase times already learned locally.
+        previous = self._index.get(mail.msg_id, {})
+        for key in ("received_at", "sent_at"):
+            if key in previous:
+                meta[key] = previous[key]
+        return meta
 
     # ------------------------------------------------------------------ #
     def next_id(self, callsign: str = "") -> int:
@@ -89,11 +99,25 @@ class MessageStore:
             self._save_index()
             return mid
 
-    def add(self, mail: MailMessage) -> None:
+    def add(
+        self,
+        mail: MailMessage,
+        *,
+        received_at: float | None = None,
+        sent_at: float | None = None,
+    ) -> None:
         bundle = mail.to_bundle()
         with self._lock:
             self._bundle_path(mail.msg_id).write_bytes(bundle)
-            self._index[mail.msg_id] = self._meta(mail, len(bundle))
+            meta = self._meta(mail, len(bundle))
+            # A timestamp supplied by a new local event is only applied when
+            # this message has not already recorded that event. This keeps a
+            # duplicate incoming bundle from moving its displayed date.
+            if received_at is not None and not meta.get("received_at"):
+                meta["received_at"] = float(received_at)
+            if sent_at is not None and not meta.get("sent_at"):
+                meta["sent_at"] = float(sent_at)
+            self._index[mail.msg_id] = meta
             self._save_index()
 
     def list(self, folder: str | None = None) -> list[dict]:
@@ -143,6 +167,20 @@ class MessageStore:
                 meta["read"] = True
                 self._save_index()
 
+    def mark_sent(self, msg_id: int, at: float | None = None) -> float | None:
+        """Record the first successful local outbound handoff time."""
+        with self._lock:
+            meta = self._index.get(msg_id)
+            if not meta:
+                return None
+            existing = meta.get("sent_at")
+            if existing:
+                return float(existing)
+            stamp = time.time() if at is None else float(at)
+            meta["sent_at"] = stamp
+            self._save_index()
+            return stamp
+
     def get(self, msg_id: int) -> MailMessage | None:
         with self._lock:
             path = self._bundle_path(msg_id)
@@ -170,13 +208,31 @@ class MessageStore:
                 meta["next_hop"] = next_hop
             self._save_index()
 
-    def delete(self, msg_id: int) -> None:
+    def delete(self, msg_id: int, *, folder: str | None = None) -> bool:
         with self._lock:
-            self._index.pop(msg_id, None)
+            indexed = self._index.get(msg_id)
+            if folder is not None and (
+                indexed is None or indexed.get("folder") != folder
+            ):
+                return False
             p = self._bundle_path(msg_id)
             if p.exists():
+                # Keep the index entry until the file is gone. A locked or
+                # otherwise undeletable bundle must remain visible and
+                # retryable instead of silently disappearing from the UI.
                 p.unlink()
-            self._save_index()
+            existed = indexed is not None
+            if not existed:
+                return False
+            meta = self._index.pop(msg_id)
+            try:
+                self._save_index()
+            except Exception:
+                # Restore in-memory metadata when publishing the new index
+                # fails. The next operation can retry the index write.
+                self._index[msg_id] = meta
+                raise
+            return True
 
     def clear(self) -> int:
         """Delete every message: bundles on disk and the index.
@@ -207,5 +263,5 @@ class MessageStore:
             mail.folder, mail.status = Folder.INBOX, Status.RECEIVED
         else:
             mail.folder, mail.status = Folder.TRANSIT, Status.WAITING_PICKUP
-        self.add(mail)
+        self.add(mail, received_at=time.time())
         return mail

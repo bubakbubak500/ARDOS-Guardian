@@ -1,18 +1,25 @@
 import socket
 import struct
 import time
+import io
+import json
+import zipfile
 from types import SimpleNamespace
 
 from guardian.payload.vara_p2p import (
     DISCONNECT_TIMEOUT,
     MIN_WIRE_SIZE,
+    TransferContext,
+    TransferIdentity,
     TRANSFER_TIMEOUT,
     VaraP2PBackend,
     airtime_for,
     disconnect_timeout_for,
     encode_envelope,
+    transfer_identity_from_bundle,
     transfer_timeout_for,
 )
+from guardian.message import Attachment, MailMessage
 from guardian.protocol import crc16
 from guardian.session import Message
 from guardian.vara.client import TransferResult, VaraClient
@@ -89,6 +96,25 @@ class FakeVara:
         return result
 
 
+class ContextVara(FakeVara):
+    """Fake VARA that records context writes and mirrors client state."""
+
+    def __init__(self, incoming: bytes = b"") -> None:
+        super().__init__(incoming)
+        self.contexts = []
+
+    def set_transfer_context(
+        self,
+        source: str,
+        destination: str,
+        via: str,
+    ) -> None:
+        self.contexts.append(TransferContext(source, destination, via))
+        self.state.transfer_source = source
+        self.state.transfer_destination = destination
+        self.state.transfer_via = via
+
+
 def test_vara_envelope_contains_id_payload_and_crc() -> None:
     envelope = encode_envelope(0x12345678, b"hello")
     magic, msg_id, length = struct.unpack(">4sII", envelope[:12])
@@ -102,6 +128,248 @@ def test_vara_envelope_contains_id_payload_and_crc() -> None:
     assert crc == crc16(envelope[:crc_offset])
     assert len(envelope) == MIN_WIRE_SIZE
     assert not envelope[crc_offset + 2 :].strip(b"\0")
+
+
+def test_transfer_identity_reads_only_bounded_manifest_from_both_bundle_codecs() -> None:
+    mail = MailMessage(
+        msg_id=701,
+        source="ok1aaa",
+        final_dest="ok2bbb",
+        subject="status",
+        body="hello",
+        attachments=[Attachment("large.bin", b"x" * 50_000)],
+        hops=["OK3CCC"],
+    )
+    standard = mail.to_bundle()
+    guardian = mail.to_guardian_bundle(standard).data
+
+    for bundle in (standard, guardian):
+        identity = transfer_identity_from_bundle(bundle)
+        assert identity.source == "OK1AAA"
+        assert identity.destination == "OK2BBB"
+
+
+def test_transfer_identity_rejects_oversized_or_invalid_manifest_fields() -> None:
+    manifest = {
+        "source": "OK1AAA",
+        "final_dest": "OK2BBB",
+        "hops": ["OK3CCC"],
+    }
+    oversized = json.dumps({"source": "OK1AAA", "padding": "x" * 20_000})
+    bad_source = json.dumps({**manifest, "source": "not a callsign"})
+
+    def bundle_for(text: str) -> bytes:
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", text)
+            zf.writestr("body.txt", "not read")
+        return stream.getvalue()
+
+    assert transfer_identity_from_bundle(bundle_for(oversized)) == TransferIdentity()
+    identity = transfer_identity_from_bundle(bundle_for(bad_source))
+    assert identity.source == ""
+    assert identity.destination == "OK2BBB"
+
+    ssid = transfer_identity_from_bundle(
+        bundle_for(json.dumps({"source": "ok1aaa-1", "final_dest": "ok2bbb-2"}))
+    )
+    assert (ssid.source, ssid.destination) == ("OK1AAA-1", "OK2BBB-2")
+
+
+def test_vara_send_publishes_manifest_identity_then_clears_it() -> None:
+    vara = ContextVara()
+    contexts = vara.contexts
+    vara.state.mycall = "OK7PS"
+    bundle = MailMessage(
+        msg_id=702,
+        source="OK1AAA",
+        final_dest="OK2BBB",
+    ).to_bundle()
+    VaraP2PBackend(vara)._send(
+        Message(702, "OK7PS", "OK2BBB", "OK3CCC", payload_bytes=bundle),
+        lambda _ok: None,
+    )
+
+    assert contexts[0] == TransferContext("OK1AAA", "OK2BBB", "OK3CCC")
+    assert contexts[-1] == TransferContext()
+
+
+def test_vara_receive_shows_immediate_peer_before_manifest_origin_then_clears() -> None:
+    bundle = MailMessage(
+        msg_id=703,
+        source="OK1AAA",
+        final_dest="OK2BBB",
+    ).to_bundle()
+    vara = ContextVara(encode_envelope(703, bundle))
+    contexts = vara.contexts
+    VaraP2PBackend(vara)._receive(
+        Message(703, "OK3CCC", "OK2BBB", "OK7PS", direction="in"),
+        lambda _ok: None,
+    )
+
+    assert contexts[0] == TransferContext("", "OK2BBB", "OK3CCC")
+    assert contexts[1] == TransferContext("OK1AAA", "OK2BBB", "OK3CCC")
+    assert contexts[-1] == TransferContext()
+
+
+def test_transfer_identity_never_opens_body_or_attachment_entries(monkeypatch) -> None:
+    bundle = MailMessage(
+        msg_id=704,
+        source="OK1AAA",
+        final_dest="OK2BBB",
+        attachments=[Attachment("large.bin", b"x" * 100_000)],
+    ).to_bundle()
+    opened = []
+    original_open = zipfile.ZipFile.open
+
+    def spy_open(self, name, mode="r", pwd=None, *, force_zip64=False):
+        opened.append(getattr(name, "filename", name))
+        return original_open(
+            self,
+            name,
+            mode,
+            pwd,
+            force_zip64=force_zip64,
+        )
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", spy_open)
+    identity = transfer_identity_from_bundle(bundle)
+
+    assert identity == TransferIdentity("OK1AAA", "OK2BBB")
+    assert opened == ["manifest.json"]
+
+
+def test_failed_send_clears_transfer_context() -> None:
+    vara = ContextVara()
+    contexts = vara.contexts
+    vara.state.mycall = "OK7PS"
+    vara.transfer_result = TransferResult.PEER_CLOSED_EARLY
+    result = []
+    VaraP2PBackend(vara)._send(
+        Message(
+            705,
+            "OK7PS",
+            "OK2BBB",
+            "OK3CCC",
+            payload_bytes=MailMessage(
+                msg_id=705,
+                source="OK1AAA",
+                final_dest="OK2BBB",
+            ).to_bundle(),
+        ),
+        result.append,
+    )
+
+    assert result == [False]
+    assert contexts[0] == TransferContext("OK1AAA", "OK2BBB", "OK3CCC")
+    assert contexts[-1] == TransferContext()
+    assert (
+        vara.state.transfer_source,
+        vara.state.transfer_destination,
+        vara.state.transfer_via,
+    ) == ("", "", "")
+
+
+def test_failed_receive_clears_immediate_peer_context() -> None:
+    vara = ContextVara(b"corrupt")
+    contexts = vara.contexts
+    result = []
+    VaraP2PBackend(vara)._receive(
+        Message(706, "OK3CCC", "OK2BBB", "OK7PS", direction="in"),
+        result.append,
+    )
+
+    assert result == [False]
+    assert contexts[0] == TransferContext("", "OK2BBB", "OK3CCC")
+    assert contexts[-1] == TransferContext()
+    assert (
+        vara.state.transfer_source,
+        vara.state.transfer_destination,
+        vara.state.transfer_via,
+    ) == ("", "", "")
+
+
+def test_new_transfer_replaces_previous_identity_without_stale_route() -> None:
+    vara = ContextVara()
+    contexts = vara.contexts
+    backend = VaraP2PBackend(vara)
+    first = MailMessage(
+        msg_id=707,
+        source="OK1AAA",
+        final_dest="OK2BBB",
+    ).to_bundle()
+    second = MailMessage(
+        msg_id=708,
+        source="OK4DDD",
+        final_dest="OK5EEE",
+    ).to_bundle()
+    backend._send(
+        Message(707, "OK7PS", "OK2BBB", "OK3CCC", payload_bytes=first),
+        lambda _ok: None,
+    )
+    backend._send(
+        Message(708, "OK7PS", "OK5EEE", "OK6FFF", payload_bytes=second),
+        lambda _ok: None,
+    )
+
+    assert contexts == [
+        TransferContext("OK1AAA", "OK2BBB", "OK3CCC"),
+        TransferContext(),
+        TransferContext("OK4DDD", "OK5EEE", "OK6FFF"),
+        TransferContext(),
+    ]
+    assert (
+        vara.state.transfer_source,
+        vara.state.transfer_destination,
+        vara.state.transfer_via,
+    ) == ("", "", "")
+
+
+def test_corrupt_manifest_does_not_abort_send_or_claim_local_origin() -> None:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", "{this is not json")
+        zf.writestr("body.txt", "payload")
+    vara = ContextVara()
+    contexts = vara.contexts
+    vara.state.mycall = "OK7PS"
+    result = []
+    VaraP2PBackend(vara)._send(
+        Message(
+            709,
+            "OK7PS",
+            "OK2BBB",
+            "OK3CCC",
+            payload_bytes=stream.getvalue(),
+        ),
+        result.append,
+    )
+
+    assert result == [True]
+    assert contexts[0] == TransferContext("", "OK2BBB", "OK3CCC")
+    assert contexts[-1] == TransferContext()
+    assert vara.written
+
+
+def test_unreadable_bundle_with_local_session_source_stays_unknown() -> None:
+    vara = ContextVara()
+    contexts = vara.contexts
+    vara.state.mycall = "OK7PS"
+    result = []
+    VaraP2PBackend(vara)._send(
+        Message(
+            710,
+            "OK7PS",
+            "OK2BBB",
+            "OK3CCC",
+            payload_bytes=b"this is not a ZIP bundle",
+        ),
+        result.append,
+    )
+
+    assert result == [True]
+    assert contexts[0] == TransferContext("", "OK2BBB", "OK3CCC")
+    assert contexts[-1] == TransferContext()
 
 
 def test_vara_buffer_notification_updates_transmit_queue_telemetry() -> None:

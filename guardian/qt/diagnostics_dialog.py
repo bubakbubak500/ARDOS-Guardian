@@ -218,6 +218,7 @@ class DiagnosticsDialog(QDialog):
                 {
                     "time": event.timestamp.isoformat(),
                     "level": event.level.value,
+                    "kind": event.kind.value,
                     "source": event.source,
                     "message": event.message,
                 }

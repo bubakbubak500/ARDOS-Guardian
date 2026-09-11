@@ -18,9 +18,14 @@ worker thread and reports via the done() callback.
 
 from __future__ import annotations
 
+import io
+import json
+import re
 import struct
 import threading
 import time
+import zipfile
+from dataclasses import dataclass
 
 from ..protocol import crc16
 from ..vara import TransferResult
@@ -53,6 +58,85 @@ _AIRTIME_MARGIN = 3.0
 # VARA keys the transmitter about once a second while it drains its RF queue,
 # so ten quiet seconds mean it has genuinely stopped sending.
 PTT_QUIET_SECONDS = 10.0
+
+# Only the small manifest is needed to identify a transfer.  Reading it by
+# name avoids expanding message bodies and attachments, while these limits
+# keep a malformed or deliberately oversized manifest out of the UI path.
+MAX_TRANSFER_MANIFEST_BYTES = 16 * 1024
+MAX_TRANSFER_CALLSIGN_BYTES = 16
+# VARA/AX.25 identifiers may carry a numeric SSID (for example OK7PS-1).
+_CALLSIGN = re.compile(r"^[A-Z0-9/-]{1,16}$")
+
+
+@dataclass(frozen=True, slots=True)
+class TransferContext:
+    """Identity displayed for the VARA payload session in progress.
+
+    ``source`` is the original station only when it was established from the
+    bundle manifest (or the local station for a locally originated raw send).
+    It intentionally stays empty when an inbound session has identified only
+    its immediate peer.  ``via`` always names the peer on this VARA leg.
+    """
+
+    source: str = ""
+    destination: str = ""
+    via: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class TransferIdentity:
+    """Validated identity recovered from a message bundle manifest."""
+
+    source: str = ""
+    destination: str = ""
+
+
+def _manifest_callsign(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip().upper()
+    if len(text.encode("ascii", errors="ignore")) > MAX_TRANSFER_CALLSIGN_BYTES:
+        return ""
+    return text if _CALLSIGN.fullmatch(text) else ""
+
+
+def transfer_identity_from_bundle(data: bytes) -> TransferIdentity:
+    """Read only a bounded ``manifest.json`` from a Guardian mail bundle.
+
+    The payload itself may contain large attachments.  This helper never reads
+    ``body.txt`` or any ``att/`` entry, and rejects a duplicate or oversized
+    manifest before parsing it.  Invalid identity fields are omitted instead
+    of being displayed as though the transfer had a trustworthy origin.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as bundle:
+            manifests = [
+                info for info in bundle.infolist()
+                if info.filename == "manifest.json"
+            ]
+            if len(manifests) != 1:
+                return TransferIdentity()
+            info = manifests[0]
+            if (
+                info.file_size < 0
+                or info.compress_size < 0
+                or info.file_size > MAX_TRANSFER_MANIFEST_BYTES
+                or info.compress_size > MAX_TRANSFER_MANIFEST_BYTES
+            ):
+                return TransferIdentity()
+            raw = bundle.read(info)
+            if len(raw) > MAX_TRANSFER_MANIFEST_BYTES:
+                return TransferIdentity()
+            manifest = json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001 - identity is best-effort, never RF-critical
+        return TransferIdentity()
+    if not isinstance(manifest, dict):
+        return TransferIdentity()
+
+    return TransferIdentity(
+        source=_manifest_callsign(manifest.get("source")),
+        destination=_manifest_callsign(manifest.get("final_dest")),
+    )
 
 
 def transfer_timeout_for(wire_bytes: int) -> float:
@@ -106,13 +190,78 @@ class VaraP2PBackend(PayloadBackend):
         self.on_release = on_release
         self._transfer_lock = threading.Lock()
 
+    def _publish_transfer_context(self, context: TransferContext) -> None:
+        """Publish identity without coupling the payload layer to Qt."""
+        vara = self.vara
+        if vara is not None:
+            setter = getattr(vara, "set_transfer_context", None)
+            if callable(setter):
+                try:
+                    setter(
+                        context.source,
+                        context.destination,
+                        context.via,
+                    )
+                except Exception:  # noqa: BLE001 - UI context must not fail RF
+                    pass
+            else:
+                state = getattr(vara, "state", None)
+                if state is not None:
+                    # Stand-ins and older clients have no setter yet.  State is
+                    # intentionally not slotted, so this remains compatible.
+                    for name, value in (
+                        ("transfer_source", context.source),
+                        ("transfer_destination", context.destination),
+                        ("transfer_via", context.via),
+                    ):
+                        try:
+                            setattr(state, name, value)
+                        except Exception:  # noqa: BLE001
+                            pass
+
+    def _clear_transfer_context(self) -> None:
+        self._publish_transfer_context(TransferContext())
+
+    @staticmethod
+    def _safe_callsign(value: object) -> str:
+        return _manifest_callsign(value)
+
+    def _send_context(
+        self,
+        msg,
+        data: bytes,
+        *,
+        raw_payload: bool,
+    ) -> TransferContext:
+        """Build identity for one outbound leg, parsing a bundle once."""
+        identity = transfer_identity_from_bundle(data)
+        source = identity.source
+        if not source and raw_payload:
+            # A raw operational send has no manifest.  The session source is
+            # trustworthy only when it is this VARA instance's own MYCALL;
+            # relays use their own session source while the bundle retains the
+            # true origin, so never label that as the origin on parse failure.
+            local = self._safe_callsign(
+                getattr(getattr(self.vara, "state", None), "mycall", "")
+            )
+            message_source = self._safe_callsign(getattr(msg, "source", ""))
+            if local and message_source == local:
+                source = message_source
+        destination = identity.destination or self._safe_callsign(
+            getattr(msg, "final_dest", "")
+        )
+        via = self._safe_callsign(getattr(msg, "next_hop", ""))
+        return TransferContext(source=source, destination=destination, via=via)
+
     # ------------------------------------------------------------------ #
     def start_send(self, msg, done: DoneCb) -> None:
         threading.Thread(target=self._send, args=(msg, done), daemon=True).start()
 
     def _send(self, msg, done: DoneCb) -> None:
         if self.vara is None or not self.vara.connected:
-            self.on_log("VARA P2P: command port not connected")
+            with self._transfer_lock:
+                self._clear_transfer_context()
+                self.on_log("VARA P2P: command port not connected")
             done(False)
             return
         success = False
@@ -142,12 +291,22 @@ class VaraP2PBackend(PayloadBackend):
                     self._abort_link()
                 else:
                     self.vara.wait_data_ready()
+                    raw_payload = msg.payload_bytes is None
                     data = (
                         msg.payload_bytes
-                        if msg.payload_bytes is not None
+                        if not raw_payload
                         else msg.body.encode("utf-8")
                     )
+                    context = self._send_context(
+                        msg,
+                        data,
+                        raw_payload=raw_payload,
+                    )
                     self.vara.prepare_data_transfer()
+                    # prepare_data_transfer() resets counters and identity;
+                    # publish immediately afterwards so the snapshot describes
+                    # this locked session, not a previous one.
+                    self._publish_transfer_context(context)
                     envelope = encode_envelope(msg.msg_id, data)
                     self.vara.write_data(envelope)
                     queued = self.vara.state.tx_buffer_bytes
@@ -227,6 +386,10 @@ class VaraP2PBackend(PayloadBackend):
                     self._safe(self.on_unqsy)
                 if acquired and self.on_release:
                     self._safe(self.on_release)
+                # The UI must never carry the previous route into the next
+                # session.  Clear before done(), which may start another
+                # control exchange synchronously.
+                self._clear_transfer_context()
         # done() may immediately send RECEIVED/CANCEL over AFSK, so it must run
         # only after the shared soundcard has been returned to that modem.
         done(success)
@@ -329,7 +492,9 @@ class VaraP2PBackend(PayloadBackend):
 
     def _receive(self, msg, done: DoneCb) -> None:
         if self.vara is None or not self.vara.connected:
-            self.on_log("VARA P2P: command port not connected")
+            with self._transfer_lock:
+                self._clear_transfer_context()
+                self.on_log("VARA P2P: command port not connected")
             done(False)
             return
         success = False
@@ -350,6 +515,17 @@ class VaraP2PBackend(PayloadBackend):
                 prepare_receive = getattr(self.vara, "prepare_receive_transfer", None)
                 if prepare_receive is not None:
                     prepare_receive()
+                # The control frame tells us the immediate sender, but an
+                # inbound relay's original source is only trustworthy after
+                # its bundle manifest has arrived.  Keep source empty until
+                # then rather than presenting the relay as the originator.
+                context = TransferContext(
+                    destination=self._safe_callsign(
+                        getattr(msg, "final_dest", "")
+                    ),
+                    via=self._safe_callsign(getattr(msg, "source", "")),
+                )
+                self._publish_transfer_context(context)
                 # LISTEN ON is established once when Guardian connects to
                 # VARA. Reissuing it here can reach VARA while the inbound RF
                 # handshake is already pending; the native protocol explicitly
@@ -396,6 +572,14 @@ class VaraP2PBackend(PayloadBackend):
                             raise ValueError(f"invalid payload padding on #{mid}")
                     msg.payload_bytes = body
                     msg.body = ""
+                    identity = transfer_identity_from_bundle(body)
+                    self._publish_transfer_context(
+                        TransferContext(
+                            source=identity.source,
+                            destination=identity.destination or context.destination,
+                            via=context.via,
+                        )
+                    )
                     self.on_log(
                         f"VARA P2P: payload #{mid} received OK ({length} bytes)"
                     )
@@ -430,4 +614,5 @@ class VaraP2PBackend(PayloadBackend):
                     self._safe(self.on_unqsy)
                 if acquired and self.on_release:
                     self._safe(self.on_release)
+                self._clear_transfer_context()
         done(success)

@@ -201,6 +201,16 @@ class NetworkWorkspace(QWidget):
         self.heard_status = QLabel()
         self.heard_status.setWordWrap(True)
         layout.addWidget(self.heard_status)
+        beacon_actions = QHBoxLayout()
+        self.beacon_now = QPushButton(dual("Send beacon now", "Poslat maják nyní"))
+        self.beacon_now.setObjectName("primaryAction")
+        self.beacon_now.clicked.connect(self._send_beacon_now)
+        self.beacon_status = QLabel()
+        self.beacon_status.setWordWrap(True)
+        self.beacon_status.setObjectName("Metadata")
+        beacon_actions.addWidget(self.beacon_now)
+        beacon_actions.addWidget(self.beacon_status, 1)
+        layout.addLayout(beacon_actions)
         return page
 
     def _topology_page(self) -> QWidget:
@@ -449,6 +459,17 @@ class NetworkWorkspace(QWidget):
         self.link_advert_now.setEnabled(not advert_blockers)
         self.link_advert_now.setToolTip(" ".join(advert_blockers))
 
+    def _sync_beacon_controls(self) -> None:
+        """Keep the manual action available while explaining any live blocker."""
+        reason = self.runtime.operations.beacon_block_reason()
+        if reason is None:
+            reason = dual(
+                "Ready to send a presence beacon.",
+                "Maják přítomnosti je připraven k odeslání.",
+            )
+        self.beacon_now.setToolTip(reason)
+        self.beacon_status.setText(reason)
+
     def _unsaved_discovery_changes(self) -> bool:
         """Whether the pages hold a setting the station has not adopted yet."""
         config = self.runtime.config
@@ -490,6 +511,26 @@ class NetworkWorkspace(QWidget):
             )
             return
         self.refresh()
+
+    def _send_beacon_now(self) -> None:
+        """Ask Operations to queue one beacon and report the one-shot result."""
+        if self.runtime.operations.send_beacon_now():
+            self.beacon_status.setText(
+                dual(
+                    "Presence beacon queued for transmission.",
+                    "Maják přítomnosti zařazen k vysílání.",
+                )
+            )
+        else:
+            # Operations logs the detailed blocker or failure. Keep an
+            # actionable result visible even if the transport changed between
+            # the button click and this UI callback.
+            self.beacon_status.setText(
+                dual(
+                    "Presence beacon was not queued; see the operational log.",
+                    "Maják přítomnosti nebyl zařazen; podívejte se do provozního logu.",
+                )
+            )
 
     def _selected_discovered_destination(self) -> str:
         row = self.discovery_routes.currentRow()
@@ -842,6 +883,7 @@ class NetworkWorkspace(QWidget):
             for column, value in enumerate(values):
                 self.heard_table.setItem(row, column, QTableWidgetItem(value))
         self.heard_status.setText(self._heard_state_text(heard, now))
+        self._sync_beacon_controls()
 
         topology = self.runtime.topology
         derived = topology.derive_routes(self.runtime.config.callsign)

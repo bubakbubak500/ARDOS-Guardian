@@ -20,6 +20,9 @@ def _snapshot(
     received: int = 0,
     receive_total: int = 0,
     bitrate: int | None = None,
+    source: str = "",
+    destination: str = "",
+    via: str = "",
 ):
     return SimpleNamespace(vara=SimpleNamespace(
         data_bytes_written=written,
@@ -28,6 +31,9 @@ def _snapshot(
         rx_transfer_bytes=received,
         rx_transfer_total=receive_total,
         tx_bitrate_bps=bitrate,
+        transfer_source=source,
+        transfer_destination=destination,
+        transfer_via=via,
     ))
 
 
@@ -69,3 +75,66 @@ def test_receive_panel_is_visible_before_size_then_reports_progress() -> None:
     ))
     assert "128 of 256 B received" in panel.detail.text()
     assert "Transfer speed: 566 bit/s" in panel.detail.text()
+
+
+def test_transfer_state_carries_origin_destination_and_immediate_peer() -> None:
+    state = transfer_state(
+        _snapshot(
+            written=256,
+            queued=128,
+            direction="send",
+            source="OK1AAA",
+            destination="OK2BBB",
+            via="OK3CCC",
+        ),
+        True,
+    )
+
+    assert (state.source, state.destination, state.via) == (
+        "OK1AAA",
+        "OK2BBB",
+        "OK3CCC",
+    )
+
+
+def test_transfer_panel_marks_unknown_inbound_origin_but_keeps_peer() -> None:
+    _application()
+    panel = TransferPanel()
+    panel.apply(
+        transfer_state(
+            _snapshot(
+                direction="receive",
+                received=32,
+                receive_total=256,
+                destination="OK2BBB",
+                via="OK3CCC",
+            ),
+            True,
+        )
+    )
+
+    assert "From unknown" in panel.detail.text()
+    assert "To OK2BBB" in panel.detail.text()
+    assert "@ OK3CCC" in panel.detail.text()
+
+
+def test_transfer_panel_hides_redundant_direct_hop_marker() -> None:
+    _application()
+    panel = TransferPanel()
+    panel.apply(
+        transfer_state(
+            _snapshot(
+                written=256,
+                queued=0,
+                direction="send",
+                source="OK1AAA",
+                destination="OK2BBB",
+                via="OK2BBB",
+            ),
+            True,
+        )
+    )
+
+    assert "From OK1AAA" in panel.detail.text()
+    assert "To OK2BBB" in panel.detail.text()
+    assert "@ OK2BBB" not in panel.detail.text()

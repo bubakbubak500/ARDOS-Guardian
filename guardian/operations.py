@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +32,7 @@ from .radio.rigctld_launcher import RigctldProcess
 from .routing import HeardStations, RouteTable
 from .services import (
     EventBus,
+    LogEventKind,
     LogLevel,
     MailboxSnapshot,
     NetworkSnapshot,
@@ -112,6 +113,10 @@ class Operations:
     # A failed automatic handoff stays queued and may be retried, but never in
     # a tight keying loop against a peer that remains visible in Heard.
     _AUTO_DELIVER_RETRY = 300.0
+    # A manual beacon may bypass the configured automatic interval, but two
+    # accepted requests must never key the station back-to-back.  This also
+    # gives an asynchronous audio transport time to account for the frame.
+    _BEACON_MIN_GAP = 15.0
 
     def __init__(
         self,
@@ -141,12 +146,22 @@ class Operations:
         self.configure_vara_host_ptt()
         self.audio_transport: AudioControlTransport | None = None
         self._radio_lock = threading.RLock()
+        # Mail deletion runs in a worker, while automatic delivery and
+        # send_queued run from the operational tick. Keep the short
+        # mailbox decision/transition atomic without serialising radio work.
+        self._mail_mutation_lock = threading.RLock()
+        self._mail_preparing: set[int] = set()
+        # Serialise manual/automatic beacon requests separately from the radio
+        # CAT lock.  Queueing a control frame does not touch the rig, and the
+        # operation takes the CAT lock only as a nonblocking contention check.
+        self._beacon_lock = threading.Lock()
         self._payload_active = threading.Event()
         self._last_radio_poll = 0.0
         self._stored_inbound: set[int] = set()
         self._qsy_previous: int | None = None
         self._qsy_previous_mode: str = ""
         self._last_beacon = 0.0
+        self._last_beacon_request: float | None = None
         self._last_auto_deliver = 0.0
         self._auto_delivery_attempted: dict[int, float] = {}
         self._vara_process: subprocess.Popen | None = None
@@ -169,8 +184,9 @@ class Operations:
         level: LogLevel = LogLevel.INFO,
         *,
         source: str = "operation",
+        kind: LogEventKind | str = LogEventKind.GENERAL,
     ) -> None:
-        self.events.publish(message, level=level, source=source)
+        self.events.publish(message, level=level, source=source, kind=kind)
 
     # A HAVE_MSG is 0.9 s on AFSK 1200 but 5.2 s on MFSK-16, and an exchange is
     # announce + ack back to back. Budget both legs plus PTT turnaround, or the
@@ -602,6 +618,106 @@ class Operations:
 
         return self.workers.submit(task_name, operation, completed)
 
+    def _mail_delete_block_reason(
+        self, message_ids: Iterable[int] | None = None
+    ) -> str | None:
+        """Return a user-facing reason why mailbox deletion must wait.
+
+        The check is called while ``_mail_mutation_lock`` is held. In addition
+        to live session state, the preparing set covers the compression window
+        before a session exists and after ``send_queued`` has marked SENDING.
+        """
+        if self._payload_active.is_set() or self._active_session_count():
+            return dual(
+                "Mail was not deleted: a transfer is in progress.",
+                "Zprávy nebyly odstraněny: probíhá přenos.",
+            )
+        preparing = (
+            set(self._mail_preparing)
+            if message_ids is None
+            else set(message_ids).intersection(self._mail_preparing)
+        )
+        if preparing:
+            return dual(
+                "Mail was not deleted: a selected message is being prepared for transmission.",
+                "Zprávy nebyly odstraněny: vybraná zpráva se připravuje k přenosu.",
+            )
+        return None
+
+    def _mailbox_snapshot(self) -> MailboxSnapshot:
+        counts = self.mailstore.counts()
+        return MailboxSnapshot(
+            inbox=counts.get(Folder.INBOX, 0),
+            unread=self.mailstore.unread(Folder.INBOX),
+            outbox=counts.get(Folder.OUTBOX, 0),
+            outbox_failed=self.mailstore.failed(Folder.OUTBOX),
+            transit=counts.get(Folder.TRANSIT, 0),
+        )
+
+    def delete_mail(
+        self,
+        message_ids: Iterable[int],
+        *,
+        folder: str | None = None,
+    ) -> int:
+        """Delete selected messages from one folder after an in-worker guard.
+
+        ``folder`` is checked again inside the worker so a message moved by
+        delivery after the UI selection cannot cause deletion from another
+        folder. A guard failure raises ``RuntimeError`` for the UI callback.
+        """
+        ids = tuple(dict.fromkeys(int(value) for value in message_ids))
+        if not ids:
+            return 0
+        with self._mail_mutation_lock:
+            reason = self._mail_delete_block_reason(ids)
+            if reason is not None:
+                raise RuntimeError(reason)
+            indexed = {
+                int(meta["msg_id"]): meta
+                for meta in self.mailstore.list()
+                if "msg_id" in meta
+            }
+            if folder is not None:
+                ids = tuple(
+                    msg_id
+                    for msg_id in ids
+                    if indexed.get(msg_id, {}).get("folder") == folder
+                )
+            removed = 0
+            failures: list[tuple[int, BaseException]] = []
+            for msg_id in ids:
+                try:
+                    if self.mailstore.delete(msg_id, folder=folder):
+                        removed += 1
+                except Exception as exc:  # worker reports file errors to UI
+                    failures.append((msg_id, exc))
+            self.snapshots.update(mailbox=self._mailbox_snapshot())
+        if failures:
+            detail = "; ".join(
+                f"#{msg_id}: {exc}" for msg_id, exc in failures
+            )
+            self._log(
+                dual(
+                    f"Selected mail partly deleted: {removed} removed; "
+                    f"{len(failures)} failed ({detail}).",
+                    f"Vybrané zprávy byly odstraněny jen částečně: {removed}; "
+                    f"selhalo {len(failures)} ({detail}).",
+                ),
+                LogLevel.WARNING,
+                source="mail",
+            )
+            if not removed:
+                raise RuntimeError(detail)
+        self._log(
+            dual(
+                f"Selected mail deleted: {removed} messages.",
+                f"Vybrané zprávy odstraněny: {removed} zpráv.",
+            ),
+            source="mail",
+        )
+        return removed
+
     def clear_mailstore(self) -> int:
         """Delete every stored message; refused while a transfer is running.
 
@@ -609,18 +725,13 @@ class Operations:
         would fail the transfer in a confusing way. Returns the number of
         messages removed, or -1 for a refusal.
         """
-        if self._payload_active.is_set() or self._active_session_count():
-            self._log(
-                dual(
-                    "Mail database not cleared: a transfer is in progress.",
-                    "Databáze zpráv nebyla smazána: probíhá přenos.",
-                ),
-                LogLevel.WARNING,
-                source="mail",
-            )
-            return -1
-        removed = self.mailstore.clear()
-        self.snapshots.update(mailbox=MailboxSnapshot())
+        with self._mail_mutation_lock:
+            reason = self._mail_delete_block_reason()
+            if reason is not None:
+                self._log(reason, LogLevel.WARNING, source="mail")
+                return -1
+            removed = self.mailstore.clear()
+            self.snapshots.update(mailbox=MailboxSnapshot())
         self._log(
             dual(
                 f"Mail database cleared: {removed} messages deleted.",
@@ -698,6 +809,7 @@ class Operations:
                 "kmitočtech.",
             ),
             source="alert",
+            kind=LogEventKind.ALERT,
         )
 
     def _alert_sweep(self, frame, channels, net, transport) -> int:
@@ -861,6 +973,7 @@ class Operations:
                 else LogLevel.INFO
             ),
             source="alert",
+            kind=LogEventKind.ALERT,
         )
 
     def apply_vara_session_settings(self) -> bool:
@@ -1215,7 +1328,11 @@ class Operations:
                     source="radio",
                 )
             else:
-                self._log(dual("Radio disconnected.", "Rádio odpojeno."), source="radio")
+                self._log(
+                    dual("Radio disconnected.", "Rádio odpojeno."),
+                    source="radio",
+                    kind=LogEventKind.CONNECTION_LOST,
+                )
             self.request_radio_poll(force=True)
 
         return self.workers.submit("radio-control", operation, completed)
@@ -1324,7 +1441,11 @@ class Operations:
                     source="vara",
                 )
             else:
-                self._log(dual("VARA disconnected.", "VARA odpojena."), source="vara")
+                self._log(
+                    dual("VARA disconnected.", "VARA odpojena."),
+                    source="vara",
+                    kind=LogEventKind.CONNECTION_LOST,
+                )
             self._update_vara_snapshot()
 
         return self.workers.submit(
@@ -1484,70 +1605,124 @@ class Operations:
                 source="mail",
             )
             return False
-        mail = self.mailstore.get(message_id)
-        if mail is None:
+        # The status transition is the hand-off point with mailbox deletion.
+        # Keep route/QSY checks and the transition together so a worker cannot
+        # remove the bundle between the final read and marking it in flight.
+        if not self._mail_mutation_lock.acquire(blocking=False):
+            self._log(
+                dual(
+                    "Message remains queued: mailbox maintenance is in progress.",
+                    "Zpráva zůstává ve frontě: probíhá údržba schránky.",
+                ),
+                LogLevel.WARNING,
+                source="mail",
+            )
             return False
-        route = self.routes.lookup(mail.final_dest)
-        direct_route = route is not None and (
-            not route.preferred or route.preferred == mail.final_dest.strip().upper()
-        )
-        if (
-            direct_route
-            and route.freq_hz
-            and self.config.auto_qsy
-            and not self.config.separate_working_channels
-        ):
-            if not self._qsy_to(mail.final_dest):
+        try:
+            if message_id in self._mail_preparing:
                 self._log(
                     dual(
-                        f"Message #{mail.msg_id} was not sent because direct QSY failed.",
-                        f"Zpráva #{mail.msg_id} nebyla odeslána, protože přímé QSY selhalo.",
+                        f"Message #{message_id} is already being prepared for transmission.",
+                        f"Zpráva #{message_id} se již připravuje k přenosu.",
                     ),
-                    LogLevel.ERROR,
+                    LogLevel.WARNING,
                     source="mail",
                 )
                 return False
-        self.mailstore.set_status(message_id, status=Status.SENDING)
-        baseline = mail.to_bundle()
+            active = self.net.sessions.get(message_id)
+            if active is not None and not active.state.terminal:
+                self._log(
+                    dual(
+                        f"Message #{message_id} is already in a transfer.",
+                        f"Zpráva #{message_id} je již v přenosu.",
+                    ),
+                    LogLevel.WARNING,
+                    source="mail",
+                )
+                return False
+            mail = self.mailstore.get(message_id)
+            if mail is None:
+                return False
+            route = self.routes.lookup(mail.final_dest)
+            direct_route = route is not None and (
+                not route.preferred or route.preferred == mail.final_dest.strip().upper()
+            )
+            if (
+                direct_route
+                and route.freq_hz
+                and self.config.auto_qsy
+                and not self.config.separate_working_channels
+            ):
+                if not self._qsy_to(mail.final_dest):
+                    self._log(
+                        dual(
+                            f"Message #{mail.msg_id} was not sent because direct QSY failed.",
+                            f"Zpráva #{mail.msg_id} nebyla odeslána, protože přímé QSY selhalo.",
+                        ),
+                        LogLevel.ERROR,
+                        source="mail",
+                    )
+                    return False
+            self.mailstore.set_status(message_id, status=Status.SENDING)
+            baseline = mail.to_bundle()
+            # This covers both the compression worker and the short window
+            # before a normal bundle is announced as a network session.
+            self._mail_preparing.add(message_id)
+        finally:
+            self._mail_mutation_lock.release()
         if self.config.guardian_compression and not self.config.vara_file_compression:
             task_name = f"mail-compress-{mail.msg_id}"
 
             def compressed(result: TaskResult) -> None:
-                if result.error:
-                    self._log(
-                        dual(
-                            f"Guardian compression failed for message #{mail.msg_id}; "
-                            "sending the standard ZIP bundle.",
-                            f"Komprese Guardian pro zprávu #{mail.msg_id} selhala; "
-                            "odesílám standardní ZIP balíček.",
-                        ),
-                        LogLevel.WARNING,
-                        source="payload",
-                    )
-                    self._announce_prepared_mail(mail, baseline)
-                    return
-                encoding = result.value
-                flags = Flags.COMPRESSED if encoding.method == "bzip2" else Flags.NONE
-                self._log(
-                    dual(
-                        f"Guardian BZIP2 compression produced {encoding.method} for "
-                        f"message #{mail.msg_id}: {encoding.baseline_size} → "
-                        f"{len(encoding.data)} B ({encoding.saved_percent:.1f}% saved).",
-                        f"Komprese Guardian BZIP2 vytvořila {encoding.method} pro "
-                        f"zprávu #{mail.msg_id}: {encoding.baseline_size} → "
-                        f"{len(encoding.data)} B (úspora {encoding.saved_percent:.1f} %).",
-                    ),
-                    source="payload",
-                )
-                self._announce_prepared_mail(mail, encoding.data, flags=flags)
+                # Do not let deletion begin between releasing the worker's
+                # active marker and announcing the session.
+                with self._mail_mutation_lock:
+                    try:
+                        if result.error:
+                            self._log(
+                                dual(
+                                    f"Guardian compression failed for message #{mail.msg_id}; "
+                                    "sending the standard ZIP bundle.",
+                                    f"Komprese Guardian pro zprávu #{mail.msg_id} selhala; "
+                                    "odesílám standardní ZIP balíček.",
+                                ),
+                                LogLevel.WARNING,
+                                source="payload",
+                            )
+                            self._announce_prepared_mail(mail, baseline)
+                            return
+                        encoding = result.value
+                        flags = Flags.COMPRESSED if encoding.method == "bzip2" else Flags.NONE
+                        self._log(
+                            dual(
+                                f"Guardian BZIP2 compression produced {encoding.method} for "
+                                f"message #{mail.msg_id}: {encoding.baseline_size} → "
+                                f"{len(encoding.data)} B ({encoding.saved_percent:.1f}% saved).",
+                                f"Komprese Guardian BZIP2 vytvořila {encoding.method} pro "
+                                f"zprávu #{mail.msg_id}: {encoding.baseline_size} → "
+                                f"{len(encoding.data)} B (úspora {encoding.saved_percent:.1f} %).",
+                            ),
+                            source="payload",
+                        )
+                        self._announce_prepared_mail(mail, encoding.data, flags=flags)
+                    finally:
+                        self._mail_preparing.discard(mail.msg_id)
 
-            queued = self.workers.submit(
-                task_name,
-                lambda: mail.to_guardian_bundle(baseline),
-                compressed,
-            )
+            try:
+                queued = self.workers.submit(
+                    task_name,
+                    lambda: mail.to_guardian_bundle(baseline),
+                    compressed,
+                )
+            except Exception:
+                with self._mail_mutation_lock:
+                    self._mail_preparing.discard(message_id)
+                    self.mailstore.set_status(message_id, status=Status.QUEUED)
+                raise
             if not queued:
-                self.mailstore.set_status(message_id, status=Status.QUEUED)
+                with self._mail_mutation_lock:
+                    self._mail_preparing.discard(message_id)
+                    self.mailstore.set_status(message_id, status=Status.QUEUED)
                 return False
             self._log(
                 dual(
@@ -1566,7 +1741,11 @@ class Operations:
                 LogLevel.WARNING,
                 source="payload",
             )
-        self._announce_prepared_mail(mail, baseline)
+        with self._mail_mutation_lock:
+            try:
+                self._announce_prepared_mail(mail, baseline)
+            finally:
+                self._mail_preparing.discard(message_id)
         return True
 
     def tick(self) -> None:
@@ -1598,29 +1777,208 @@ class Operations:
             not message.state.terminal for message in self.net.sessions.values()
         )
 
-    def _tick_beacon(self, now: float) -> None:
-        """Announce presence so peers can hear this station and route to it."""
-        if not self.config.beacon_enabled or not self._net_idle():
-            return
-        interval = max(15.0, float(self.config.beacon_interval))
-        if now - self._last_beacon < interval:
-            return
-        self._last_beacon = now
+    def _control_tx_idle(self, transport=None) -> bool:
+        """Return whether the live control transport has no TX in flight.
+
+        ``AudioControlTransport`` exposes a zero-timeout wait for this exact
+        hand-off.  The small fallbacks keep dry-run transports used by tests and
+        integrations compatible while still refusing a transport that reports
+        pending work.  This method never waits for a frame to finish.
+        """
+        transport = self.audio_transport if transport is None else transport
+        if transport is None:
+            return False
+        pending = getattr(transport, "_pending_tx", None)
+        if pending is not None:
+            try:
+                if int(pending) > 0:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        wait = getattr(transport, "wait_tx_idle", None)
+        if not callable(wait):
+            return True
         try:
-            self.net.beacon()
-        except Exception as exc:  # noqa: BLE001
-            self._log(
-                dual(f"Beacon failed: {exc}", f"Maják selhal: {exc}"),
-                LogLevel.WARNING,
-                source="network",
+            return bool(wait(timeout=0.0))
+        except TypeError:
+            # A few lightweight transports accept the timeout positionally.
+            try:
+                return bool(wait(0.0))
+            except TypeError:
+                # A no-argument wait may use a long default timeout, so refuse
+                # it rather than blocking the UI while checking this gate.
+                return False
+            except Exception:  # noqa: BLE001 - fail closed for a gate
+                return False
+        except Exception:  # noqa: BLE001 - fail closed for a gate
+            return False
+
+    def _beacon_block_reason(
+        self,
+        *,
+        now: float | None = None,
+        manual: bool = False,
+    ) -> str | None:
+        """Explain why a beacon cannot be queued at this instant.
+
+        Automatic beacons call this as a silent gate from the periodic tick;
+        manual callers receive the same reason in the operational log and UI.
+        Keeping the checks in one place prevents the manual action from cutting
+        across a VARA hand-off or an alert frequency sweep.
+        """
+        if self.audio_transport is None:
+            return dual(
+                "Start control channel before sending a beacon.",
+                "Před odesláním majáku spusťte řídicí kanál.",
             )
-            return
+        if self._payload_active.is_set() or bool(
+            getattr(getattr(self.vara, "state", None), "ptt", False)
+        ):
+            return dual(
+                "Beacon not queued: a VARA payload transfer is active.",
+                "Maják nezařazen: probíhá datový přenos přes VARA.",
+            )
+        if self._active_session_count():
+            return dual(
+                "Beacon not queued: a network session is active.",
+                "Maják nezařazen: probíhá síťová relace.",
+            )
+        if self.scanner is not None:
+            return dual(
+                "Beacon not queued: stop the channel scanner first.",
+                "Maják nezařazen: nejprve zastavte scanner kanálů.",
+            )
+        if self.workers.is_active("alert-sweep"):
+            return dual(
+                "Beacon not queued: an alert frequency sweep is active.",
+                "Maják nezařazen: probíhá přelaďování výstrahy.",
+            )
+        if self.workers.is_active("radio-control"):
+            return dual(
+                "Beacon not queued: radio control is busy.",
+                "Maják nezařazen: řízení rádia je zaneprázdněné.",
+            )
+        pending_alerts = getattr(self.net, "alerts_pending", None)
+        if callable(pending_alerts):
+            try:
+                if int(pending_alerts()) > 0:
+                    return dual(
+                        "Beacon not queued: control frames are already pending.",
+                        "Maják nezařazen: řídicí rámce už čekají ve frontě.",
+                    )
+            except Exception:  # noqa: BLE001 - a broken status must fail closed
+                return dual(
+                    "Beacon not queued: control transmit state is unavailable.",
+                    "Maják nezařazen: stav vysílací fronty řídicích rámců není dostupný.",
+                )
+        if not self._control_tx_idle():
+            return dual(
+                "Beacon not queued: a control burst is still on the air.",
+                "Maják nezařazen: řídicí rámec se stále vysílá.",
+            )
+        if manual:
+            now = time.monotonic() if now is None else now
+            last = self._last_beacon_request
+            # Keep compatibility with code that inspects or restores the
+            # historical `_last_beacon` field directly.
+            if last is None and self._last_beacon > 0.0:
+                last = self._last_beacon
+            if last is not None and now - last < self._BEACON_MIN_GAP:
+                return dual(
+                    "Beacon not queued: another beacon was just queued; wait a few seconds.",
+                    "Maják nezařazen: další maják byl právě zařazen; chvíli počkejte.",
+                )
+        return None
+
+    def beacon_block_reason(self) -> str | None:
+        """Return the current manual-beacon status for the Network workspace."""
+        return self._beacon_block_reason(manual=True)
+
+    def _queue_beacon(self, now: float, *, manual: bool) -> bool:
+        """Queue one beacon after the shared safety gate has passed.
+
+        ``True`` means the control frame was handed to the transport queue. It
+        says nothing about a peer hearing or acknowledging the beacon; BEACON
+        frames have no reception acknowledgement.
+        """
+        reason: str | None
+        # Queueing a control frame does not touch the radio. Keep this lock
+        # separate from ``_radio_lock`` and acquire both without waiting so a
+        # second click cannot freeze behind a CAT command already in flight.
+        if not self._beacon_lock.acquire(blocking=False):
+            reason = dual(
+                "Beacon not queued: another beacon request is in progress.",
+                "Maják nezařazen: právě se zpracovává jiný požadavek na maják.",
+            )
+            if manual:
+                self._log(reason, LogLevel.WARNING, source="network")
+            return False
+        if not self._radio_lock.acquire(blocking=False):
+            reason = dual(
+                "Beacon not queued: radio control is busy.",
+                "Maják nezařazen: řízení rádia je zaneprázdněné.",
+            )
+            self._beacon_lock.release()
+            if manual:
+                self._log(reason, LogLevel.WARNING, source="network")
+            return False
+        try:
+            reason = self._beacon_block_reason(now=now, manual=manual)
+            if reason is not None:
+                if manual:
+                    self._log(reason, LogLevel.WARNING, source="network")
+                return False
+            # Record the request before calling into the transport.  A broken
+            # transport must not turn a click or a timer tick into a tight retry
+            # loop, and a manual request must hold off the next auto tick.
+            self._last_beacon = now
+            self._last_beacon_request = now
+            try:
+                self.net.beacon()
+            except Exception as exc:  # noqa: BLE001 - operation must stay alive
+                self._log(
+                    dual(f"Beacon failed: {exc}", f"Maják selhal: {exc}"),
+                    LogLevel.WARNING,
+                    source="network",
+                )
+                return False
+        finally:
+            self._radio_lock.release()
+            self._beacon_lock.release()
         self._log(
-            dual("Presence beacon sent.", "Odeslán maják přítomnosti."),
+            dual(
+                "Presence beacon queued for transmission.",
+                "Maják přítomnosti zařazen k vysílání.",
+            ),
             source="network",
         )
+        return True
+
+    def send_beacon_now(self) -> bool:
+        """Queue one presence beacon, regardless of automatic beacon settings."""
+        return self._queue_beacon(time.monotonic(), manual=True)
+
+    def _tick_beacon(self, now: float) -> None:
+        """Announce presence so peers can hear this station and route to it."""
+        if not self.config.beacon_enabled:
+            return
+        interval = max(self._BEACON_MIN_GAP, float(self.config.beacon_interval))
+        if now - self._last_beacon < interval:
+            return
+        self._queue_beacon(now, manual=False)
 
     def _tick_auto_deliver(self, now: float) -> None:
+        # Keep the mailbox selection and the send_queued transition together
+        # with worker-side deletion. A busy worker simply lets the next tick
+        # retry; no radio or UI thread waits on the mailbox lock.
+        if not self._mail_mutation_lock.acquire(blocking=False):
+            return
+        try:
+            self._tick_auto_deliver_locked(now)
+        finally:
+            self._mail_mutation_lock.release()
+
+    def _tick_auto_deliver_locked(self, now: float) -> None:
         """Send waiting mail as soon as its next hop is actually heard.
 
         Only one message per sweep, and only to a station heard right now --
@@ -1729,6 +2087,9 @@ class Operations:
                 transfer_direction=state.transfer_direction,
                 rx_transfer_bytes=state.rx_transfer_bytes,
                 rx_transfer_total=state.rx_transfer_total,
+                transfer_source=state.transfer_source,
+                transfer_destination=state.transfer_destination,
+                transfer_via=state.transfer_via,
                 data_socket_generation=state.data_socket_generation,
                 data_local_endpoint=state.data_local_endpoint,
                 data_peer_endpoint=state.data_peer_endpoint,
@@ -1757,9 +2118,22 @@ class Operations:
         )
 
     def _session_event(self, message, event: str) -> None:
+        kind = LogEventKind.GENERAL
+        if message.state in (SessionState.STARTING_VARA, SessionState.RECEIVING):
+            kind = LogEventKind.TRANSFER_STARTED
+        elif message.state in (
+            SessionState.CONFIRMED,
+            SessionState.FORWARDED,
+            SessionState.RECEIVED_OK,
+            SessionState.DELIVERED,
+        ):
+            kind = LogEventKind.TRANSFER_COMPLETED
+        elif message.state in (SessionState.FAILED, SessionState.CANCELLED):
+            kind = LogEventKind.TRANSFER_FAILED
         self._log(
             f"[{message.source}#{message.msg_id}] {event}",
             source="session",
+            kind=kind,
         )
         # Adopt the session's negotiated slow-keying gap for the VARA phase.
         # STARTING_VARA/RECEIVING are emitted before the payload backend takes
@@ -1814,12 +2188,14 @@ class Operations:
                     status=Status.DELIVERED,
                     folder=Folder.SENT,
                 )
+                self.mailstore.mark_sent(message.msg_id)
             elif message.state in (SessionState.CONFIRMED, SessionState.FORWARDED):
                 self.mailstore.set_status(
                     message.msg_id,
                     status=Status.FORWARDED,
                     folder=Folder.SENT,
                 )
+                self.mailstore.mark_sent(message.msg_id)
             elif message.state in (SessionState.FAILED, SessionState.CANCELLED):
                 if stored.folder == Folder.TRANSIT:
                     self.mailstore.set_status(
@@ -1877,7 +2253,14 @@ class Operations:
         # the activity panel and make the Qt UI sluggish.
         if text.upper().startswith("BUFFER"):
             return
-        self._log(f"[VARA] {text}", source="vara")
+        notification = text.strip().upper()
+        if notification in {"PTT ON", "PTT OFF"}:
+            kind = LogEventKind.VARA_PTT
+        elif notification in {"BUSY ON", "BUSY OFF"}:
+            kind = LogEventKind.VARA_BUSY
+        else:
+            kind = LogEventKind.GENERAL
+        self._log(f"[VARA] {text}", source="vara", kind=kind)
 
     def _radio_ptt(self, enabled: bool) -> None:
         try:

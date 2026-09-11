@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QItemSelectionModel, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
+    QAbstractItemView,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -43,6 +45,20 @@ from ..protocol import Priority
 from .alerts import AlertDialog
 from .inputs import RowTable, UppercaseLineEdit
 from .runtime import ShellRuntime
+
+
+class _MailDateItem(QTableWidgetItem):
+    """Date cell sorted by its local timestamp rather than its label."""
+
+    _SORT_ROLE = Qt.ItemDataRole.UserRole + 1
+
+    def __lt__(self, other) -> bool:
+        try:
+            left = float(self.data(self._SORT_ROLE))
+            right = float(other.data(self._SORT_ROLE))
+        except (TypeError, ValueError):
+            return super().__lt__(other)
+        return left < right
 
 
 class ComposeDialog(QDialog):
@@ -342,7 +358,14 @@ class MailWorkspace(QWidget):
         super().__init__(parent)
         self.runtime = runtime
         self.folder = Folder.INBOX
+        # ``selected_id`` remains the primary row for the reader and for
+        # compatibility with existing integrations. The set drives bulk
+        # actions and survives table rebuilds.
+        self.selected_ids: set[int] = set()
         self.selected_id: int | None = None
+        self.current_id: int | None = None
+        self._reader_signature: tuple | None = None
+        self._row_fingerprints: dict[int, tuple] = {}
         self._attachments: list[Attachment] = []
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 8, 10, 8)
@@ -374,10 +397,27 @@ class MailWorkspace(QWidget):
         splitter.addWidget(self.folders)
 
         content = QSplitter(Qt.Orientation.Vertical)
-        self.messages = RowTable(0, 5)
-        self.messages.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch
+        self.messages = RowTable(0, 6)
+        self.messages.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        self.messages.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        header = self.messages.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(70)
+        for column, width in (
+            (0, 130),
+            (1, 250),
+            (2, 105),
+            (3, 90),
+            (4, 100),
+            (5, 145),
+        ):
+            header.resizeSection(column, width)
+        self.messages.setSortingEnabled(True)
         self.messages.itemSelectionChanged.connect(self._open_selected)
         self.messages.doubleClicked.connect(self.open_in_window)
         content.addWidget(self.messages)
@@ -436,15 +476,7 @@ class MailWorkspace(QWidget):
         self.compose_button.setText(tr("mail.compose"))
         self.alert_button.setText(tr("alert.send"))
         self.refresh_button.setText(tr("mail.refresh"))
-        self.messages.setHorizontalHeaderLabels(
-            [
-                tr("mail.peer"),
-                tr("mail.subject"),
-                tr("mail.status"),
-                tr("mail.attachments"),
-                tr("mail.size"),
-            ]
-        )
+        self._set_message_headers()
         self.reader.setPlaceholderText(tr("mail.select"))
         self.attachment_label.setText(tr("mail.attachments"))
         self.open_attachment_button.setText(tr("mail.attachment_open"))
@@ -453,6 +485,7 @@ class MailWorkspace(QWidget):
         self.reply_button.setText(tr("mail.reply"))
         self.send_button.setText(tr("mail.send_queued"))
         self.delete_button.setText(tr("mail.delete"))
+        self._reader_signature = None
         self.refresh()
 
     def _select_folder(self, row: int) -> None:
@@ -461,11 +494,67 @@ class MailWorkspace(QWidget):
             self._clear_selection()
             self.refresh()
 
+    def _set_message_headers(self) -> None:
+        if self.folder == Folder.INBOX:
+            peer_key = "mail.from"
+            date_key = "mail.received_at"
+        elif self.folder == Folder.TRANSIT:
+            peer_key = "mail.peer"
+            date_key = "mail.received_at"
+        elif self.folder == Folder.SENT:
+            peer_key = "mail.to"
+            date_key = "mail.sent_at"
+        else:
+            peer_key = "mail.to"
+            date_key = "mail.created"
+        self.messages.setHorizontalHeaderLabels(
+            [
+                tr(peer_key),
+                tr("mail.subject"),
+                tr("mail.status"),
+                tr("mail.attachments"),
+                tr("mail.size"),
+                tr(date_key),
+            ]
+        )
+
+    @staticmethod
+    def _metadata_fingerprint(metadata: dict) -> tuple:
+        """Fields that can change what the selected reader needs to show."""
+        return (
+            metadata.get("msg_id"),
+            metadata.get("source"),
+            metadata.get("final_dest"),
+            metadata.get("subject"),
+            metadata.get("status"),
+            metadata.get("folder"),
+            metadata.get("size"),
+            metadata.get("att"),
+            tuple(metadata.get("hops") or ()),
+        )
+
+    def _date_metadata_key(self) -> str:
+        if self.folder in (Folder.INBOX, Folder.TRANSIT):
+            return "received_at"
+        if self.folder == Folder.SENT:
+            return "sent_at"
+        return "created"
+
     def _clear_selection(self) -> None:
+        self.selected_ids.clear()
         self.selected_id = None
+        self.current_id = None
+        self._reader_signature = None
+        self._row_fingerprints = {}
+        self.messages.blockSignals(True)
+        try:
+            self.messages.clearSelection()
+        finally:
+            self.messages.blockSignals(False)
         self.reader.clear()
         self.reply_button.setEnabled(False)
         self.send_button.setEnabled(False)
+        self.delete_button.setEnabled(False)
         self._show_attachments(None)
 
     # ---------------------------- attachments ------------------------- #
@@ -587,6 +676,20 @@ class MailWorkspace(QWidget):
                 source="mail",
             )
 
+    @staticmethod
+    def _format_local_time(value) -> str:
+        if value in (None, "", 0):
+            return tr("mail.unknown_time")
+        try:
+            stamp = float(value)
+            if stamp <= 0:
+                return tr("mail.unknown_time")
+            return datetime.fromtimestamp(stamp).astimezone().strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        except (OverflowError, OSError, TypeError, ValueError):
+            return tr("mail.unknown_time")
+
     def refresh(self) -> None:
         counts = self.runtime.mailstore.counts()
         for index, (key, folder) in enumerate(self.FOLDER_KEYS):
@@ -595,54 +698,181 @@ class MailWorkspace(QWidget):
             self.folders.item(index).setText(
                 f"{tr(key)} ({counts.get(folder, 0)}{suffix})"
             )
+        current_id = self.current_id
+        current_index = self.messages.currentIndex()
+        if current_index.isValid():
+            current_item = self.messages.item(current_index.row(), 0)
+            if current_item is not None:
+                current_id = int(current_item.data(Qt.ItemDataRole.UserRole))
         rows = self.runtime.mailstore.list(self.folder)
-        # Rebuilding the rows drops the selection, so restore it afterwards
-        # instead of leaving the operator with a bare focus rectangle.
-        selected_row = -1
+        self._set_message_headers()
+        self._row_fingerprints = {
+            int(metadata["msg_id"]): self._metadata_fingerprint(metadata)
+            for metadata in rows
+        }
+        row_ids = {int(metadata["msg_id"]) for metadata in rows}
+        self.selected_ids.intersection_update(row_ids)
+        if self.selected_id not in self.selected_ids:
+            self.selected_id = next(
+                (
+                    int(metadata["msg_id"])
+                    for metadata in rows
+                    if int(metadata["msg_id"]) in self.selected_ids
+                ),
+                None,
+            )
+        if current_id not in self.selected_ids:
+            current_id = self.selected_id
+        self.current_id = current_id
+        sorting_enabled = self.messages.isSortingEnabled()
+        sort_column = self.messages.horizontalHeader().sortIndicatorSection()
+        sort_order = self.messages.horizontalHeader().sortIndicatorOrder()
         self.messages.blockSignals(True)
         try:
+            self.messages.setSortingEnabled(False)
+            self.messages.clearSelection()
             self.messages.setRowCount(len(rows))
             for row, metadata in enumerate(rows):
-                peer = (
-                    metadata["source"]
-                    if self.folder == Folder.INBOX
-                    else metadata["final_dest"]
-                )
+                if self.folder == Folder.INBOX:
+                    peer = metadata["source"]
+                elif self.folder == Folder.TRANSIT:
+                    peer = f"{metadata['source']} → {metadata['final_dest']}"
+                else:
+                    peer = metadata["final_dest"]
+                timestamp_key = self._date_metadata_key()
+                timestamp = metadata.get(timestamp_key)
+                try:
+                    sort_timestamp = float(timestamp) if timestamp else -1.0
+                except (TypeError, ValueError):
+                    sort_timestamp = -1.0
                 values = (
                     peer,
                     metadata.get("subject") or tr("mail.no_subject"),
                     tr(f"status.{metadata.get('status', '')}"),
                     str(metadata.get("att", 0)),
                     f"{metadata.get('size', 0)} B",
+                    self._format_local_time(timestamp),
                 )
-                if metadata["msg_id"] == self.selected_id:
-                    selected_row = row
                 for column, value in enumerate(values):
-                    item = QTableWidgetItem(value)
+                    item = _MailDateItem(value) if column == 5 else QTableWidgetItem(value)
                     item.setData(Qt.ItemDataRole.UserRole, metadata["msg_id"])
+                    if column == 5:
+                        item.setData(
+                            Qt.ItemDataRole.UserRole + 1,
+                            sort_timestamp,
+                        )
                     if not metadata.get("read", True):
                         font = item.font()
                         font.setBold(True)
                         item.setFont(font)
+                    if column == 0:
+                        item.setToolTip(
+                            f"{metadata['source']} → {metadata['final_dest']}"
+                        )
                     self.messages.setItem(row, column, item)
-            if selected_row >= 0:
-                self.messages.selectRow(selected_row)
-            else:
-                self.messages.clearSelection()
+            self.messages.setSortingEnabled(sorting_enabled)
+            if sorting_enabled and sort_column >= 0:
+                self.messages.sortItems(sort_column, sort_order)
+            # Sorting can move rows after they were populated; restore by
+            # message id so refresh never changes the operator's choice.
+            self.messages.clearSelection()
+            selection = self.messages.selectionModel()
+            flags = (
+                QItemSelectionModel.SelectionFlag.Select
+                | QItemSelectionModel.SelectionFlag.Rows
+            )
+            for row in range(self.messages.rowCount()):
+                item = self.messages.item(row, 0)
+                if item is not None and int(item.data(Qt.ItemDataRole.UserRole)) in self.selected_ids:
+                    selection.select(self.messages.model().index(row, 0), flags)
+            if self.current_id is not None:
+                for row in range(self.messages.rowCount()):
+                    item = self.messages.item(row, 0)
+                    if item is not None and int(item.data(Qt.ItemDataRole.UserRole)) == self.current_id:
+                        selection.setCurrentIndex(
+                            self.messages.model().index(row, 0),
+                            QItemSelectionModel.SelectionFlag.NoUpdate,
+                        )
+                        break
         finally:
+            self.messages.setSortingEnabled(sorting_enabled)
             self.messages.blockSignals(False)
+        if not self.selected_ids:
+            self._clear_selection()
+        else:
+            self._render_selected(mark_read=False)
 
     def _open_selected(self) -> None:
-        selected = self.messages.selectedItems()
-        if not selected:
+        selected_rows = self.messages.selectionModel().selectedRows()
+        if not selected_rows:
+            self._clear_selection()
             return
-        self.selected_id = int(selected[0].data(Qt.ItemDataRole.UserRole))
-        self.runtime.mailstore.mark_read(self.selected_id)
-        message = self.runtime.mailstore.get(self.selected_id)
-        if message is None:
-            self.reader.setPlainText(tr("mail.not_found"))
+        self.selected_ids = {
+            int(self.messages.item(index.row(), 0).data(Qt.ItemDataRole.UserRole))
+            for index in selected_rows
+        }
+        current_item = self.messages.item(self.messages.currentRow(), 0)
+        self.current_id = (
+            int(current_item.data(Qt.ItemDataRole.UserRole))
+            if current_item is not None
+            else int(
+                self.messages.item(selected_rows[0].row(), 0).data(
+                    Qt.ItemDataRole.UserRole
+                )
+            )
+        )
+        self.selected_id = (
+            self.current_id
+            if self.current_id in self.selected_ids
+            else int(
+                self.messages.item(selected_rows[0].row(), 0).data(
+                    Qt.ItemDataRole.UserRole
+                )
+            )
+        )
+        self._render_selected(mark_read=True)
+        if len(self.selected_ids) != 1:
+            return
+        self.refresh()
+
+    def _render_selected(self, *, mark_read: bool) -> None:
+        if len(self.selected_ids) != 1:
+            signature = ("multiple", tuple(sorted(self.selected_ids)), self.current_id)
+            if signature == self._reader_signature:
+                return
+            self._reader_signature = signature
+            self.reader.setPlainText(
+                tr("mail.multiple_selected", count=len(self.selected_ids))
+            )
+            self.reply_button.setEnabled(False)
+            self.send_button.setEnabled(False)
+            self.delete_button.setEnabled(True)
             self._show_attachments(None)
             return
+        if self.selected_id is None:
+            self._clear_selection()
+            return
+        if mark_read:
+            self.runtime.mailstore.mark_read(self.selected_id)
+        row_fingerprint = self._row_fingerprints.get(self.selected_id)
+        signature = (
+            "message",
+            self.selected_id,
+            row_fingerprint,
+            language().value,
+        )
+        if signature == self._reader_signature:
+            return
+        message = self.runtime.mailstore.get(self.selected_id)
+        if message is None:
+            self._reader_signature = ("missing", self.selected_id, language().value)
+            self.reader.setPlainText(tr("mail.not_found"))
+            self.reply_button.setEnabled(False)
+            self.send_button.setEnabled(False)
+            self.delete_button.setEnabled(True)
+            self._show_attachments(None)
+            return
+        self._reader_signature = signature
         route = " -> ".join(message.hops) or "-"
         attachments = "\n".join(
             f"  {item.name} ({item.size} B)" for item in message.attachments
@@ -664,12 +894,12 @@ class MailWorkspace(QWidget):
         self.send_button.setEnabled(
             message.folder in (Folder.OUTBOX, Folder.TRANSIT)
         )
+        self.delete_button.setEnabled(True)
         self._show_attachments(message)
-        self.refresh()
 
     def open_in_window(self, *_args) -> None:
         """Double-click: read the message in the roomier form layout."""
-        if self.selected_id is None:
+        if self.selected_id is None or len(self.selected_ids) != 1:
             return
         message = self.runtime.mailstore.get(self.selected_id)
         if message is None:
@@ -685,46 +915,55 @@ class MailWorkspace(QWidget):
         AlertDialog(self.runtime, self).exec()
 
     def reply(self) -> None:
-        if self.selected_id is None:
+        if self.selected_id is None or len(self.selected_ids) != 1:
             return
         message = self.runtime.mailstore.get(self.selected_id)
         if message is not None:
             self.compose(reply_to=message)
 
     def delete_selected(self) -> None:
-        if self.selected_id is None:
+        message_ids = tuple(sorted(self.selected_ids))
+        if not message_ids and self.selected_id is not None:
+            message_ids = (self.selected_id,)
+        if not message_ids:
             return
         answer = QMessageBox.question(
             self,
             tr("mail.delete"),
-            tr("mail.delete_confirm", id=self.selected_id),
+            tr("mail.delete_many_confirm", count=len(message_ids)),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        message_id = self.selected_id
-        self.selected_id = None
-        self.reader.clear()
+        folder = self.folder
+        self._clear_selection()
 
         def completed(result) -> None:
             if result.error is not None:
+                self.selected_ids.update(message_ids)
+                self.selected_id = message_ids[0]
                 QMessageBox.warning(self, tr("mail.delete"), str(result.error))
+                self.refresh()
                 return
             self.runtime.events.publish(
-                tr("event.mail_deleted", id=message_id),
+                tr("event.mail_deleted_many", count=int(result.value or 0)),
                 source="mail",
             )
             self.runtime.refresh()
             self.refresh()
 
         if not self.runtime.workers.submit(
-            f"mail-delete-{message_id}",
-            lambda: self.runtime.mailstore.delete(message_id),
+            "mail-delete-bulk",
+            lambda: self.runtime.operations.delete_mail(message_ids, folder=folder),
             completed,
         ):
-            self.selected_id = message_id
+            self.selected_ids.update(message_ids)
+            self.selected_id = message_ids[0]
+            self.refresh()
 
     def send_selected(self) -> None:
-        if self.selected_id is None:
+        if self.selected_id is None or len(self.selected_ids) != 1:
             return
         # `send_queued()` can also return False because an operator cancelled
         # a required manual no-CAT QSY. Do not misreport that deliberate safety

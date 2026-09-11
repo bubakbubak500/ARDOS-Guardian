@@ -40,6 +40,13 @@ class VaraSnapshot:
     transfer_direction: str = ""
     rx_transfer_bytes: int = 0
     rx_transfer_total: int = 0
+    # Identity of the payload session currently holding VARA.  `source` is
+    # the original station when the bundle manifest has been read; it stays
+    # empty while an inbound transfer has only identified its immediate peer.
+    # `via` is the peer on this VARA leg (the next hop for an outbound leg).
+    transfer_source: str = ""
+    transfer_destination: str = ""
+    transfer_via: str = ""
     data_socket_generation: int = 0
     data_local_endpoint: str | None = None
     data_peer_endpoint: str | None = None

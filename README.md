@@ -387,7 +387,7 @@ Once the required software and map data are present, the core messaging system o
 
 # Current status
 
-Guardian **1.1.1** preserves the 1.1.0 radio, messaging and map behaviour and adds only an explicitly confirmed, manually installed XYZ map alternative. The existing ČÚZK background remains the default.
+Guardian **1.1.2** adds transfer identities, one-shot IC-705 GPS-to-locator input, a manual beacon, bulk mail selection/deletion, local received/sent timestamps, clearer logs and reliable queued urgent notifications. The existing radio frame and message bundle formats are unchanged. See [release notes](docs/RELEASE_NOTES_1.1.2.md) for details and validation limits.
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |

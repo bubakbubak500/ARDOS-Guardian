@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from .runtime import ShellRuntime
 from ..i18n import tr
+from .log_format import render_events
 
 
 class LogWorkspace(QWidget):
@@ -47,7 +48,13 @@ class LogWorkspace(QWidget):
         outer.addLayout(top)
         self.viewer = QPlainTextEdit()
         self.viewer.setReadOnly(True)
+        self._rendered_events = None
         outer.addWidget(self.viewer, 1)
+        self.refresh()
+
+    def invalidate_format(self) -> None:
+        """Force a repaint after the application palette/theme changes."""
+        self._rendered_events = None
         self.refresh()
 
     def _copy(self) -> None:
@@ -57,15 +64,15 @@ class LogWorkspace(QWidget):
     def refresh(self) -> None:
         level = str(self.level.currentData())
         needle = self.search.text().strip().lower()
-        lines: list[str] = []
+        events = []
         for event in self.runtime.events.history():
             if level != "all" and event.level.value != level:
                 continue
             text = event.display_text
             if needle and needle not in text.lower():
                 continue
-            lines.append(text)
-        value = "\n".join(lines)
-        if value != self.viewer.toPlainText():
-            self.viewer.setPlainText(value)
-            self.viewer.moveCursor(QTextCursor.MoveOperation.End)
+            events.append(event)
+        filtered = tuple(events)
+        if filtered != self._rendered_events:
+            render_events(self.viewer, filtered)
+            self._rendered_events = filtered

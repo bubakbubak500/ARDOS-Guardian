@@ -38,6 +38,12 @@ class TransferState:
     total_bytes: int = 0
     direction: str = "send"
     goodput_bps: float | None = None
+    # `source` is the original station when known.  For an inbound relayed
+    # payload it stays empty until the bundle manifest has been read; `via`
+    # remains the immediate VARA peer so the two roles cannot be confused.
+    source: str = ""
+    destination: str = ""
+    via: str = ""
 
     @property
     def fraction(self) -> float:
@@ -68,6 +74,11 @@ def transfer_state(snapshot, payload_active: bool) -> TransferState:
             total_bytes=total,
             direction="receive",
             goodput_bps=getattr(vara, "tx_bitrate_bps", None),
+            source=str(getattr(vara, "transfer_source", "") or "").strip(),
+            destination=str(
+                getattr(vara, "transfer_destination", "") or ""
+            ).strip(),
+            via=str(getattr(vara, "transfer_via", "") or "").strip(),
         )
     total = int(getattr(vara, "data_bytes_written", 0) or 0)
     if total <= 0:
@@ -80,6 +91,11 @@ def transfer_state(snapshot, payload_active: bool) -> TransferState:
         total_bytes=total,
         direction="send",
         goodput_bps=getattr(vara, "tx_bitrate_bps", None),
+        source=str(getattr(vara, "transfer_source", "") or "").strip(),
+        destination=str(
+            getattr(vara, "transfer_destination", "") or ""
+        ).strip(),
+        via=str(getattr(vara, "transfer_via", "") or "").strip(),
     )
 
 
@@ -163,6 +179,30 @@ class TransferPanel(QWidget):
     def set_tokens(self, tokens: ThemeTokens) -> None:
         self.bar.set_tokens(tokens)
 
+    @staticmethod
+    def _route_detail(state: TransferState) -> str:
+        """Format payload identity without inventing an unknown origin."""
+        if not (state.source or state.destination or state.via):
+            return ""
+        source = state.source or dual("unknown", "neznámý")
+        destination = state.destination or dual("unknown", "neurčený")
+        route = dual(
+            f"From {source} → To {destination}",
+            f"Od {source} → Komu {destination}",
+        )
+        # `via` is the immediate VARA peer.  It is useful for a relayed leg,
+        # while repeating the source on a direct link only adds noise.  If the
+        # source is unknown, retain the peer marker so the operator can still
+        # see who is on the other end of this leg.
+        source_key = state.source.strip().upper()
+        destination_key = state.destination.strip().upper()
+        via_key = state.via.strip().upper()
+        if state.via and (
+            not state.source or via_key not in {source_key, destination_key}
+        ):
+            route += f"  @ {state.via}"
+        return route
+
     def apply(self, state: TransferState) -> None:
         """Show the transfer, or take the whole panel out of the header."""
         self.setVisible(state.active)
@@ -195,4 +235,13 @@ class TransferPanel(QWidget):
             if state.goodput_bps is None
             else f"{state.goodput_bps:.0f} bit/s"
         )
-        self.detail.setText(f"{detail}\n{tr('transfer.speed', speed=speed)}")
+        lines = [
+            line
+            for line in (
+                self._route_detail(state),
+                detail,
+                tr("transfer.speed", speed=speed),
+            )
+            if line
+        ]
+        self.detail.setText("\n".join(lines))

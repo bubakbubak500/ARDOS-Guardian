@@ -56,11 +56,11 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..i18n import dual, tr
-from ..location import LocationFailure, LocationFix
+from ..location import LocationFailure, LocationFix, LocationSource
 from ..message import Folder, Status
 from .alerts import alert_headline
 from .mail_workspace import ComposeDialog
-from .location import WindowsLocationRequest
+from .location import IcomGpsRequest, WindowsLocationRequest
 from .map_tiles import (
     SOURCES,
     TILE_PIXELS,
@@ -72,6 +72,8 @@ from .map_tiles import (
     tiles_for_bounds,
 )
 from .map_tools import destination_point, locator_cells
+from ..radio.icom_gps import same_serial_port, serial_port_name
+from ..radio.usb_serial import list_serial_ports, port_device
 from ..routing import (
     MAX_LOCATOR_CHARS,
     distance_bearing,
@@ -1113,6 +1115,7 @@ class MapWindow(QDialog):
         *,
         location_request_factory=None,
         location_consent=None,
+        gps_request_factory=None,
         maps_directory=None,
         local_map_consent=None,
     ) -> None:
@@ -1126,6 +1129,7 @@ class MapWindow(QDialog):
             location_request_factory or WindowsLocationRequest
         )
         self._location_consent = location_consent or self._ask_location_consent
+        self._gps_request_factory = gps_request_factory or IcomGpsRequest
         self._maps_directory = (
             application_maps_directory()
             if maps_directory is None
@@ -1137,6 +1141,7 @@ class MapWindow(QDialog):
             self.runtime.config.map_local_tiles = False
             self.runtime.config.save()
         self._location_request = None
+        self._location_mode = "windows"
         self._detected_fix: LocationFix | None = None
         self._detected_grid = ""
         self._prefetch_dialog: QProgressDialog | None = None
@@ -1239,6 +1244,42 @@ class MapWindow(QDialog):
         controls.addWidget(self.pick_button)
         controls.addStretch(1)
         position_layout.addLayout(controls)
+
+        gps_controls = QHBoxLayout()
+        gps_controls.addWidget(
+            QLabel(dual("IC-705 GPS port", "Port GPS IC-705"))
+        )
+        self.gps_port = QComboBox()
+        self.gps_port.setEditable(True)
+        self.gps_port.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.gps_port.lineEdit().setPlaceholderText("COM…")
+        self.gps_port.setToolTip(
+            dual(
+                "On the IC-705 set SET > Connectors > USB(B) Function > GPS Out. "
+                "Use DATA > USB(B) when USB(B) Function is OFF/DV Data; keep CAT "
+                "on USB(A). Guardian never opens the CAT port.",
+                "Na IC-705 nastavte SET > Connectors > USB(B) Function > GPS Out. "
+                "Při USB(B) Function OFF/DV Data použijte DATA > USB(B); CAT "
+                "ponechte na USB(A). Guardian port CAT nikdy neotevírá.",
+            )
+        )
+        gps_controls.addWidget(self.gps_port, 1)
+        self.gps_refresh = QPushButton(dual("Refresh", "Obnovit"))
+        self.gps_refresh.clicked.connect(self._refresh_gps_ports)
+        gps_controls.addWidget(self.gps_refresh)
+        self.gps_button = QPushButton(
+            dual("Read IC-705 GPS", "Načíst GPS IC-705")
+        )
+        self.gps_button.setToolTip(
+            dual(
+                "Read one recent NMEA fix from the IC-705 USB(B) GPS Out port.",
+                "Načte jeden aktuální NMEA fix z USB(B) GPS Out IC-705.",
+            )
+        )
+        self.gps_button.clicked.connect(self._detect_icom_gps)
+        gps_controls.addWidget(self.gps_button)
+        self._refresh_gps_ports()
+        position_layout.addLayout(gps_controls)
 
         locator_controls = QHBoxLayout()
         locator_controls.addWidget(QLabel(tr("map.locator")))
@@ -1657,7 +1698,65 @@ class MapWindow(QDialog):
         self.status.setText("   ·   ".join(parts))
 
     # --- interaction ------------------------------------------------------ #
+    def _refresh_gps_ports(self) -> None:
+        """Refresh editable GPS choices while keeping CAT/PTT out of them."""
+        selected = port_device(self.gps_port.currentText().strip())
+        configured = str(getattr(self.runtime.config, "gps_port", "") or "").strip()
+        if not selected:
+            selected = port_device(configured)
+        cat_port = str(getattr(self.runtime.config, "cat_port", "") or "")
+        labels: list[str] = []
+        try:
+            available = list_serial_ports()
+        except BaseException:
+            available = []
+        for label in available:
+            port = port_device(str(label).strip())
+            if not port or same_serial_port(port, cat_port):
+                continue
+            labels.append(str(label))
+        if same_serial_port(selected, cat_port):
+            selected = ""
+        self.gps_port.blockSignals(True)
+        self.gps_port.clear()
+        self.gps_port.addItem("")
+        self.gps_port.addItems(labels)
+        if selected:
+            matching = next(
+                (
+                    label
+                    for label in labels
+                    if serial_port_name(port_device(label))
+                    == serial_port_name(selected)
+                ),
+                None,
+            )
+            self.gps_port.setCurrentText(matching or selected)
+        self.gps_port.blockSignals(False)
+
+    def _selected_gps_port(self) -> str:
+        port = port_device(self.gps_port.currentText().strip())
+        cat_port = str(getattr(self.runtime.config, "cat_port", "") or "")
+        if not port:
+            port = port_device(str(getattr(self.runtime.config, "gps_port", "") or ""))
+        if same_serial_port(port, cat_port):
+            return ""
+        return port
+
+    def _start_location_request(self, request, *, mode: str) -> None:
+        self._location_mode = mode
+        self._location_request = request
+        request.state_changed.connect(self._location_state_changed)
+        request.fix_ready.connect(self._location_ready)
+        request.failed.connect(self._location_failed)
+        self.detect_button.setEnabled(False)
+        self.gps_button.setEnabled(False)
+        self.detect_cancel.show()
+        request.start()
+
     def _detect_location(self) -> None:
+        if self._location_request is not None:
+            return
         if not self._location_consent():
             self.location_status.setText(tr("map.location_failure_cancelled"))
             self.location_status.show()
@@ -1665,13 +1764,47 @@ class MapWindow(QDialog):
         self._discard_detected()
         self.location_settings.hide()
         request = self._location_request_factory(self)
-        self._location_request = request
-        request.state_changed.connect(self._location_state_changed)
-        request.fix_ready.connect(self._location_ready)
-        request.failed.connect(self._location_failed)
-        self.detect_button.setEnabled(False)
-        self.detect_cancel.show()
-        request.start()
+        self._start_location_request(request, mode="windows")
+
+    def _detect_icom_gps(self) -> None:
+        """Start one IC-705 USB(B) GPS Out read after the button click."""
+        if self._location_request is not None:
+            return
+        self._discard_detected()
+        self.location_settings.hide()
+        self._location_mode = "gps"
+        port = self._selected_gps_port()
+        cat_port = str(getattr(self.runtime.config, "cat_port", "") or "")
+        if not port:
+            self._location_failed(
+                LocationFailure.UNAVAILABLE,
+                "Choose an IC-705 USB(B) GPS Out port other than CAT/PTT.",
+            )
+            return
+        if same_serial_port(port, cat_port):
+            self._location_failed(
+                LocationFailure.UNAVAILABLE,
+                "GPS port is also the configured CAT/PTT port.",
+            )
+            return
+        # Remember only the operator's selected device, never the fix.  This
+        # does not alter radio settings and makes the one-shot action usable
+        # on the next map visit.
+        if hasattr(self.runtime.config, "gps_port"):
+            self.runtime.config.gps_port = port
+            self.runtime.config.save()
+        factory = self._gps_request_factory
+        if factory is IcomGpsRequest:
+            request = factory(port, self, cat_port=cat_port)
+        else:
+            try:
+                request = factory(port, self, cat_port=cat_port)
+            except TypeError:
+                # Small test doubles and integrations may expose the simpler
+                # (port, parent) factory while the built-in request also
+                # accepts the explicit CAT guard.
+                request = factory(port, self)
+        self._start_location_request(request, mode="gps")
 
     def _ask_location_consent(self) -> bool:
         answer = QMessageBox.question(
@@ -1688,6 +1821,15 @@ class MapWindow(QDialog):
             self._location_request.cancel()
 
     def _location_state_changed(self, state: str) -> None:
+        if self._location_mode == "gps":
+            self.location_status.setText(
+                dual(
+                    "Reading one GPS fix from the IC-705…",
+                    "Načítám jeden GPS fix z IC-705…",
+                )
+            )
+            self.location_status.show()
+            return
         key = {"locating": "map.location_locating"}.get(
             state, "map.location_locating"
         )
@@ -1697,6 +1839,7 @@ class MapWindow(QDialog):
     def _location_ready(self, fix: LocationFix) -> None:
         self._location_request = None
         self.detect_button.setEnabled(True)
+        self.gps_button.setEnabled(True)
         self.detect_cancel.hide()
         self.location_settings.hide()
         grid = to_locator(fix.latitude, fix.longitude, MAX_LOCATOR_CHARS)
@@ -1705,7 +1848,7 @@ class MapWindow(QDialog):
         self.canvas.preview_grid = grid
         self.canvas.look_at(fix.latitude, fix.longitude, 0.08)
         accuracy = self._accuracy_text(fix.accuracy_m)
-        source = tr(f"map.location_source_{fix.source.value}")
+        source = self._location_source_text(fix.source)
         warning = " " + tr("map.location_approximate") if fix.is_approximate else ""
         self.detected_text.setText(
             tr(
@@ -1721,24 +1864,77 @@ class MapWindow(QDialog):
         self.canvas.update()
 
     def _location_failed(self, failure: LocationFailure, _detail: str) -> None:
+        mode = self._location_mode
         self._location_request = None
         self.detect_button.setEnabled(True)
+        self.gps_button.setEnabled(True)
         self.detect_cancel.hide()
-        self.location_status.setText(tr(f"map.location_failure_{failure.value}"))
+        if mode == "gps":
+            self.location_status.setText(self._gps_failure_text(failure))
+        else:
+            self.location_status.setText(tr(f"map.location_failure_{failure.value}"))
         self.location_status.show()
         self.location_settings.setVisible(
-            failure in (LocationFailure.DENIED, LocationFailure.DISABLED)
+            mode != "gps"
+            and failure in (LocationFailure.DENIED, LocationFailure.DISABLED)
         )
         self.runtime.events.publish(
             dual(
-                f"Device location failed: {failure.value}.",
-                f"Zjištění polohy zařízení selhalo: {failure.value}.",
+                (
+                    f"IC-705 GPS location failed: {failure.value}."
+                    if mode == "gps"
+                    else f"Device location failed: {failure.value}."
+                ),
+                (
+                    f"Zjištění GPS polohy IC-705 selhalo: {failure.value}."
+                    if mode == "gps"
+                    else f"Zjištění polohy zařízení selhalo: {failure.value}."
+                ),
             ),
-            source="location",
+            source="gps" if mode == "gps" else "location",
         )
 
     @staticmethod
-    def _accuracy_text(accuracy_m: float) -> str:
+    def _location_source_text(source: LocationSource) -> str:
+        if source == LocationSource.GPS:
+            return dual("IC-705 GPS", "GPS IC-705")
+        return tr(f"map.location_source_{source.value}")
+
+    @staticmethod
+    def _gps_failure_text(failure: LocationFailure) -> str:
+        return {
+            LocationFailure.DENIED: dual(
+                "Access to the IC-705 GPS port was denied. You can enter a locator manually.",
+                "Přístup k portu GPS IC-705 byl zamítnut. Lokátor můžete zadat ručně.",
+            ),
+            LocationFailure.UNAVAILABLE: dual(
+                "The IC-705 GPS port is unavailable or is the configured CAT/PTT port.",
+                "Port GPS IC-705 není dostupný nebo jde o nastavený port CAT/PTT.",
+            ),
+            LocationFailure.TIMEOUT: dual(
+                "The IC-705 GPS read timed out. Check GPS Out and try again.",
+                "Čtení GPS IC-705 vypršelo. Zkontrolujte GPS Out a zkuste to znovu.",
+            ),
+            LocationFailure.CANCELLED: dual(
+                "IC-705 GPS reading was cancelled.",
+                "Čtení GPS IC-705 bylo zrušeno.",
+            ),
+            LocationFailure.NO_DATA: dual(
+                "The IC-705 provided no recent valid GPS fix. Check GPS Out and reception.",
+                "IC-705 neposlal platný aktuální GPS fix. Zkontrolujte GPS Out a příjem.",
+            ),
+        }.get(
+            failure,
+            dual(
+                "Reading the IC-705 GPS failed. You can enter a locator manually.",
+                "Čtení GPS IC-705 selhalo. Lokátor můžete zadat ručně.",
+            ),
+        )
+
+    @staticmethod
+    def _accuracy_text(accuracy_m: float | None) -> str:
+        if accuracy_m is None:
+            return dual("unknown", "neznámá")
         return (
             f"±{accuracy_m:.0f} m"
             if accuracy_m < 1_000

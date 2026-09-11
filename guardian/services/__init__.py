@@ -1,6 +1,6 @@
 """Application-facing services shared by the legacy and future UI."""
 
-from .events import EventBus, LogEvent, LogLevel
+from .events import EventBus, LogEvent, LogEventKind, LogLevel
 from .snapshots import (
     ApplicationSnapshot,
     DependencySnapshot,
@@ -17,6 +17,7 @@ __all__ = [
     "ApplicationSnapshot",
     "EventBus",
     "LogEvent",
+    "LogEventKind",
     "LogLevel",
     "MailboxSnapshot",
     "NetworkSnapshot",

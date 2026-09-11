@@ -13,13 +13,23 @@ from guardian.config import StationConfig
 from guardian.message import Folder, MailMessage, MessageStore, Status
 from guardian.operations import AlertRecord
 from guardian.protocol import Priority
+from guardian.i18n import Language, set_language, tr
 import guardian.qt.notifications as notifications
-from guardian.qt.notifications import NotificationCenter, SoundPlayer
+from guardian.qt.alerts import AlertDialog
+from guardian.qt.notifications import EmergencyDialog, NotificationCenter, SoundPlayer
+
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QPushButton
 
 
 def _wav_seconds(path) -> float:
     with wave.open(str(path), "rb") as handle:
         return handle.getnframes() / handle.getframerate()
+
+
+def _application() -> QApplication:
+    return QApplication.instance() or QApplication([])
 
 
 def test_chimes_are_generated_valid_and_distinct(tmp_path) -> None:
@@ -192,3 +202,156 @@ def test_sound_suppressed_while_transmitting(tmp_path) -> None:
     center.poll()
     assert len(log.toasts) == 1  # the toast still appears
     assert log.played == []      # the shack stays quiet
+
+
+def test_emergency_preempts_modal_alert_and_queues_each_acknowledgement() -> None:
+    """A real QDialog.exec must not trap the emergency acknowledgement."""
+    app = _application()
+    emergency = EmergencyDialog(lambda _kind: True, lambda: False)
+    runtime = SimpleNamespace(
+        operations=SimpleNamespace(
+            max_alert_note=lambda: 25,
+            alert_sweep_channels=lambda: [],
+        )
+    )
+    modal = AlertDialog(runtime)
+    observed: dict[str, object] = {}
+
+    def click_acknowledge() -> None:
+        button = emergency.findChild(QPushButton, "AcknowledgeButton")
+        assert button is not None
+        position = button.mapTo(emergency, button.rect().center())
+        # Send the click through the native window handle.  Calling
+        # button.click() would bypass the modality regression entirely.
+        QTest.mouseClick(
+            emergency.windowHandle(), Qt.MouseButton.LeftButton, pos=position
+        )
+        app.processEvents()
+
+    def during_modal() -> None:
+        emergency.announce("Second", "second body")
+        app.processEvents()
+
+        observed["modal_window"] = app.activeModalWidget() is emergency
+        observed["first_text"] = emergency.headline.text()
+        observed["plain_text"] = (
+            emergency.headline.textFormat() == Qt.TextFormat.PlainText
+        )
+        observed["queued"] = len(emergency._pending)
+        click_acknowledge()
+        observed["second_text"] = emergency.headline.text()
+        observed["still_open"] = emergency.isVisible()
+        observed["still_modal"] = app.activeModalWidget() is emergency
+
+        # Escape acknowledges the second event and must hand control back to
+        # the dialog that was already running its nested event loop.
+        QTest.keyClick(emergency, Qt.Key.Key_Escape)
+        app.processEvents()
+        observed["closed"] = not emergency.isVisible()
+        observed["timer_stopped"] = not emergency._repeat.isActive()
+        observed["modal_restored"] = app.activeModalWidget() is modal
+        modal.reject()
+
+    emergency.announce("First <urgent>", "first body <tag>")
+    app.processEvents()
+    QTimer.singleShot(0, during_modal)
+    assert modal.exec() == 0
+    assert observed == {
+        "modal_window": True,
+        "first_text": "First <urgent>",
+        "plain_text": True,
+        "queued": 1,
+        "second_text": "Second",
+        "still_open": True,
+        "still_modal": True,
+        "closed": True,
+        "timer_stopped": True,
+        "modal_restored": True,
+    }
+
+    emergency.deleteLater()
+    modal.deleteLater()
+
+
+def test_emergency_close_acknowledges_pending_event_and_stops_sound_timer() -> None:
+    """Closing the native window is an acknowledgement, including a queue."""
+    app = _application()
+    emergency = EmergencyDialog(lambda _kind: True, lambda: False)
+    emergency.announce("First", "first")
+    emergency.announce("Second", "second")
+    app.processEvents()
+    assert emergency.isVisible()
+    assert emergency.headline.text() == "First"
+
+    emergency.close()
+    app.processEvents()
+    assert emergency.isVisible()
+    assert emergency.headline.text() == "Second"
+    assert emergency._repeat.isActive()
+
+    emergency.close()
+    app.processEvents()
+    assert not emergency.isVisible()
+    assert not emergency._repeat.isActive()
+    emergency.deleteLater()
+
+
+def test_emergency_new_arrival_restores_minimized_window() -> None:
+    """A fresh urgent event restores a minimized active emergency dialog."""
+    app = _application()
+    emergency = EmergencyDialog(lambda _kind: True, lambda: False)
+    emergency.announce("First", "first")
+    app.processEvents()
+    emergency.showMinimized()
+    app.processEvents()
+    assert emergency.isMinimized()
+
+    emergency.announce("Second", "second")
+    app.processEvents()
+    assert emergency.isVisible()
+    assert not emergency.isMinimized()
+    assert app.activeModalWidget() is emergency
+    assert emergency.headline.text() == "First"
+    assert len(emergency._pending) == 1
+
+    button = emergency.findChild(QPushButton, "AcknowledgeButton")
+    assert button is not None
+    position = button.mapTo(emergency, button.rect().center())
+    QTest.mouseClick(
+        emergency.windowHandle(), Qt.MouseButton.LeftButton, pos=position
+    )
+    app.processEvents()
+    assert emergency.headline.text() == "Second"
+    emergency.close()
+    app.processEvents()
+    emergency.deleteLater()
+
+
+def test_emergency_shutdown_clears_queue_and_stops_timer() -> None:
+    app = _application()
+    emergency = EmergencyDialog(lambda _kind: True, lambda: False)
+    emergency.announce("First", "first")
+    emergency.announce("Second", "second")
+    app.processEvents()
+    assert emergency.isVisible()
+    assert emergency._pending
+    assert emergency._repeat.isActive()
+
+    emergency.shutdown()
+    app.processEvents()
+    assert not emergency.isVisible()
+    assert emergency._current is None
+    assert not emergency._pending
+    assert not emergency._repeat.isActive()
+    emergency.deleteLater()
+
+
+def test_about_acknowledgements_include_ok2mtv_in_both_languages() -> None:
+    try:
+        for selected in (Language.ENGLISH, Language.CZECH):
+            set_language(selected)
+            assert "OK2MTV" in tr(
+                "about.body", app="Guardian", version="test"
+            )
+    finally:
+        set_language(Language.ENGLISH)

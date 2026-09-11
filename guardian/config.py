@@ -187,6 +187,9 @@ class StationConfig:
     # typed in; the finest form (10 characters, ~50 x 90 m) fits the beacon
     # beside any callsign.
     station_grid: str = ""
+    # Optional IC-705 USB(B) GPS Out serial device remembered by the map. This
+    # is a port choice only; exact GPS coordinates never enter configuration.
+    gps_port: str = ""
     # Put that locator in the beacon. Transmitting a position is a deliberate
     # act, so it has its own switch -- though nothing goes out until beacons
     # themselves are enabled, which they are not by default.

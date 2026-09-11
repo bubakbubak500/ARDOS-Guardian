@@ -3,6 +3,7 @@ import time
 
 from guardian.services import (
     EventBus,
+    LogEventKind,
     LogLevel,
     MailboxSnapshot,
     RadioSnapshot,
@@ -22,6 +23,39 @@ def test_event_bus_is_bounded_and_drained_in_order() -> None:
     assert [event.message for event in pending] == ["one", "two", "three"]
     assert pending[1].source == "radio"
     assert bus.drain() == []
+
+
+def test_activity_projection_hides_only_normal_vara_state_noise() -> None:
+    bus = EventBus(history_limit=2)
+    important = bus.publish(
+        "transfer started",
+        source="session",
+        kind=LogEventKind.TRANSFER_STARTED,
+    )
+    bus.publish(
+        "[VARA] PTT ON",
+        source="vara",
+        kind=LogEventKind.VARA_PTT,
+    )
+    bus.publish(
+        "[VARA] BUSY OFF",
+        source="vara",
+        kind=LogEventKind.VARA_BUSY,
+    )
+
+    assert [event.kind for event in bus.history()] == [
+        LogEventKind.VARA_PTT,
+        LogEventKind.VARA_BUSY,
+    ]
+    assert bus.activity_history() == (important,)
+
+    warning = bus.publish(
+        "PTT processing warning",
+        LogLevel.WARNING,
+        source="vara",
+        kind=LogEventKind.VARA_PTT,
+    )
+    assert bus.activity_history()[-1] == warning
 
 
 def test_snapshot_store_replaces_immutable_sections_atomically() -> None:

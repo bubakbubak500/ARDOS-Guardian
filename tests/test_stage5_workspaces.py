@@ -131,7 +131,7 @@ def test_mail_list_marks_whole_rows_and_keeps_them_selected(tmp_path) -> None:
         columns = sorted(
             index.column() for index in table.selectionModel().selectedIndexes()
         )
-        assert columns == [0, 1, 2, 3, 4]
+        assert columns == [0, 1, 2, 3, 4, 5]
 
         # Marking the message read rebuilds the table; the row must stay marked.
         workspace.refresh()

@@ -38,6 +38,7 @@ from .notifications import EmergencyDialog, NotificationCenter, SoundPlayer
 from .diagnostics_dialog import DiagnosticsDialog
 from .help_dialog import HelpDialog
 from .inputs import FrequencySpinBox
+from .log_format import render_events
 from .log_workspace import LogWorkspace
 from .mail_workspace import MailWorkspace
 from .network_workspace import NetworkWorkspace
@@ -97,6 +98,7 @@ class GuardianMainWindow(QMainWindow):
         self.settings = settings
         self.runtime.operations.confirm_manual_qsy = self._confirm_manual_qsy
         self.theme_controller = ThemeController(settings, self)
+        self.theme_controller.theme_changed.connect(self._refresh_log_format)
         # On Windows an owned top-level window is forced above its owner.
         # Keep the spectrum independent so either window can receive focus.
         self.spectrum_window = SpectrumWindow(runtime, settings)
@@ -429,6 +431,7 @@ class GuardianMainWindow(QMainWindow):
 
         self.activity = QPlainTextEdit()
         self.activity.setReadOnly(True)
+        self._activity_rendered_events = None
         fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         self.activity.setFont(fixed)
         self.activity.setAccessibleName(tr("activity.accessible"))
@@ -531,13 +534,13 @@ class GuardianMainWindow(QMainWindow):
         snapshot = self.runtime.snapshots.read()
         self._apply_snapshot(snapshot)
         self.notifications.poll()
-        events = self.runtime.events.drain()
-        if events:
-            self.activity.appendPlainText(
-                "\n".join(event.display_text for event in events)
-            )
+        self.runtime.events.drain()
+        activity_history = self.runtime.events.activity_history()
+        if activity_history != self._activity_rendered_events:
+            render_events(self.activity, activity_history)
+            self._activity_rendered_events = activity_history
         self.activity_count.setText(
-            tr("activity.events", count=len(self.runtime.events.history()))
+            tr("activity.events", count=len(activity_history))
         )
         # The map is a plain window, not a workspace, so the poll has to feed
         # it the way it feeds the alert banner.
@@ -567,6 +570,15 @@ class GuardianMainWindow(QMainWindow):
         self.statusBar().showMessage(
             tr("workspace.status", name=display_names[name])
         )
+
+    def _refresh_log_format(self, _tokens=None) -> None:
+        activity_history = self.runtime.events.activity_history()
+        if hasattr(self, "activity"):
+            render_events(self.activity, activity_history)
+            self._activity_rendered_events = activity_history
+        workspace = getattr(self, "workspace_names", {}).get("log")
+        if workspace is not None:
+            workspace.invalidate_format()
 
     def show_spectrum(self) -> None:
         self.spectrum_window.show()
@@ -896,6 +908,7 @@ class GuardianMainWindow(QMainWindow):
 
     def _rebuild_translated_ui(self) -> None:
         current_name = "home"
+        log_filter = None
         if hasattr(self, "workspace_stack"):
             current_widget = self.workspace_stack.currentWidget()
             current_name = next(
@@ -906,18 +919,28 @@ class GuardianMainWindow(QMainWindow):
                 ),
                 "home",
             )
+            previous_log = self.workspace_names.get("log")
+            if previous_log is not None:
+                log_filter = (
+                    previous_log.level.currentData(),
+                    previous_log.search.text(),
+                )
         self.menuBar().clear()
         previous = self.takeCentralWidget()
         if previous is not None:
             previous.deleteLater()
         self._build_menu()
         self._build_shell()
+        if log_filter is not None:
+            log_workspace = self.workspace_names["log"]
+            index = log_workspace.level.findData(log_filter[0])
+            if index >= 0:
+                log_workspace.level.setCurrentIndex(index)
+            log_workspace.search.setText(log_filter[1])
         self._show_workspace(current_name)
-        history = self.runtime.events.history()
-        if history:
-            self.activity.setPlainText(
-                "\n".join(event.display_text for event in history)
-            )
+        history = self.runtime.events.activity_history()
+        render_events(self.activity, history)
+        self._activity_rendered_events = history
 
     def _check_for_updates_silently(self) -> None:
         self.runtime.request_update_check(self._update_check_completed)
@@ -1053,7 +1076,7 @@ class GuardianMainWindow(QMainWindow):
             self.tray.hide()
         emergency = getattr(self, "emergency_dialog", None)
         if emergency is not None:
-            emergency.close()
+            emergency.shutdown()
         self.spectrum_window.shutdown()
         map_window = getattr(self, "map_window", None)
         if map_window is not None:

@@ -54,6 +54,11 @@ class VaraState:
     transfer_direction: str = ""
     rx_transfer_bytes: int = 0
     rx_transfer_total: int = 0
+    # Payload identity for the UI.  These are local session fields and never
+    # enter the VARA wire protocol.
+    transfer_source: str = ""
+    transfer_destination: str = ""
+    transfer_via: str = ""
     data_socket_generation: int = 0
     data_local_endpoint: str | None = None
     data_peer_endpoint: str | None = None
@@ -232,6 +237,7 @@ class VaraClient:
         self.state.transfer_direction = "send"
         self.state.rx_transfer_bytes = 0
         self.state.rx_transfer_total = 0
+        self.clear_transfer_context()
         self.state.ptt_keyings = 0
 
     def prepare_receive_transfer(self) -> None:
@@ -241,7 +247,26 @@ class VaraClient:
         self.state.transfer_direction = "receive"
         self.state.rx_transfer_bytes = 0
         self.state.rx_transfer_total = 0
+        self.clear_transfer_context()
         self.state.ptt_keyings = 0
+
+    def set_transfer_context(
+        self,
+        source: str = "",
+        destination: str = "",
+        via: str = "",
+    ) -> None:
+        """Publish local payload identity for the UI and diagnostics.
+
+        The fields describe the active VARA leg only.  They are deliberately
+        separate from command notifications and are never sent to VARA.
+        """
+        self.state.transfer_source = str(source or "")
+        self.state.transfer_destination = str(destination or "")
+        self.state.transfer_via = str(via or "")
+
+    def clear_transfer_context(self) -> None:
+        self.set_transfer_context()
 
     def set_receive_transfer_total(self, total: int) -> None:
         """Publish the wire size learned from the incoming envelope header."""

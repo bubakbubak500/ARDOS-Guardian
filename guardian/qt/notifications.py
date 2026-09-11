@@ -17,10 +17,18 @@ stays in the shack.
 from __future__ import annotations
 
 import time
+from collections import deque
 from typing import Callable
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+)
 
 from ..assets.sounds import ensure_emergency_wav, ensure_notify_wav
 from ..i18n import tr
@@ -192,15 +200,21 @@ class NotificationCenter:
 class EmergencyDialog(QDialog):
     """Stays on top and keeps sounding until the operator acknowledges it.
 
-    One instance serves the whole session: a second emergency arriving while
-    the first is unacknowledged replaces the text and re-raises the window
-    rather than stacking dialogs over each other.
+    One instance serves the whole session.  Every announcement is queued and
+    acknowledged in order, so a second emergency cannot replace the first
+    while the operator is reading it.
     """
 
     def __init__(self, play: Callable[[str], bool], sound_allowed: Callable[[], bool]):
         super().__init__(None)
         self.play = play
         self.sound_allowed = sound_allowed
+        # ``show()`` on a modeless dialog is blocked by another dialog running
+        # ``exec()``.  Application modality makes this window the active modal
+        # window while it is visible, allowing the operator to acknowledge an
+        # emergency even when composing a message, editing settings, or
+        # confirming another action.
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setWindowTitle(tr("notify.emergency_window"))
         self.setWindowFlags(
             self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint
@@ -213,14 +227,23 @@ class EmergencyDialog(QDialog):
         outer.setSpacing(8)
         self.headline = QLabel()
         self.headline.setObjectName("AlertHeadline")
+        self.headline.setTextFormat(Qt.TextFormat.PlainText)
         self.headline.setWordWrap(True)
         self.body = QLabel()
+        self.body.setTextFormat(Qt.TextFormat.PlainText)
         self.body.setWordWrap(True)
+        self.pending = QLabel()
+        self.pending.setObjectName("Metadata")
+        self.pending.setTextFormat(Qt.TextFormat.PlainText)
+        self.pending.setWordWrap(True)
+        self.pending.hide()
         outer.addWidget(self.headline)
         outer.addWidget(self.body)
+        outer.addWidget(self.pending)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         acknowledge = QPushButton(tr("notify.acknowledge"))
+        acknowledge.setObjectName("AcknowledgeButton")
         acknowledge.clicked.connect(self.accept)
         buttons.addWidget(acknowledge)
         outer.addLayout(buttons)
@@ -228,20 +251,83 @@ class EmergencyDialog(QDialog):
         self._repeat = QTimer(self)
         self._repeat.setInterval(EMERGENCY_REPEAT_MS)
         self._repeat.timeout.connect(self._sound)
+        self._current: tuple[str, str] | None = None
+        self._pending: deque[tuple[str, str]] = deque()
 
     def announce(self, title: str, body: str) -> None:
-        self.headline.setText(title)
-        self.body.setText(body)
+        self._pending.append((title, body))
+        if self._current is None:
+            self._show_next()
+            return
+
+        # Keep the currently displayed emergency intact.  The new event is
+        # still announced immediately and is waiting in the visible queue.
+        self._update_pending()
+        self._present()
+        self._sound()
+        self._repeat.start()
+
+    def _show_next(self) -> None:
+        if self._current is not None or not self._pending:
+            return
+        self._current = self._pending.popleft()
+        self.headline.setText(self._current[0])
+        self.body.setText(self._current[1])
+        self._update_pending()
+        self._present()
+        self._sound()
+        self._repeat.start()
+
+    def _present(self) -> None:
+        """Bring the urgent window back above any newly opened modal dialog."""
+        self.showNormal()
+        # Calling show() on an already visible application-modal window does
+        # not make it the active modal window again after another QDialog has
+        # entered exec().  Recreate the native visibility transition so Qt
+        # reinstates this dialog as the modal blocker and routes the click to
+        # its acknowledgement button.
+        active_modal = QApplication.activeModalWidget()
+        if active_modal is not None and active_modal is not self:
+            self.hide()
         self.show()
         self.raise_()
         self.activateWindow()
-        self._sound()
-        self._repeat.start()
+
+    def _update_pending(self) -> None:
+        count = len(self._pending)
+        self.pending.setText(
+            tr("notify.pending_emergencies", count=count) if count else ""
+        )
+        self.pending.setVisible(bool(count))
+
+    def _acknowledge(self, result: int) -> None:
+        self._repeat.stop()
+        self._current = None
+        if self._pending:
+            self._show_next()
+            return
+        self._update_pending()
+        super().done(result)
+
+    def shutdown(self) -> None:
+        """Close during application shutdown without replaying queued alerts."""
+        self._repeat.stop()
+        self._current = None
+        self._pending.clear()
+        self._update_pending()
+        super().done(int(QDialog.DialogCode.Rejected))
+
+    def accept(self) -> None:  # noqa: D401 - Qt slot override
+        """Acknowledge the current emergency."""
+        self._acknowledge(int(QDialog.DialogCode.Accepted))
+
+    def reject(self) -> None:  # noqa: D401 - Qt slot override
+        """Acknowledge the current emergency via Escape or the close button."""
+        self._acknowledge(int(QDialog.DialogCode.Rejected))
+
+    def done(self, result: int) -> None:  # noqa: N802 - Qt override
+        self._acknowledge(result)
 
     def _sound(self) -> None:
         if self.sound_allowed():
             self.play("emergency")
-
-    def done(self, result: int) -> None:  # noqa: N802 - Qt override
-        self._repeat.stop()
-        super().done(result)

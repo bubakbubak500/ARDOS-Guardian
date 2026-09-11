@@ -1,4 +1,5 @@
 import time
+import threading
 from types import SimpleNamespace
 
 from guardian.config import StationConfig
@@ -17,6 +18,7 @@ from guardian.radio.base import RadioState
 from guardian.routing import HeardStations, Route, RouteTable
 from guardian.services import (
     EventBus,
+    LogEventKind,
     LogLevel,
     RadioSnapshot,
     SnapshotStore,
@@ -84,6 +86,30 @@ def _operations(tmp_path, **overrides) -> tuple[Operations, WorkerPool, MessageS
     return operations, workers, mailstore
 
 
+def test_vara_state_notifications_are_retained_but_hidden_from_activity(
+    tmp_path,
+) -> None:
+    operations, workers, _ = _operations(tmp_path)
+    try:
+        for text in ("PTT ON", "PTT OFF", "BUSY ON", "BUSY OFF"):
+            operations._on_vara_notification(text)
+        operations._on_vara_notification("CONNECTED")
+
+        history = operations.events.history()
+        assert [event.kind for event in history[:4]] == [
+            LogEventKind.VARA_PTT,
+            LogEventKind.VARA_PTT,
+            LogEventKind.VARA_BUSY,
+            LogEventKind.VARA_BUSY,
+        ]
+        assert [event.message for event in operations.events.activity_history()] == [
+            "[VARA] CONNECTED"
+        ]
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
 def _spy_transmissions(operations) -> list:
     """Capture what actually reaches the transport.
 
@@ -134,6 +160,47 @@ def test_guardian_compression_hands_a_compatible_bundle_to_vara(
         restored = MailMessage.from_bundle(announced[0]["payload_bytes"])
         assert restored.body == mail.body
     finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_repeated_send_during_compression_keeps_delete_guard(tmp_path, monkeypatch) -> None:
+    operations, workers, mailstore = _operations(
+        tmp_path, guardian_compression=True
+    )
+    mail = MailMessage(
+        msg_id=mailstore.next_id("OK7PS"),
+        source="OK7PS",
+        final_dest="OK1AAA",
+        subject="report",
+        body="payload",
+        folder=Folder.OUTBOX,
+        status=Status.QUEUED,
+    )
+    mailstore.add(mail)
+    started = threading.Event()
+    release = threading.Event()
+    original = MailMessage.to_guardian_bundle
+
+    def slow_compress(self, baseline=None):
+        started.set()
+        assert release.wait(2.0)
+        return original(self, baseline)
+
+    monkeypatch.setattr(MailMessage, "to_guardian_bundle", slow_compress)
+    operations.audio_transport = SimpleNamespace()
+    try:
+        assert operations.send_queued(mail.msg_id)
+        assert started.wait(2.0)
+        assert not operations.send_queued(mail.msg_id)
+        assert operations._mail_preparing == {mail.msg_id}
+        release.set()
+        while workers.is_active(f"mail-compress-{mail.msg_id}"):
+            time.sleep(0.001)
+        workers.drain()
+    finally:
+        release.set()
         operations.audio_transport = None
         operations.close()
         workers.close(wait=True)

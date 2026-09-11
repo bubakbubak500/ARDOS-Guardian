@@ -263,17 +263,32 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "mail.drafts": ("Drafts", "Koncepty"),
     "mail.new_count": (", {count} new", ", {count} nových"),
     "mail.peer": ("From / To", "Od / Komu"),
+    "mail.from": ("From", "Od"),
+    "mail.to": ("To", "Komu"),
     "mail.subject": ("Subject", "Předmět"),
     "mail.status": ("Status", "Stav"),
     "mail.attachments": ("Attachments", "Přílohy"),
     "mail.size": ("Size", "Velikost"),
+    "mail.date": ("Date", "Datum"),
+    "mail.received_at": ("Received", "Přijato"),
+    "mail.sent_at": ("Sent", "Odesláno"),
+    "mail.created": ("Created", "Vytvořeno"),
+    "mail.unknown_time": ("Unknown", "Neznámý"),
     "mail.select": ("Select a message", "Vyberte zprávu"),
+    "mail.multiple_selected": (
+        "{count} messages selected",
+        "Vybráno zpráv: {count}",
+    ),
     "mail.reply": ("Reply", "Odpovědět"),
     "mail.send_queued": ("Send queued message", "Odeslat zprávu z fronty"),
     "mail.delete": ("Delete", "Odstranit"),
     "mail.delete_confirm": (
         "Delete message #{id} from this station?",
         "Odstranit zprávu #{id} z této stanice?",
+    ),
+    "mail.delete_many_confirm": (
+        "Delete {count} selected messages from this folder?",
+        "Odstranit {count} vybraných zpráv z této složky?",
     ),
     "mail.send_requires_control": (
         "The message remains queued. Start the live control channel before sending.",
@@ -390,6 +405,10 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "event.mail_deleted": (
         "Message #{id} deleted.",
         "Zpráva #{id} byla odstraněna.",
+    ),
+    "event.mail_deleted_many": (
+        "{count} selected messages deleted.",
+        "Odstraněno vybraných zpráv: {count}.",
     ),
     # Network and log
     "network.title": ("Network", "Síť"),
@@ -1066,6 +1085,10 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     ),
     "notify.emergency_window": ("Net alert", "Výstraha sítě"),
     "notify.acknowledge": ("Acknowledge", "Potvrdit"),
+    "notify.pending_emergencies": (
+        "Pending emergency alerts: {count}",
+        "Další čekající výstrahy: {count}",
+    ),
     "tray.open": ("Open Guardian", "Otevřít Guardian"),
     "settings.appearance": ("Appearance", "Vzhled"),
     "settings.language": ("Language", "Jazyk"),
@@ -1156,8 +1179,8 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "about.title": ("About Guardian", "O aplikaci Guardian"),
     "about.body": (
         "<b>{app} {version}</b><br>Emergency communication system for HF/VHF"
-        "<br>OK7PS / OK2IPW / OK6LZ",
+        "<br>OK7PS / OK2IPW / OK6LZ / OK2MTV",
         "<b>{app} {version}</b><br>Systém pro nouzovou komunikaci na HF/VHF"
-        "<br>OK7PS / OK2IPW / OK6LZ",
+        "<br>OK7PS / OK2IPW / OK6LZ / OK2MTV",
     ),
 }
