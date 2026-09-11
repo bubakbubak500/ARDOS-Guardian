@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="cs">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Guardian · ASCII reveal</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#060e17;color:#d4e4ea;font:14px system-ui;min-height:100vh;display:grid;place-items:center}main{width:min(900px,100%);padding:28px}header,footer{display:flex;align-items:center;justify-content:space-between;gap:20px}header{font-size:11px;letter-spacing:.22em;color:#7b929f}header strong{color:#d4e4ea;font-weight:500}canvas{display:block;width:100%;height:auto;aspect-ratio:1.25}footer{font-size:12px;color:#8aa1af}button{background:transparent;border:1px solid #29424f;color:#d4e4ea;border-radius:8px;padding:10px 18px;cursor:pointer}button:hover{background:#142734}button:focus-visible{outline:2px solid #39d9c8;outline-offset:4px}#phase{font-family:monospace}input{accent-color:#39d9c8;width:100%;margin:20px 0}label{display:flex;align-items:center;gap:12px}#timeline{flex:1}.sr{position:absolute;clip:rect(0,0,0,0);width:1px;height:1px;overflow:hidden}
+</style>
+<main>
+<header><strong>GUARDIAN</strong><span>ASCII → FULL COLOR</span></header>
+<canvas width="1000" height="800" role="img" aria-label="Logo Guardian se skládá z ASCII znaků a přechází do plnobarevného SVG."></canvas>
+<label><span class="sr">Průběh animace</span><input id="timeline" type="range" min="0" max="6500" value="0" step="10"><span id="time">0.0 s</span></label>
+<footer><span id="phase">01 / ASCII</span><button id="play" type="button">Pauza</button><button id="replay" type="button">Přehrát znovu</button></footer>
+</main>
+<script>
+const svg=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="116" fill="#07131e"/><path d="M256 62 418 126v112c0 104-63 177-162 216C157 415 94 342 94 238V126z" fill="#102c3c" stroke="#39d9c8" stroke-width="22"/><path d="M159 290c55-57 135-57 194 0M192 246c36-34 88-34 128 0M232 205c16-13 32-13 48 0" fill="none" stroke="#39d9c8" stroke-width="22" stroke-linecap="round"/><circle cx="256" cy="335" r="19" fill="#ffbd59"/></svg>`;
+const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d'),slider=document.getElementById('timeline'),phase=document.getElementById('phase'),play=document.getElementById('play'),time=document.getElementById('time');
+const img=new Image(),sample=document.createElement('canvas');sample.width=sample.height=512;
+const sc=sample.getContext('2d',{willReadFrequently:true});const chars='01<>/{}[]:#*+=.';let cells=[],elapsed=0,last=0,running=true,ready=false;
+const clamp=x=>Math.min(1,Math.max(0,x)),smooth=x=>{x=clamp(x);return x*x*(3-2*x)},rand=n=>{const v=Math.sin(n*127.1+311.7)*43758.5453;return v-Math.floor(v)};
+img.onload=()=>{sc.drawImage(img,0,0,512,512);const data=sc.getImageData(0,0,512,512).data;for(let y=4;y<512;y+=8)for(let x=3;x<512;x+=6){const i=(y*512+x)*4,r=data[i],g=data[i+1],b=data[i+2];if(data[i+3]>100&&g>30){const n=cells.length;cells.push({x,y,r,g,b,n,delay:rand(n)*.7,sx:(rand(n+12)-.5)*950,sy:(rand(n+49)-.5)*740})}}ready=true;if(matchMedia('(prefers-reduced-motion: reduce)').matches){elapsed=6500;running=false}requestAnimationFrame(tick)};
+img.onerror=()=>{phase.textContent='Logo se nepodařilo načíst.'};img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
+function draw(){ctx.clearRect(0,0,1000,800);const t=elapsed/1000;const fill=smooth((t-3.5)/2.5);ctx.save();ctx.translate(244,144);ctx.textAlign='center';ctx.textBaseline='middle';ctx.font='8px monospace';
+for(const c of cells){const form=smooth((t-.15-c.delay)/1.9);const color=smooth((t-2.7-c.y/650)/1.4);const disappear=smooth((t-4.05-c.y/750)/1.2);const alpha=smooth((t-c.delay)/.4)*(1-disappear);if(alpha<.005)continue;const r=Math.round(137+(c.r-137)*color),g=Math.round(187+(c.g-187)*color),b=Math.round(192+(c.b-192)*color);ctx.fillStyle=`rgba(${r},${g},${b},${alpha})`;const x=c.x+c.sx*(1-form),y=c.y+c.sy*(1-form);const k=form<.99?Math.floor(t*16+c.n*7):c.n;ctx.fillText(chars[k%chars.length],x,y)}
+if(fill>0){ctx.globalAlpha=fill;ctx.drawImage(img,0,0,512,512)}ctx.restore();slider.value=elapsed;time.textContent=(elapsed/1000).toFixed(1)+' s';phase.textContent=t<2.6?'01 / SKLÁDÁNÍ Z ASCII':t<4.1?'02 / PROBARVENÍ':t<6?'03 / PŘECHOD DO SVG':'04 / GUARDIAN';play.textContent=running?'Pauza':elapsed>=6500?'Přehrát':'Pokračovat'}
+function tick(now){if(running){elapsed=Math.min(6500,elapsed+(last?now-last:0));if(elapsed>=6500)running=false}last=now;if(ready)draw();requestAnimationFrame(tick)}
+document.getElementById('replay').onclick=()=>{elapsed=0;running=true;last=0};play.onclick=()=>{if(elapsed>=6500)elapsed=0;running=!running;last=0};slider.oninput=()=>{elapsed=Number(slider.value);running=false;draw()};
+</script>
+</html>
+
