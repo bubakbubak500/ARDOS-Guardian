@@ -284,6 +284,34 @@ def test_readiness_and_diagnostics_are_non_transmitting(tmp_path) -> None:
         runtime.close()
 
 
+def test_diagnostics_identify_waiting_transfer_without_exporting_contents(monkeypatch) -> None:
+    _application()
+    runtime = ShellRuntime()
+    monkeypatch.setattr(
+        "guardian.qt.diagnostics_dialog.audio_backend_report", lambda: {},
+    )
+    diagnostics = DiagnosticsDialog(runtime)
+    try:
+        net = runtime.operations.net
+        msg = net.send_message(
+            "OK2JLD", "private diagnostic body", msg_id=987654,
+            next_hop="OK2IPW", payload_bytes=b"private attachment bytes",
+        )
+        report = diagnostics.report()["protocol"]
+        entry = next(item for item in report["sessions"] if item["message_id"] == msg.msg_id)
+        assert entry["state"] == "announcing"
+        assert entry["next_hop"] == "OK2IPW"
+        assert entry["destination"] == "OK2JLD"
+        assert entry["payload_bytes"] == len(b"private attachment bytes")
+        assert not report["payload_active"]
+        assert not report["handoff_pending"]
+        assert "private diagnostic body" not in str(report)
+        assert "private attachment bytes" not in str(report)
+    finally:
+        diagnostics.close()
+        runtime.close()
+
+
 def test_vara_probe_finds_the_client_and_never_writes_without_a_link() -> None:
     _application()
     runtime = ShellRuntime()

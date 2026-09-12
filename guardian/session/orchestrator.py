@@ -293,6 +293,7 @@ class Message:
     transfer_started_at: float = 0.0
     payload_sent_at: float | None = None
     receipt_queries: int = 0
+    discovery_query_id: int | None = None
     error: str = ""
     offers: list = field(default_factory=list)   # ROUTE_OFFER sources during discovery
     # Exact measurements attached to each received offer: S/N, timestamp and
@@ -591,7 +592,7 @@ class Orchestrator:
                 continue
             # LINK_ADVERT or another query can supply a route while this
             # message waits. Its old query must not keep flooding or fail it.
-            self.discovery.pending.pop(msg.msg_id, None)
+            self.discovery.pending.pop(msg.discovery_query_id, None)
             msg.next_hop = hop
             self._begin_announce(msg)
             self._emit(msg, f"automatically using available route via {hop} ({how})")
@@ -621,12 +622,13 @@ class Orchestrator:
         msg.discovery_attempted = True
         pending = self.discovery.start(
             msg.final_dest,
-            query_id=msg.msg_id,
+            message_id=msg.msg_id,
             context=context,
             priority=msg.priority,
         )
         if pending is None:
             return False
+        msg.discovery_query_id = pending.query_id
         self._enter(msg, SessionState.MULTIHOP_DISCOVERY)
         self._emit(msg, f"multi-hop discovery started for {msg.final_dest}")
         return True
@@ -636,8 +638,9 @@ class Orchestrator:
             self.on_discovery_event(event)
 
     def _on_discovery_result(self, route: DynamicRoute, query: PendingQuery) -> None:
-        msg = self.sessions.get(query.query_id)
-        if msg is None or msg.state is not SessionState.MULTIHOP_DISCOVERY:
+        msg = self.sessions.get(query.message_id)
+        if (msg is None or msg.state is not SessionState.MULTIHOP_DISCOVERY
+                or msg.discovery_query_id != query.query_id):
             return
         if self.discovery.automatic_use_active:
             msg.next_hop = route.next_hop
@@ -656,8 +659,9 @@ class Orchestrator:
             )
 
     def _on_discovery_failure(self, query: PendingQuery, reason: str) -> None:
-        msg = self.sessions.get(query.query_id)
-        if msg is not None and msg.state is SessionState.MULTIHOP_DISCOVERY:
+        msg = self.sessions.get(query.message_id)
+        if (msg is not None and msg.state is SessionState.MULTIHOP_DISCOVERY
+                and msg.discovery_query_id == query.query_id):
             self._fail(msg, reason)
 
     def _begin_announce(self, msg: Message) -> None:
@@ -695,13 +699,27 @@ class Orchestrator:
 
     def cancel(self, msg_id: int, *, notify: bool = True) -> None:
         msg = self.sessions.get(msg_id)
-        if msg and self.payload is not None:
-            self.payload.cancel(msg)
-        if msg and not msg.state.terminal:
+        active = msg is not None and not msg.state.terminal
+        if active:
+            # A backend may complete synchronously while cancellation aborts
+            # its native link; mark terminal before that callback can arrive.
+            self._enter(msg, SessionState.CANCELLED)
+        if msg is not None:
+            self._stop_message_work(msg)
+        if active:
             if notify:
                 self._send(FrameType.CANCEL, msg)
-            self._enter(msg, SessionState.CANCELLED)
             self._emit(msg, "cancelled by operator")
+
+    def _stop_message_work(self, msg: Message) -> None:
+        query_id = getattr(msg, "discovery_query_id", None)
+        self.discovery.pending.pop(query_id, None)
+        discard = getattr(self.transport, "discard_deferred_message", None)
+        if callable(discard):
+            discard(msg.msg_id, discovery_query_id=query_id)
+        cancel_payload = getattr(self.payload, "cancel", None)
+        if callable(cancel_payload):
+            cancel_payload(msg)
 
     # ------------------------------------------------------------------ #
     #  Bench testing — drive the payload (VARA) phase directly, bypassing #
@@ -818,11 +836,13 @@ class Orchestrator:
 
     def _on_send_done(self, msg: Message, ok: bool) -> None:
         """Initiator payload-send result. End-to-end confirm still via RECEIVED."""
+        if self.sessions.get(msg.msg_id) is not msg or msg.state.terminal:
+            return
         if ok:
             if msg.state is SessionState.TRANSFERRING:
                 msg.payload_sent_at = self._now
                 msg.receipt_queries = 0
-            self._emit(msg, "payload sent — awaiting RECEIVED")
+                self._emit(msg, "payload sent — awaiting RECEIVED")
             return
         # Only abort if we're still mid-transfer; a peer RECEIVED may have
         # already advanced us to CONFIRMED/DELIVERED.
@@ -830,19 +850,24 @@ class Orchestrator:
             self._send(FrameType.CANCEL, msg)
             self._fail(msg, "payload send failed")
 
-    def tick(self, now: float) -> None:
+    def tick(self, now: float, *, control_available: bool = True) -> None:
         """Drive timeouts/retransmits. Call periodically."""
+        paused = max(0.0, now - self._now)
         self._now = now
-        self._resume_automatic_routes()
-        self.discovery.tick(now)
-        if self.discovery_channel_active:
+        if control_available:
+            self._resume_automatic_routes()
+        self.discovery.tick(now, control_available=control_available)
+        if control_available and self.discovery_channel_active:
             self.discovery.advertise_neighbors(
                 [
                     (station.callsign, station.last_snr)
                     for station in self.heard.active(now)
                 ]
             )
-        self._tick_alerts(now)
+        if control_available:
+            self._tick_alerts(now)
+        else:
+            self._alert_queue = [(due + paused, frame) for due, frame in self._alert_queue]
         if self._seen_delivery_receipts:
             self._seen_delivery_receipts = {
                 message_id: seen
@@ -851,6 +876,14 @@ class Orchestrator:
             }
         for msg in list(self.sessions.values()):
             if msg.state.terminal:
+                continue
+            if not control_available and msg.state not in {
+                SessionState.TRANSFERRING, SessionState.RECEIVING,
+            }:
+                # A queued control exchange cannot time out or retransmit on
+                # top of another session's payload. Payload watchdogs below
+                # remain live while VARA owns the soundcard.
+                msg.t_state += paused
                 continue
             if msg.state in {SessionState.TRANSFERRING, SessionState.RECEIVING}:
                 progress = max(0, int(msg.payload_progress_bytes))
@@ -872,6 +905,9 @@ class Orchestrator:
                 self.notify_payload_delivered(msg.msg_id, ok=True)
             elif msg.state in {SessionState.TRANSFERRING, SessionState.RECEIVING}:
                 if msg.direction == "out" and msg.payload_sent_at is not None:
+                    if not control_available:
+                        msg.payload_sent_at += paused
+                        continue
                     if now - msg.payload_sent_at > max(self.ack_timeout, self.control_exchange_timeout):
                         if msg.receipt_queries >= MAX_RECEIPT_QUERIES:
                             self._fail(msg, "payload sent but delivery confirmation did not arrive")
@@ -1543,9 +1579,8 @@ class Orchestrator:
     def _rx_cancel(self, f: ControlFrame) -> None:
         msg = self.sessions.get(f.message_id)
         if msg and not msg.state.terminal:
-            if self.payload is not None:
-                self.payload.cancel(msg)
             self._enter(msg, SessionState.CANCELLED)
+            self._stop_message_work(msg)
             self._emit(msg, f"cancelled by {f.source}")
 
     # ------------------------------------------------------------------ #
@@ -1607,6 +1642,7 @@ class Orchestrator:
     def _fail(self, msg: Message, reason: str) -> None:
         msg.error = reason
         self._enter(msg, SessionState.FAILED)
+        self._stop_message_work(msg)
         self._emit(msg, f"failed: {reason}")
 
     def _send(self, ftype: FrameType, msg: Message) -> None:

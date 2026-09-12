@@ -1356,9 +1356,10 @@ class Operations:
         Guardian's config, so before 0.6.33 changing the HF bandwidth left the
         modem on whatever it was given at connect time.
 
-        `CHAT OFF` bounds VARA's idle loops. TEXT compression remains the
-        baseline unless the operator selects VARA FILES. Guardian's BZIP2
-        option is applied to the bundle before it reaches VARA. Bandwidth and
+        `CHAT OFF` bounds VARA's idle loops. FILES handles the binary envelope
+        independently of Guardian's optional bundle compression. The retired
+        compression checkbox must not silently switch the native modem back
+        to TEXT after a configuration migration. Bandwidth and
         `P2P SESSION` are HF/SAT only -- the
         reference is explicit that P2P "must be used for P2P connections, not
         for Gateways connections", and FM answers WRONG to a BW command.
@@ -1378,11 +1379,7 @@ class Operations:
             )
             return False
         self.vara.send_command("PUBLIC ON")
-        self.vara.send_command(
-            "COMPRESSION FILES"
-            if self.config.vara_file_compression
-            else "COMPRESSION TEXT"
-        )
+        self.vara.send_command("COMPRESSION FILES")
         self.vara.send_command("CHAT OFF")
         if self.config.vara_mode.upper() == "HF":
             self.vara.send_command(self.config.vara_hf_bandwidth)
@@ -3793,7 +3790,7 @@ class Operations:
         if self.audio_transport is not None:
             self.audio_transport.pump()
         self._tick_payload_handoff(now)
-        self.net.tick(now)
+        self.net.tick(now, control_available=not self._payload_active.is_set())
         self._tick_station_calibration(now)
         self._update_station_lab_snapshot()
         self._tick_beacon(now)
@@ -4580,14 +4577,23 @@ class Operations:
             with self._radio_lock:
                 pass
             if self.audio_transport is not None:
-                if not self.audio_transport.wait_tx_idle(timeout=5.0):
+                suspend = getattr(self.audio_transport, "suspend", None)
+                timeout = max(8.0, self.net.start_timeout)
+                if suspend is not None:
+                    # Atomically gate future control sends before draining
+                    # START_VARA and releasing the shared audio device.
+                    control_released = suspend(timeout=timeout)
+                else:
+                    control_released = self.audio_transport.wait_tx_idle(timeout=timeout)
+                    if control_released:
+                        self.audio_transport.stop()
+                if not control_released:
                     raise TimeoutError(
                         dual(
                             "The pending control burst did not finish before VARA handoff.",
                             "Čekající řídicí rámec nebyl dokončen před předáním VARA.",
                         )
                     )
-                self.audio_transport.stop()
                 self._log(dual(
                     "Control audio released for payload.",
                     "Řídicí zvuk uvolněn pro datový přenos.",

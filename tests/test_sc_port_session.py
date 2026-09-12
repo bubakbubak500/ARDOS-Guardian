@@ -232,18 +232,63 @@ def test_periodic_beacon_keeps_short_preamble_but_message_retry_extends_it(
     )
 
 
-def test_afsk_audio_uses_short_edges_but_detected_legacy_leader_gets_long_quiet() -> None:
+@pytest.mark.parametrize("preamble_bytes", [24.0, 128.0])
+def test_afsk_audio_preserves_112_edges_and_peer_release_time(monkeypatch, preamble_bytes) -> None:
     modem = AFSKModem()
     transport = AudioControlTransport(modem=modem)
-    assert (transport.tx_lead_seconds, transport.tx_tail_seconds) == (0.06, 0.06)
+    assert (transport.tx_lead_seconds, transport.tx_tail_seconds) == (
+        PTT_LEAD_SECONDS, PTT_TAIL_SECONDS,
+    )
 
     frame = ControlFrame(FrameType.BEACON, source="OK7PS")
     encoded = frame.encode()
-    modem.received_preamble_bytes[encoded] = 128.0
+    modem.received_preamble_bytes[encoded] = preamble_bytes
+    monkeypatch.setattr("guardian.modem.audio.time.monotonic", lambda: 1000.0)
     transport._handle_payload(encoded)
 
-    assert transport._peer_ready_at >= TX_GUARD_SECONDS + PTT_TAIL_SECONDS
-    assert transport.tx_lead_seconds != PTT_LEAD_SECONDS
+    assert transport._peer_ready_at == 1000.0 + TX_GUARD_SECONDS + PTT_TAIL_SECONDS
+
+
+@pytest.mark.parametrize("kind", [FrameType.START_VARA, FrameType.MULTIHOP_RREQ,
+                                  FrameType.MULTIHOP_RREP])
+def test_critical_control_survives_slow_radio_opening(monkeypatch, kind) -> None:
+    import numpy as np
+
+    modem = AFSKModem()
+    transport = AudioControlTransport(modem=modem)
+    transport._sd = object()
+    frame = ControlFrame(kind, source="OK7PS", destination="OK2JLD",
+                         next_hop="OK2IPW", message_id=123)
+    captured = []
+    monkeypatch.setattr("guardian.modem.audio.transmit_waveform",
+                        lambda _sd, samples, **kwargs: captured.append((samples, kwargs)))
+    transport._tx(frame)
+    samples, timing = captured[0]
+
+    def received(lead):
+        audio = np.concatenate((np.zeros(int(lead * modem.fs)), samples,
+                                np.zeros(int(timing["guard_seconds"] * modem.fs))))
+        # A receiver muted for 240 ms after key-up loses the short-edged
+        # preamble/sync; the 1.1.2 lead leaves sufficient acquisition symbols.
+        audio[:int(0.240 * modem.fs)] = 0
+        return modem.demodulate(audio, validator=transport._is_valid_control_payload)
+
+    assert received(0.06) == []
+    assert received(timing["lead_seconds"]) == [frame.encode()]
+    assert timing["tail_seconds"] == PTT_TAIL_SECONDS
+    assert timing["guard_seconds"] == TX_GUARD_SECONDS
+
+
+def test_periodic_beacon_keeps_short_edges(monkeypatch) -> None:
+    transport = AudioControlTransport(modem=AFSKModem())
+    transport._sd = object()
+    timings = []
+    monkeypatch.setattr("guardian.modem.audio.transmit_waveform",
+                        lambda _sd, samples, **kwargs: timings.append(kwargs))
+    transport._tx(ControlFrame(FrameType.BEACON, source="OK7PS"))
+    assert timings[0]["lead_seconds"] == 0.06
+    assert timings[0]["tail_seconds"] == 0.06
+    assert timings[0]["guard_seconds"] == 0.06
 
 
 def test_legacy_duck_typed_afsk_name_keeps_g1_edges_without_retry_hook() -> None:

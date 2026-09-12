@@ -415,6 +415,9 @@ class PendingQuery:
     context: str = "manual"
     best_route: DynamicRoute | None = None
     settle_at: float | None = None
+    # Mail retries keep their message id, but need a fresh query id so relays
+    # do not discard the new flood as a duplicate of the failed attempt.
+    message_id: int | None = None
 
 
 @dataclass
@@ -603,6 +606,7 @@ class DiscoveryEngine:
         query_id: int | None = None,
         context: str = "manual",
         priority: Priority = Priority.ROUTINE,
+        message_id: int | None = None,
     ) -> PendingQuery | None:
         dest = destination.strip().upper()
         if not dest or dest == self.callsign or not self.can_transmit:
@@ -620,6 +624,7 @@ class DiscoveryEngine:
             self.max_ttl,
             self._now + self.query_timeout + RREP_REPEAT_GAP,
             context,
+            message_id=message_id,
         )
         self.pending[query_id] = pending
         self._send_query(pending, priority)
@@ -737,8 +742,19 @@ class DiscoveryEngine:
             return True
         return False
 
-    def tick(self, now: float) -> None:
+    def tick(self, now: float, *, control_available: bool = True) -> None:
+        paused = max(0.0, float(now) - self._now)
         self._now = float(now)
+        if not control_available:
+            # The payload modem owns the shared radio. Retain scheduled floods
+            # and their reply budgets until control can actually transmit.
+            for item in self._scheduled:
+                item.due += paused
+            for pending in self.pending.values():
+                pending.deadline += paused
+                if pending.settle_at is not None:
+                    pending.settle_at += paused
+            return
         self._prune()
         due = [item for item in self._scheduled if item.due <= self._now]
         self._scheduled = [item for item in self._scheduled if item.due > self._now]

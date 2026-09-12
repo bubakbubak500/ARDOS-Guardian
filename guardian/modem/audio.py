@@ -110,6 +110,11 @@ def transmit_waveform(sd, samples, *, device, sample_rate: int,
         else:
             framed = playback.reshape(-1, 1)
             step = chunk_frames or len(framed)
+            # An active blocking stream with no writes starves during the PTT
+            # lead. Its first write then reports that startup gap as an output
+            # underflow, even when the actual waveform plays successfully.
+            # Open before keying, but start only when samples are ready.
+            stream.start()
             for offset in range(0, len(framed), step):
                 underflowed = stream.write(framed[offset:offset + step])
                 if underflowed:
@@ -149,7 +154,6 @@ def _open_output_stream(sd, *, device, sample_rate: int, blocksize: int = 0):
                 dtype="float32",
                 blocksize=max(0, int(blocksize)),
             )
-            stream.start()
             return stream
         except Exception:
             if stream is not None:
@@ -660,8 +664,10 @@ class AudioControlTransport(ControlTransport):
         tx_tail_seconds: float | None = None,
     ):
         self.modem = modem or AFSKModem(sample_rate=sample_rate)
-        # AFSK uses short local edges; slow control modems retain their existing
-        # settings. Output is drained before unkeying by transmit_waveform.
+        # Keep the 1.1.2 key-up/drain budget for session and routing controls:
+        # losing a one-shot START_VARA or forwarded RREQ cannot be repaired by
+        # an extended leader on an identical retransmission. Beacons alone can
+        # use shorter edges because the next periodic beacon refreshes them.
         # A real AFSK modem advertises the extended-acquisition retry hook.
         # Keep duck-typed legacy modem fakes on the historical slow edges;
         # they may only expose ``name`` for logging and do not implement the
@@ -670,9 +676,10 @@ class AudioControlTransport(ControlTransport):
             getattr(self.modem, "name", "") == "afsk1200"
             and callable(getattr(self.modem, "modulate_retry", None))
         )
-        self.tx_lead_seconds = 0.06 if short_control else PTT_LEAD_SECONDS
-        self.tx_tail_seconds = 0.06 if short_control else PTT_TAIL_SECONDS
-        self.tx_guard_seconds = 0.06 if short_control else TX_GUARD_SECONDS
+        self._short_beacon = short_control
+        self.tx_lead_seconds = PTT_LEAD_SECONDS
+        self.tx_tail_seconds = PTT_TAIL_SECONDS
+        self.tx_guard_seconds = TX_GUARD_SECONDS
         if short_control and tx_lead_seconds is not None:
             self.tx_lead_seconds = max(0.0, float(tx_lead_seconds))
         if short_control and tx_tail_seconds is not None:
@@ -700,6 +707,9 @@ class AudioControlTransport(ControlTransport):
         self._tx_condition = threading.Condition()
         self._pending_tx = 0
         self._tx_failed = False
+        self._tx_suspended = False
+        self._stopped = False
+        self._deferred_tx: list[tuple[str, object]] = []
         self._post_tx_pending = 0
         self._peer_ready_at = 0.0
         self._sent_control_frames: dict[bytes, float] = {}
@@ -797,8 +807,20 @@ class AudioControlTransport(ControlTransport):
             f"[PortAudio #{self.actual_output_device_index}]"
         )
         self.on_log(f"Audio control channel started ({self.modem.name} @ {self.fs} Hz)")
+        with self._tx_condition:
+            self._stopped = False
+        self._resume_queued_tx()
 
     def stop(self) -> None:
+        # A user stop cancels held work; a payload suspension below preserves
+        # it for resumption on the same codec after VARA releases the radio.
+        with self._tx_condition:
+            self._stopped = True
+            self._tx_suspended = False
+            self._deferred_tx.clear()
+        self._stop_rx()
+
+    def _stop_rx(self) -> None:
         self._running = False
         self._rx_stop.set()
         if self._stream is not None:
@@ -813,12 +835,67 @@ class AudioControlTransport(ControlTransport):
         self._rx_buf.clear()
         self._rx_frames.clear()
 
+    def suspend(self, timeout: float = 8.0) -> bool:
+        """Drain admitted controls and hold later sends during payload audio."""
+        with self._tx_condition:
+            self._tx_suspended = True
+        try:
+            if not self.wait_tx_idle(timeout):
+                self._resume_queued_tx()
+                return False
+            self._stop_rx()
+        except Exception:
+            self._resume_queued_tx()
+            raise
+        return True
+
+    def _resume_queued_tx(self) -> None:
+        with self._tx_condition:
+            self._tx_suspended = False
+            held, self._deferred_tx = self._deferred_tx, []
+        for kind, value in held:
+            if kind == "frame":
+                self.send(value)
+            else:
+                text, wpm = value
+                self.send_morse_after_pending(text, wpm=wpm)
+
+    def discard_deferred_message(
+        self, message_id: int, *, discovery_query_id: int | None = None,
+    ) -> None:
+        """Remove held requests for a cancelled/failed message, preserving receipts."""
+        request_types = {
+            FrameType.HAVE_MSG, FrameType.ACK_HAVE, FrameType.START_VARA,
+            FrameType.ROUTE_QUERY, FrameType.ROUTE_OFFER,
+            FrameType.WORKING_OFFER, FrameType.WORKING_ACK,
+            FrameType.G2_PROFILE_OFFER, FrameType.G2_PROFILE_ACK,
+        }
+        with self._tx_condition:
+            self._deferred_tx = [
+                (kind, value) for kind, value in self._deferred_tx
+                if not (
+                    kind == "frame" and (
+                        (value.message_id == message_id and value.type in request_types)
+                        or (discovery_query_id is not None
+                            and value.message_id == discovery_query_id
+                            and value.type is FrameType.MULTIHOP_RREQ)
+                    )
+                )
+            ]
+
     # ------------------------------------------------------------------ #
     #  Transmit                                                           #
     # ------------------------------------------------------------------ #
     def send(self, frame: ControlFrame) -> None:
         # TX off the caller's thread so the UI/orchestrator never blocks on PTT.
         with self._tx_condition:
+            if self._stopped:
+                return
+            if self._tx_suspended:
+                item = ("frame", frame)
+                if item not in self._deferred_tx:
+                    self._deferred_tx.append(item)
+                return
             if not self._pending_tx:
                 self._tx_failed = False
             self._pending_tx += 1
@@ -853,6 +930,11 @@ class AudioControlTransport(ControlTransport):
         if not clean:
             return False
         with self._tx_condition:
+            if self._stopped:
+                return False
+            if self._tx_suspended:
+                self._deferred_tx.append(("morse", (clean, float(wpm))))
+                return True
             self._pending_tx += 1
             self._post_tx_pending += 1
         threading.Thread(
@@ -881,6 +963,8 @@ class AudioControlTransport(ControlTransport):
             return
         samples = modulate_morse(text, sample_rate=self.fs, wpm=wpm)
         with self._tx_lock:
+            if self._stopped:
+                return
             transmit_waveform(
                 self._sd,
                 samples,
@@ -908,6 +992,8 @@ class AudioControlTransport(ControlTransport):
             self.on_log("Audio TX skipped — control channel not started")
             return
         with self._tx_lock:
+            if self._stopped:
+                return
             # A CRC-complete frame can be decoded while the far transmitter
             # still plays its guard and tail. Wait before keying a reply so the
             # peer can actually receive its preamble, including on fast hosts.
@@ -932,14 +1018,15 @@ class AudioControlTransport(ControlTransport):
                 self.on_log("AFSK retry: extended acquisition for this repeated frame")
             else:
                 samples = self.modem.modulate(payload)
+            short_beacon = self._short_beacon and frame.type is FrameType.BEACON
             transmit_waveform(
                 self._sd, samples,
                 device=self.output_device,
                 sample_rate=self.fs,
                 ptt=self.ptt,
-                lead_seconds=self.tx_lead_seconds,
-                tail_seconds=self.tx_tail_seconds,
-                guard_seconds=self.tx_guard_seconds,
+                lead_seconds=min(self.tx_lead_seconds, 0.06) if short_beacon else self.tx_lead_seconds,
+                tail_seconds=min(self.tx_tail_seconds, 0.06) if short_beacon else self.tx_tail_seconds,
+                guard_seconds=0.06 if short_beacon else self.tx_guard_seconds,
                 # Never splice samples from before and after our own half-duplex
                 # transmission into one artificial receive window.
                 before_play=self._rx_buf.clear,
@@ -1085,12 +1172,10 @@ class AudioControlTransport(ControlTransport):
         except FrameError as exc:
             self.on_log(f"RX bad frame: {exc}")
             return False
-        peer_quiet = self.tx_guard_seconds + self.tx_tail_seconds
-        preambles = getattr(self.modem, "received_preamble_bytes", {})
-        if preambles.get(payload, 0.0) > 32:
-            # A received long leader identifies the older control timing.
-            # Short-leader peers pay only the short edge budget.
-            peer_quiet = max(peer_quiet, TX_GUARD_SECONDS + PTT_TAIL_SECONDS)
+        # Preamble length does not identify a peer's release time: 1.1.2 used
+        # the same 24-byte leader with a 400 ms guard and 250 ms PTT tail.
+        peer_quiet = max(self.tx_guard_seconds + self.tx_tail_seconds,
+                         TX_GUARD_SECONDS + PTT_TAIL_SECONDS)
         self._peer_ready_at = max(self._peer_ready_at, now + peer_quiet)
         self.on_log(
             f"RX {frame.summary()}"

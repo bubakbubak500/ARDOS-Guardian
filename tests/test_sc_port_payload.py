@@ -172,7 +172,7 @@ def test_vara_handoff_timeout_defers_qsy_release_and_completion() -> None:
     vara.idle = True
     assert pending[0]() is True
     assert events == ["acquire", "restore", "release"]
-    assert result == [False]
+    assert result == [True]
 
 
 def test_vara_context_reads_aggressive_manifest_without_attachment_restore() -> None:

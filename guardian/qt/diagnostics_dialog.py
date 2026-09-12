@@ -173,6 +173,39 @@ class DiagnosticsDialog(QDialog):
             ))
         self.viewer.setPlainText("\n".join(lines))
 
+    def _protocol_report(self) -> dict:
+        """Capture waiting states without exporting mail contents."""
+        operations = self.runtime.operations
+        net = operations.net
+        now = time.monotonic()
+        sessions = list(net.sessions.values())
+        return {
+            "payload_active": operations.payload_active(),
+            "handoff_pending": operations.payload_handoff_pending(),
+            "handoff_error": operations.payload_handoff_error(),
+            "discovery_mode": net.discovery.mode,
+            "automatic_routes": net.discovery.automatic_use_active,
+            "sessions_total": len(sessions),
+            "sessions": [
+                {
+                    "message_id": msg.msg_id,
+                    "direction": msg.direction,
+                    "state": msg.state.value,
+                    "source": msg.source,
+                    "destination": msg.final_dest,
+                    "next_hop": msg.next_hop,
+                    "payload_transport": msg.payload_transport,
+                    "payload_bytes": len(msg.payload_bytes) if msg.payload_bytes is not None else None,
+                    "discovery_query_id": msg.discovery_query_id,
+                    "state_age_seconds": max(0.0, now - msg.t_state),
+                    "error": msg.error,
+                }
+                for msg in sessions[-50:]
+            ],
+            "queries": [asdict(query) for query in list(net.discovery.pending.values())],
+            "routes": [asdict(route) for route in net.discovery.routes.routes(now)],
+        }
+
     def report(self) -> dict:
         snapshot = self.runtime.snapshots.read()
         diagnostic_audio = config_dir() / "last-bad-control.wav"
@@ -211,6 +244,7 @@ class DiagnosticsDialog(QDialog):
             "audio_backend": audio_backend_report(),
             "configuration": asdict(self.runtime.config),
             "snapshot": asdict(snapshot),
+            "protocol": self._protocol_report(),
             "dependencies": [
                 asdict(status) for status in self.runtime.dependency_statuses
             ],

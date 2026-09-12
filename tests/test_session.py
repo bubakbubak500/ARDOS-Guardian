@@ -45,6 +45,48 @@ def test_direct_session_reaches_delivered_without_changing_payload_contract() ->
     assert sender.learned_paths["OK1AAA"] == "OK1AAA"
 
 
+@pytest.mark.parametrize("completed_state", [
+    SessionState.CANCELLED, SessionState.FAILED, SessionState.DELIVERED,
+    SessionState.CONFIRMED,
+])
+def test_late_payload_success_does_not_announce_receipt_wait_after_completion(
+    completed_state,
+) -> None:
+    events = []
+    sender = Orchestrator(
+        "OK7PS", LoopbackBus().endpoint("sender"),
+        on_event=lambda message, event: events.append(event),
+    )
+    message = sender.send_message("OK2IPW", "hello", msg_id=900, next_hop="OK2IPW")
+    sender._enter(message, completed_state)
+    events.clear()
+
+    sender._on_send_done(message, True)
+
+    assert message.state is completed_state
+    assert message.payload_sent_at is None
+    assert events == []
+
+
+def test_late_payload_callback_cannot_change_replacement_with_same_mail_id() -> None:
+    events = []
+    sender = Orchestrator(
+        "OK7PS", LoopbackBus().endpoint("sender"),
+        on_event=lambda message, event: events.append(event),
+    )
+    original = sender.send_message("OK2IPW", "hello", msg_id=901, next_hop="OK2IPW")
+    sender._enter(original, SessionState.TRANSFERRING)
+    replacement = sender.send_message("OK2IPW", "hello", msg_id=901, next_hop="OK2IPW")
+    events.clear()
+
+    sender._on_send_done(original, True)
+    sender._on_send_done(original, False)
+
+    assert sender.sessions[901] is replacement
+    assert replacement.state is SessionState.ANNOUNCING
+    assert events == []
+
+
 def test_only_final_destination_gets_the_post_ack_identification_hook() -> None:
     bus = LoopbackBus()
     sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)

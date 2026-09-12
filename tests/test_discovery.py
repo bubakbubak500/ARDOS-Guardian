@@ -469,6 +469,88 @@ def test_experimental_auto_use_delivers_without_operator_approval() -> None:
     assert (route.next_hop, route.source) == ("N1", "rreq")
 
 
+def test_retry_same_mail_after_lost_rrep_uses_fresh_query_and_delivers() -> None:
+    drop_replies = True
+    frames = []
+    bus = GraphRadioBus(
+        {("OK7PS", "OK2IPW"), ("OK2IPW", "OK2JLD")},
+        drop=lambda sender, receiver, frame: (
+            drop_replies and frame.type is FrameType.MULTIHOP_RREP
+        ),
+        monitor=lambda sender, frame: frames.append((sender, frame)),
+    )
+    stations = {}
+    for call in ("OK7PS", "OK2IPW", "OK2JLD"):
+        station = Orchestrator(
+            call, bus.endpoint(call), auto_route=False, auto_complete=True,
+            relay=call == "OK2IPW", discovery_mode=DISCOVERY_ASSISTED,
+            discovery_forward=call == "OK2IPW", discovery_ttl=2,
+            discovery_auto_use=True,
+        )
+        station.discovery.query_timeout = 2
+        station.discovery.settle_time = 0
+        station.discovery.jitter_min = station.discovery.jitter_max = 0
+        stations[call] = station
+
+    sender = stations["OK7PS"]
+    first = sender.send_message("OK2JLD", "retry me", msg_id=270532722)
+    now = 0.0
+    while now <= 5:
+        for station in stations.values():
+            station.tick(now)
+        bus.pump()
+        now += 0.25
+    assert first.state is SessionState.FAILED
+    assert stations["OK2IPW"].discovery.breadcrumbs
+
+    drop_replies = False
+    retry = sender.send_message("OK2JLD", "retry me", msg_id=first.msg_id)
+    while now <= 15 and retry.state is not SessionState.DELIVERED:
+        for station in stations.values():
+            station.tick(now)
+        bus.pump()
+        now += 0.25
+
+    assert retry.state is SessionState.DELIVERED
+    queries = [frame for call, frame in frames
+               if call == "OK7PS" and frame.type is FrameType.MULTIHOP_RREQ]
+    assert len(queries) == 2
+    assert queries[0].message_id != queries[1].message_id
+    assert stations["OK2JLD"].sessions[first.msg_id].state is SessionState.DELIVERED
+
+
+def test_cancelled_mail_stops_its_discovery_but_preserves_manual_query() -> None:
+    bus = GraphRadioBus(set())
+    sender = Orchestrator(
+        "OK7PS", bus.endpoint("OK7PS"), discovery_mode=DISCOVERY_ASSISTED,
+    )
+    manual = sender.discover_route("OK2MTV")
+    message = sender.send_message("OK2JLD", "cancel me", msg_id=270532722)
+    assert message.state is SessionState.MULTIHOP_DISCOVERY
+    assert message.discovery_query_id in sender.discovery.pending
+
+    sender.cancel(message.msg_id, notify=False)
+
+    assert message.state is SessionState.CANCELLED
+    assert list(sender.discovery.pending) == [manual.query_id]
+
+
+def test_failure_from_prior_discovery_cannot_fail_retried_message() -> None:
+    sender = Orchestrator(
+        "OK7PS", GraphRadioBus(set()).endpoint("OK7PS"),
+        discovery_mode=DISCOVERY_ASSISTED,
+    )
+    first = sender.send_message("OK2JLD", "retry me", msg_id=270532722)
+    old_query = sender.discovery.pending[first.discovery_query_id]
+    sender.cancel(first.msg_id, notify=False)
+    retry = sender.send_message("OK2JLD", "retry me", msg_id=first.msg_id)
+
+    sender._on_discovery_failure(old_query, "late old failure")
+
+    assert retry.state is SessionState.MULTIHOP_DISCOVERY
+    assert retry.discovery_query_id in sender.discovery.pending
+
+
 def test_link_advert_flag_off_consumes_frame_without_learning_or_relaying() -> None:
     sent = []
     engine = DiscoveryEngine(
@@ -885,7 +967,7 @@ def test_live_route_arriving_during_query_starts_first_hop_without_rrep() -> Non
             break
     assert message.state is SessionState.DELIVERED
     assert message.next_hop == "OK2IPW"
-    assert message.msg_id not in sender.discovery.pending
+    assert message.discovery_query_id not in sender.discovery.pending
     assert any(
         call == "OK7PS" and frame.type is FrameType.HAVE_MSG
         and frame.destination == "OK2JLD" and frame.next_hop == "OK2IPW"

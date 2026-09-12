@@ -204,6 +204,7 @@ class AFSKModem:
         preamble = _bits_lsb_first(PREAMBLE)[-ACQUISITION_PREAMBLE_BITS:]
         sample_axis = np.arange(len(soft))
         candidates: list[tuple[float, float, bytes]] = []
+        incomplete_bursts: list[float] = []
         formats = (
             (_bits_lsb_first(FEC_SYNC), True),
             (_bits_lsb_first(LEGACY_SYNC), False),
@@ -247,6 +248,26 @@ class AFSKModem:
                             else self._decode_legacy_payload(after)
                         )
                         if decoded is None:
+                            if has_fec and validator is not None:
+                                # A mistimed hypothesis can read half the real
+                                # length and finish before the on-air frame.
+                                # A CRC-valid first copy proves that this burst
+                                # is still arriving, not a bad-magic frame. Wait
+                                # for all copies before delivery (and any reply).
+                                length_bits = 8 * FEC_REPETITIONS
+                                if after.size >= length_bits:
+                                    length = _bits_to_bytes_lsb_first(
+                                        self._majority_bits(after[:length_bits].reshape(
+                                            FEC_REPETITIONS, 8
+                                        ))
+                                    )[0]
+                                    copy_end = length_bits + length * 8
+                                    if length >= 8 and after.size >= copy_end:
+                                        first_copy = _bits_to_bytes_lsb_first(
+                                            after[length_bits:copy_end]
+                                        )
+                                        if validator(first_copy):
+                                            incomplete_bursts.append(float(centers[start]))
                             continue
                         payload, needed = decoded
                         end = start + acquisition.size + needed
@@ -269,6 +290,12 @@ class AFSKModem:
         # the correct one. When the caller knows the payload format, prefer a
         # hypothesis that passes its integrity check (ControlFrame CRC) instead
         # of discarding it before validation.
+        if incomplete_bursts and validator is not None:
+            candidates = [candidate for candidate in candidates
+                          if validator(candidate[2]) or not any(
+                              abs(candidate[1] - position) < self.sps * 80
+                              for position in incomplete_bursts
+                          )]
         return self._select_candidates(candidates, validator)
 
     @staticmethod
