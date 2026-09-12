@@ -72,7 +72,7 @@ from .map_tiles import (
     tiles_for_bounds,
 )
 from .map_tools import destination_point, locator_cells
-from ..radio.icom_gps import same_serial_port
+from ..radio.icom_gps import same_serial_port, serial_port_name
 from ..radio.usb_serial import list_serial_ports, port_device
 from ..routing import (
     MAX_LOCATOR_CHARS,
@@ -1142,7 +1142,6 @@ class MapWindow(QDialog):
             self.runtime.config.save()
         self._location_request = None
         self._location_mode = "windows"
-        self._gps_resolution_error = ""
         self._detected_fix: LocationFix | None = None
         self._detected_grid = ""
         self._prefetch_dialog: QProgressDialog | None = None
@@ -1247,22 +1246,39 @@ class MapWindow(QDialog):
         position_layout.addLayout(controls)
 
         gps_controls = QHBoxLayout()
+        gps_controls.addWidget(
+            QLabel(dual("IC-705 GPS port", "Port GPS IC-705"))
+        )
+        self.gps_port = QComboBox()
+        self.gps_port.setEditable(True)
+        self.gps_port.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.gps_port.lineEdit().setPlaceholderText("COM…")
+        self.gps_port.setToolTip(
+            dual(
+                "On the IC-705 set SET > Connectors > USB(B) Function > GPS Out. "
+                "Use DATA > USB(B) when USB(B) Function is OFF/DV Data; keep CAT "
+                "on USB(A). Guardian never opens the CAT port.",
+                "Na IC-705 nastavte SET > Connectors > USB(B) Function > GPS Out. "
+                "Při USB(B) Function OFF/DV Data použijte DATA > USB(B); CAT "
+                "ponechte na USB(A). Guardian port CAT nikdy neotevírá.",
+            )
+        )
+        gps_controls.addWidget(self.gps_port, 1)
+        self.gps_refresh = QPushButton(dual("Refresh", "Obnovit"))
+        self.gps_refresh.clicked.connect(self._refresh_gps_ports)
+        gps_controls.addWidget(self.gps_refresh)
         self.gps_button = QPushButton(
-            dual("Load GPS", "Načíst GPS")
+            dual("Read IC-705 GPS", "Načíst GPS IC-705")
         )
         self.gps_button.setToolTip(
             dual(
-                "Load one recent NMEA fix from the IC-705 USB(B) GPS Out port. "
-                "Guardian identifies that port automatically and never opens "
-                "the configured CAT/PTT port.",
-                "Načte jeden aktuální NMEA fix z portu USB(B) GPS Out IC-705. "
-                "Guardian port rozpozná automaticky a nikdy neotevře nastavený "
-                "port CAT/PTT.",
+                "Read one recent NMEA fix from the IC-705 USB(B) GPS Out port.",
+                "Načte jeden aktuální NMEA fix z USB(B) GPS Out IC-705.",
             )
         )
         self.gps_button.clicked.connect(self._detect_icom_gps)
         gps_controls.addWidget(self.gps_button)
-        gps_controls.addStretch(1)
+        self._refresh_gps_ports()
         position_layout.addLayout(gps_controls)
 
         locator_controls = QHBoxLayout()
@@ -1457,7 +1473,6 @@ class MapWindow(QDialog):
         }
 
     def refresh(self) -> None:
-        self._sync_gps_button()
         self.canvas.own_grid = (self.runtime.config.station_grid or "").upper()
         self.canvas.stations = self.stations()
         self.canvas.station_states = self.station_states()
@@ -1683,125 +1698,50 @@ class MapWindow(QDialog):
         self.status.setText("   ·   ".join(parts))
 
     # --- interaction ------------------------------------------------------ #
-    @staticmethod
-    def _looks_like_ic705_usb_b(label: str) -> bool:
-        """Return whether a serial label explicitly identifies IC-705 USB(B).
-
-        Typical Icom Windows driver descriptions include ``IC-705 Serial Port
-        A (CI-V)`` and ``IC-705 Serial Port B``.  The USB(B) marker is also
-        accepted when it appears alongside an Icom model label.  A bare COM
-        number is deliberately not enough evidence: opening an arbitrary
-        second serial device could steal an AIOC/PTT or another radio's port.
-        """
-        text = " ".join(str(label or "").casefold().split())
-        usb_b = any(
-            marker in text
-            for marker in (
-                "serial port b",
-                "usb(b)",
-                "usb (b)",
-                "usb b",
-            )
-        )
-        if not usb_b:
-            return False
-        return "ic-705" in text or "ic705" in text
-
-    def _resolve_ic705_gps_port(self) -> tuple[str, str]:
-        """Resolve one explicit IC-705 USB(B) port without guessing.
-
-        ``list_serial_ports`` only returns labels, so the resolver requires the
-        Icom model and USB(B) role in the driver description.  If there is no
-        such label, or more than one survives the CAT/PTT exclusion, returning
-        no port is safer than trying each serial device in turn.
-        """
+    def _refresh_gps_ports(self) -> None:
+        """Refresh editable GPS choices while keeping CAT/PTT out of them."""
+        selected = port_device(self.gps_port.currentText().strip())
+        configured = str(getattr(self.runtime.config, "gps_port", "") or "").strip()
+        if not selected:
+            selected = port_device(configured)
         cat_port = str(getattr(self.runtime.config, "cat_port", "") or "")
+        labels: list[str] = []
         try:
-            labels = list_serial_ports()
-        except Exception:  # noqa: BLE001 - enumeration backends vary by OS
-            return "", dual(
-                "Guardian could not inspect serial devices safely. Enable the "
-                "IC-705 USB(B) GPS Out port and try again; no serial port was opened.",
-                "Guardian nemohl bezpečně prohledat sériová zařízení. Povolte "
-                "GPS Out na USB(B) IC-705 a zkuste to znovu; žádný port nebyl otevřen.",
-            )
-
-        candidates: list[str] = []
-        for label in labels:
-            label = str(label or "").strip()
-            port = port_device(label)
-            if (
-                not port
-                or same_serial_port(port, cat_port)
-                or not self._looks_like_ic705_usb_b(label)
-            ):
+            available = list_serial_ports()
+        except BaseException:
+            available = []
+        for label in available:
+            port = port_device(str(label).strip())
+            if not port or same_serial_port(port, cat_port):
                 continue
-            if not any(same_serial_port(port, known) for known in candidates):
-                candidates.append(port)
-
-        if len(candidates) == 1:
-            return candidates[0], ""
-        if len(candidates) > 1:
-            return "", dual(
-                "Several IC-705 USB(B) GPS ports were found. Guardian will not "
-                "guess which radio to use; check that one IC-705 is connected "
-                "and try again.",
-                "Bylo nalezeno několik portů GPS USB(B) IC-705. Guardian nebude "
-                "hádat, které rádio použít; zkontrolujte připojení jednoho "
-                "IC-705 a zkuste to znovu.",
+            labels.append(str(label))
+        if same_serial_port(selected, cat_port):
+            selected = ""
+        self.gps_port.blockSignals(True)
+        self.gps_port.clear()
+        self.gps_port.addItem("")
+        self.gps_port.addItems(labels)
+        if selected:
+            matching = next(
+                (
+                    label
+                    for label in labels
+                    if serial_port_name(port_device(label))
+                    == serial_port_name(selected)
+                ),
+                None,
             )
-        if any(
-            self._looks_like_ic705_usb_b(str(label or ""))
-            and same_serial_port(port_device(str(label or "")), cat_port)
-            for label in labels
-        ):
-            return "", dual(
-                "The detected IC-705 USB(B) GPS port is also the configured "
-                "CAT/PTT port. Guardian left it untouched; configure separate "
-                "USB(A) CAT and USB(B) GPS interfaces.",
-                "Zjištěný port GPS USB(B) IC-705 je zároveň nastaveným portem "
-                "CAT/PTT. Guardian ho nechal nedotčený; nastavte oddělená "
-                "rozhraní CAT USB(A) a GPS USB(B).",
-            )
-        return "", dual(
-            "Guardian could not identify an IC-705 USB(B) GPS Out port. Enable "
-            "GPS Out on the radio and try again; no unrelated serial device "
-            "will be guessed.",
-            "Guardian nerozpoznal port GPS Out USB(B) IC-705. Povolte GPS Out "
-            "na rádiu a zkuste to znovu; jiné sériové zařízení nebude hádáno.",
-        )
+            self.gps_port.setCurrentText(matching or selected)
+        self.gps_port.blockSignals(False)
 
     def _selected_gps_port(self) -> str:
-        """Return the freshly identified USB(B) port, or an empty value."""
-        port, detail = self._resolve_ic705_gps_port()
-        self._gps_resolution_error = detail
+        port = port_device(self.gps_port.currentText().strip())
+        cat_port = str(getattr(self.runtime.config, "cat_port", "") or "")
+        if not port:
+            port = port_device(str(getattr(self.runtime.config, "gps_port", "") or ""))
+        if same_serial_port(port, cat_port):
+            return ""
         return port
-
-    def _is_ic705_connected(self) -> bool:
-        config = self.runtime.config
-        model = str(getattr(config, "radio", "") or "").casefold()
-        try:
-            rig_model = int(getattr(config, "rig_model", 0) or 0)
-        except (TypeError, ValueError):
-            rig_model = 0
-        selected = (
-            ("ic-705" in model or "ic705" in model)
-            if model
-            else rig_model == 3085
-        )
-        snapshots = getattr(self.runtime, "snapshots", None)
-        snapshot = snapshots.read() if snapshots is not None else None
-        radio = getattr(snapshot, "radio", None)
-        return bool(selected and getattr(radio, "connected", False))
-
-    def _sync_gps_button(self) -> None:
-        """Expose GPS only for a connected IC-705 profile."""
-        available = self._is_ic705_connected()
-        self.gps_button.setVisible(available)
-        if not available:
-            self.gps_button.setEnabled(False)
-        elif self._location_request is None:
-            self.gps_button.setEnabled(True)
 
     def _start_location_request(self, request, *, mode: str) -> None:
         self._location_mode = mode
@@ -1830,8 +1770,6 @@ class MapWindow(QDialog):
         """Start one IC-705 USB(B) GPS Out read after the button click."""
         if self._location_request is not None:
             return
-        if not self._is_ic705_connected():
-            return
         self._discard_detected()
         self.location_settings.hide()
         self._location_mode = "gps"
@@ -1840,8 +1778,7 @@ class MapWindow(QDialog):
         if not port:
             self._location_failed(
                 LocationFailure.UNAVAILABLE,
-                self._gps_resolution_error
-                or "IC-705 USB(B) GPS Out port could not be resolved safely.",
+                "Choose an IC-705 USB(B) GPS Out port other than CAT/PTT.",
             )
             return
         if same_serial_port(port, cat_port):
@@ -1850,6 +1787,12 @@ class MapWindow(QDialog):
                 "GPS port is also the configured CAT/PTT port.",
             )
             return
+        # Remember only the operator's selected device, never the fix.  This
+        # does not alter radio settings and makes the one-shot action usable
+        # on the next map visit.
+        if hasattr(self.runtime.config, "gps_port"):
+            self.runtime.config.gps_port = port
+            self.runtime.config.save()
         factory = self._gps_request_factory
         if factory is IcomGpsRequest:
             request = factory(port, self, cat_port=cat_port)
@@ -1919,7 +1862,6 @@ class MapWindow(QDialog):
         self.location_status.show()
         self.detected_panel.show()
         self.canvas.update()
-        self._sync_gps_button()
 
     def _location_failed(self, failure: LocationFailure, _detail: str) -> None:
         mode = self._location_mode
@@ -1928,12 +1870,7 @@ class MapWindow(QDialog):
         self.gps_button.setEnabled(True)
         self.detect_cancel.hide()
         if mode == "gps":
-            self.location_status.setText(
-                self._gps_resolution_error
-                if failure == LocationFailure.UNAVAILABLE
-                and self._gps_resolution_error
-                else self._gps_failure_text(failure)
-            )
+            self.location_status.setText(self._gps_failure_text(failure))
         else:
             self.location_status.setText(tr(f"map.location_failure_{failure.value}"))
         self.location_status.show()
@@ -1956,7 +1893,6 @@ class MapWindow(QDialog):
             ),
             source="gps" if mode == "gps" else "location",
         )
-        self._sync_gps_button()
 
     @staticmethod
     def _location_source_text(source: LocationSource) -> str:

@@ -40,19 +40,10 @@ def test_invalid_config_falls_back_to_defaults(tmp_path: Path) -> None:
     assert loaded.separate_working_channels is False
 
 
-def test_production_network_policy_is_fixed_on_and_round_trips(tmp_path: Path) -> None:
+def test_experimental_network_flags_default_off_and_round_trip(tmp_path: Path) -> None:
     defaults = StationConfig()
-    for name in (
-        "vara_host_ptt",
-        "auto_route",
-        "auto_relay",
-        "auto_deliver",
-        "auto_qsy",
-        "discovery_forward",
-        "discovery_auto_use",
-        "link_advert_enabled",
-    ):
-        assert getattr(defaults, name) is True
+    assert defaults.discovery_auto_use is False
+    assert defaults.link_advert_enabled is False
 
     path = tmp_path / "config.json"
     configured = StationConfig(
@@ -65,76 +56,6 @@ def test_production_network_policy_is_fixed_on_and_round_trips(tmp_path: Path) -
     assert loaded.discovery_auto_use is True
     assert loaded.link_advert_enabled is True
     assert loaded.link_advert_interval == 600.0
-
-
-def test_loading_and_saving_a_legacy_profile_enables_fixed_policy_and_migrates_compression(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.json"
-    path.write_text(
-        json.dumps(
-            {
-                "vara_host_ptt": False,
-                "auto_route": False,
-                "auto_relay": False,
-                "auto_deliver": False,
-                "auto_qsy": False,
-                "discovery_forward": False,
-                "discovery_auto_use": False,
-                "link_advert_enabled": False,
-                "vara_file_compression": True,
-                "guardian_compression": False,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    loaded = StationConfig.load(path)
-    for name in (
-        "vara_host_ptt",
-        "auto_route",
-        "auto_relay",
-        "auto_deliver",
-        "auto_qsy",
-        "discovery_forward",
-        "discovery_auto_use",
-        "link_advert_enabled",
-    ):
-        assert getattr(loaded, name) is True
-    assert loaded.guardian_aggressive_compression is True
-    assert loaded.vara_file_compression is False
-    assert loaded.guardian_compression is False
-
-    loaded.save(path)
-    saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["guardian_aggressive_compression"] is True
-    assert saved["vara_file_compression"] is False
-    assert saved["guardian_compression"] is False
-
-
-def test_direct_constructor_keeps_low_level_policy_overrides_until_production_boundary(
-    tmp_path: Path,
-) -> None:
-    config = StationConfig(
-        vara_host_ptt=False,
-        auto_route=False,
-        auto_relay=False,
-        auto_deliver=False,
-        auto_qsy=False,
-        discovery_forward=False,
-        discovery_auto_use=False,
-        link_advert_enabled=False,
-        vara_file_compression=True,
-    )
-    assert config.auto_route is False
-    assert config.discovery_auto_use is False
-    assert config.vara_file_compression is True
-
-    config.save(tmp_path / "config.json")
-    assert config.auto_route is True
-    assert config.discovery_auto_use is True
-    assert config.vara_file_compression is False
-    assert config.guardian_aggressive_compression is True
 
 
 def test_discovery_has_two_modes_and_a_monitor_profile_is_migrated(

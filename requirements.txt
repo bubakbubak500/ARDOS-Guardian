@@ -4,10 +4,6 @@ pillow>=10.0.0
 PySide6-Essentials>=6.7,<7
 numpy>=1.26
 sounddevice>=0.4.6
-zopfli>=0.4.3,<0.5
-# Optional Windows Core Audio control used by the opt-in AutoTune gain path.
-pycaw==20251023; sys_platform == "win32"
-comtypes>=1.4,<2; sys_platform == "win32"
 winrt-Windows.Devices.Geolocation>=3.2,<4; sys_platform == "win32"
 winrt-Windows.Foundation>=3.2,<4; sys_platform == "win32"
 

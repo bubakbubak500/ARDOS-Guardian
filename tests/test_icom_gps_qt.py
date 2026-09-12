@@ -9,32 +9,15 @@ from datetime import datetime, timezone
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication
 
 from guardian.location import LocationFailure, LocationFix, LocationSource
 from guardian.qt.runtime import ShellRuntime
-from guardian.services.snapshots import RadioSnapshot
 
 
 def _application() -> QApplication:
     return QApplication.instance() or QApplication([])
-
-
-def _connected_ic705(runtime) -> None:
-    runtime.config.radio = "Icom IC-705"
-    runtime.config.rig_model = 3085
-    runtime.config.radio_backend = "hamlib"
-    runtime.snapshots.update(
-        radio=RadioSnapshot(connected=True, name="hamlib")
-    )
-
-
-def _ic705_ports():
-    return [
-        "COM7 — IC-705 Serial Port A (CI-V)",
-        "COM8 — IC-705 Serial Port B",
-    ]
 
 
 class _FakeGpsRequest(QObject):
@@ -64,25 +47,18 @@ class _FakeGpsRequest(QObject):
         self.cancelled = True
 
 
-def test_ic705_gps_uses_preview_and_applies_only_the_locator(
-    tmp_path, monkeypatch
-) -> None:
+def test_ic705_gps_uses_preview_and_applies_only_the_locator(tmp_path) -> None:
     _application()
-    import guardian.qt.map_window as map_module
     from guardian.qt.map_window import MapWindow
     from guardian.routing import MAX_LOCATOR_CHARS, to_locator
 
-    monkeypatch.setattr(map_module, "list_serial_ports", _ic705_ports)
     runtime = ShellRuntime()
     runtime.mailstore.root = tmp_path / "mail"
     runtime.config.map_background = False
     runtime.config.station_grid = "JN89HE"
     runtime.config.beacon_position = False
     runtime.config.cat_port = "COM7"
-    # A stale remembered port must not override the fresh, explicit USB(B)
-    # identification.
-    runtime.config.gps_port = "COM99"
-    _connected_ic705(runtime)
+    runtime.config.gps_port = "COM8"
     fix = LocationFix(
         50.0755,
         14.4378,
@@ -98,11 +74,6 @@ def test_ic705_gps_uses_preview_and_applies_only_the_locator(
 
     window = MapWindow(runtime, gps_request_factory=factory)
     try:
-        window.show()
-        _application().processEvents()
-        assert not window.gps_button.isHidden()
-        assert not hasattr(window, "gps_port")
-        assert not hasattr(window, "gps_refresh")
         window._detect_icom_gps()
 
         assert created == [("COM8", "COM7")]
@@ -126,9 +97,7 @@ def test_ic705_gps_uses_preview_and_applies_only_the_locator(
         runtime.close()
 
 
-def test_ic705_gps_without_safe_port_never_guesses_or_opens_a_serial_device(
-    monkeypatch,
-) -> None:
+def test_ic705_gps_port_choices_exclude_cat_and_never_open_conflict(monkeypatch) -> None:
     _application()
     import guardian.qt.map_window as map_module
     from guardian.qt.map_window import MapWindow
@@ -136,16 +105,12 @@ def test_ic705_gps_without_safe_port_never_guesses_or_opens_a_serial_device(
     monkeypatch.setattr(
         map_module,
         "list_serial_ports",
-        lambda: [
-            "COM7 — IC-705 Serial Port A (CI-V)",
-            "COM8 — USB Serial Port",
-        ],
+        lambda: ["COM7 — CAT", "COM8 — USB(B) GPS Out"],
     )
     runtime = ShellRuntime()
     runtime.config.map_background = False
     runtime.config.cat_port = "COM7"
-    runtime.config.gps_port = "COM8"
-    _connected_ic705(runtime)
+    runtime.config.gps_port = "COM7"
     started: list[bool] = []
 
     def forbidden_factory(*_args, **_kwargs):
@@ -154,107 +119,11 @@ def test_ic705_gps_without_safe_port_never_guesses_or_opens_a_serial_device(
 
     window = MapWindow(runtime, gps_request_factory=forbidden_factory)
     try:
-        window.show()
-        _application().processEvents()
-        assert not window.gps_button.isHidden()
+        assert window.gps_port.findText("COM7", Qt.MatchFlag.MatchStartsWith) == -1
+        assert window.gps_port.findText("COM8", Qt.MatchFlag.MatchStartsWith) >= 0
         window._detect_icom_gps()
         assert started == []
-        assert "unrelated" in window.location_status.text().lower()
-    finally:
-        window.close()
-        runtime.close()
-
-
-def test_ic705_gps_refuses_ambiguous_usb_b_ports(monkeypatch) -> None:
-    _application()
-    import guardian.qt.map_window as map_module
-    from guardian.qt.map_window import MapWindow
-
-    monkeypatch.setattr(
-        map_module,
-        "list_serial_ports",
-        lambda: [
-            "COM7 — IC-705 Serial Port A (CI-V)",
-            "COM8 — IC-705 Serial Port B",
-            "COM9 — IC-705 Serial Port B",
-        ],
-    )
-    runtime = ShellRuntime()
-    runtime.config.map_background = False
-    runtime.config.cat_port = "COM7"
-    _connected_ic705(runtime)
-    started: list[bool] = []
-
-    def forbidden_factory(*_args, **_kwargs):
-        started.append(True)
-        raise AssertionError("ambiguous GPS port must not be opened")
-
-    window = MapWindow(runtime, gps_request_factory=forbidden_factory)
-    try:
-        window._detect_icom_gps()
-        assert started == []
-        assert "guess" in window.location_status.text().lower()
-    finally:
-        window.close()
-        runtime.close()
-
-
-def test_ic705_gps_button_requires_selected_connected_radio() -> None:
-    _application()
-    from guardian.qt.map_window import MapWindow
-
-    runtime = ShellRuntime()
-    runtime.config.map_background = False
-    window = MapWindow(runtime)
-    try:
-        window.show()
-        _application().processEvents()
-        assert window.gps_button.isHidden()
-
-        _connected_ic705(runtime)
-        window.refresh()
-        assert not window.gps_button.isHidden()
-
-        runtime.snapshots.update(
-            radio=RadioSnapshot(connected=False, name="hamlib")
-        )
-        window.refresh()
-        assert window.gps_button.isHidden()
-
-        runtime.config.radio = "Icom IC-7300"
-        runtime.config.rig_model = 0
-        runtime.snapshots.update(
-            radio=RadioSnapshot(connected=True, name="hamlib")
-        )
-        window.refresh()
-        assert window.gps_button.isHidden()
-    finally:
-        window.close()
-        runtime.close()
-
-
-def test_ic705_gps_visibility_refresh_does_not_scan_serial_ports(monkeypatch) -> None:
-    _application()
-    import guardian.qt.map_window as map_module
-    from guardian.qt.map_window import MapWindow
-
-    calls: list[bool] = []
-
-    def ports():
-        calls.append(True)
-        return _ic705_ports()
-
-    monkeypatch.setattr(map_module, "list_serial_ports", ports)
-    runtime = ShellRuntime()
-    runtime.config.map_background = False
-    _connected_ic705(runtime)
-    window = MapWindow(runtime)
-    try:
-        window.refresh()
-        window.refresh()
-        assert calls == []
-        window._resolve_ic705_gps_port()
-        assert calls == [True]
+        assert "CAT/PTT" in window.location_status.text()
     finally:
         window.close()
         runtime.close()
@@ -318,7 +187,6 @@ def test_ic705_request_cancel_ignores_late_worker_result(monkeypatch) -> None:
 def test_closing_map_cancels_a_blocking_ic705_read(monkeypatch) -> None:
     _application()
     import guardian.qt.location as location_module
-    import guardian.qt.map_window as map_module
     from guardian.qt.location import IcomGpsRequest
     from guardian.qt.map_window import MapWindow
 
@@ -333,11 +201,10 @@ def test_closing_map_cancels_a_blocking_ic705_read(monkeypatch) -> None:
         return None
 
     monkeypatch.setattr(location_module, "read_icom_gps", read)
-    monkeypatch.setattr(map_module, "list_serial_ports", _ic705_ports)
     runtime = ShellRuntime()
     runtime.config.map_background = False
     runtime.config.cat_port = "COM7"
-    _connected_ic705(runtime)
+    runtime.config.gps_port = "COM8"
     window = MapWindow(
         runtime,
         gps_request_factory=lambda port, parent, **kwargs: IcomGpsRequest(

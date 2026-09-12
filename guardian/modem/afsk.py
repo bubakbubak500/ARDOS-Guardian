@@ -27,8 +27,6 @@ LEGACY_SYNC = bytes((0x2D, 0xD4))
 FEC_SYNC = bytes((0x69, 0x96, 0xC3, 0x3C))
 SYNC = LEGACY_SYNC  # compatibility for callers importing the old name
 FEC_REPETITIONS = 3
-# Short acquisition for ordinary links. Lost cold-start frames are retried by
-# the session instead of charging every successful exchange an 853 ms leader.
 PREAMBLE = b"\x55" * 24
 POSTAMBLE_BITS = 32  # keep the radio modulator settled through the USB/PTT tail
 ACQUISITION_PREAMBLE_BITS = 32
@@ -62,13 +60,11 @@ class AFSKModem:
         self.space = space
         self.baud = baud
         self.sps = self.fs / self.baud  # samples per symbol (may be fractional)
-        self.received_preamble_bytes: dict[bytes, float] = {}
-        self._candidate_preambles: dict[tuple[float, float, bytes], float] = {}
 
-    def airtime(self, payload_bytes: int, *, preamble_bytes: int | None = None) -> float:
+    def airtime(self, payload_bytes: int) -> float:
         """Seconds on air for a frame of this payload size."""
         frame_bytes = (
-            (len(PREAMBLE) if preamble_bytes is None else preamble_bytes)
+            len(PREAMBLE)
             + len(FEC_SYNC)
             + (1 + payload_bytes) * FEC_REPETITIONS
         )
@@ -77,18 +73,11 @@ class AFSKModem:
     # ------------------------------------------------------------------ #
     #  Transmit                                                           #
     # ------------------------------------------------------------------ #
-    def retry_airtime(self, payload_bytes: int) -> float:
-        return self.airtime(payload_bytes, preamble_bytes=128)
-
-    def modulate_retry(self, payload: bytes) -> np.ndarray:
-        return self.modulate(payload, preamble_bytes=128)
-
-    def modulate(self, payload: bytes, amplitude: float = 0.4, *,
-                 preamble_bytes: int | None = None) -> np.ndarray:
+    def modulate(self, payload: bytes, amplitude: float = 0.4) -> np.ndarray:
         if len(payload) > 255:
             raise ValueError("control payload must be <= 255 bytes")
         frame = (
-            (PREAMBLE if preamble_bytes is None else b"\x55" * preamble_bytes)
+            PREAMBLE
             + FEC_SYNC
             + bytes((len(payload),)) * FEC_REPETITIONS
             + payload * FEC_REPETITIONS
@@ -174,10 +163,6 @@ class AFSKModem:
                 )
             selected.append(chosen)
         selected.sort(key=lambda item: item[1])
-        self.received_preamble_bytes = {
-            payload: self._candidate_preambles.get((score, position, payload), 24.0)
-            for score, position, payload in selected
-        }
         return [payload for _score, _position, payload in selected]
 
     def demodulate(
@@ -194,8 +179,6 @@ class AFSKModem:
         preamble immediately before the sync word. Candidates representing the
         same on-air burst are ranked by confidence and collapsed to one.
         """
-        self.received_preamble_bytes = {}
-        self._candidate_preambles = {}
         soft = self._bit_stream(samples)
         if len(soft) < self.sps * (
             ACQUISITION_PREAMBLE_BITS + len(LEGACY_SYNC) * 8 + 8
@@ -204,7 +187,6 @@ class AFSKModem:
         preamble = _bits_lsb_first(PREAMBLE)[-ACQUISITION_PREAMBLE_BITS:]
         sample_axis = np.arange(len(soft))
         candidates: list[tuple[float, float, bytes]] = []
-        incomplete_bursts: list[float] = []
         formats = (
             (_bits_lsb_first(FEC_SYNC), True),
             (_bits_lsb_first(LEGACY_SYNC), False),
@@ -248,54 +230,20 @@ class AFSKModem:
                             else self._decode_legacy_payload(after)
                         )
                         if decoded is None:
-                            if has_fec and validator is not None:
-                                # A mistimed hypothesis can read half the real
-                                # length and finish before the on-air frame.
-                                # A CRC-valid first copy proves that this burst
-                                # is still arriving, not a bad-magic frame. Wait
-                                # for all copies before delivery (and any reply).
-                                length_bits = 8 * FEC_REPETITIONS
-                                if after.size >= length_bits:
-                                    length = _bits_to_bytes_lsb_first(
-                                        self._majority_bits(after[:length_bits].reshape(
-                                            FEC_REPETITIONS, 8
-                                        ))
-                                    )[0]
-                                    copy_end = length_bits + length * 8
-                                    if length >= 8 and after.size >= copy_end:
-                                        first_copy = _bits_to_bytes_lsb_first(
-                                            after[length_bits:copy_end]
-                                        )
-                                        if validator(first_copy):
-                                            incomplete_bursts.append(float(centers[start]))
                             continue
                         payload, needed = decoded
                         end = start + acquisition.size + needed
                         score = float(np.mean(np.abs(confidence[start:end])))
                         score -= 0.1 * acquisition_errors
-                        candidate = (score, float(centers[start]), payload)
-                        candidates.append(candidate)
-                        # Observe the leader actually received; a 2.4.7 peer
-                        # still has its longer keyed tail. Do not assume its
-                        # release timing from this station's software version.
-                        beginning = int(start)
-                        while (beginning > 0 and start - beginning < 2048
-                               and bits[beginning - 1] != bits[beginning]):
-                            beginning -= 1
-                        self._candidate_preambles[candidate] = (
-                            start - beginning + ACQUISITION_PREAMBLE_BITS) / 8.0
+                        candidates.append(
+                            (score, float(centers[start]), payload)
+                        )
 
         # Adjacent clock/phase hypotheses describe the same physical burst.
         # A radio path can give a slightly mistimed hypothesis more energy than
         # the correct one. When the caller knows the payload format, prefer a
         # hypothesis that passes its integrity check (ControlFrame CRC) instead
         # of discarding it before validation.
-        if incomplete_bursts and validator is not None:
-            candidates = [candidate for candidate in candidates
-                          if validator(candidate[2]) or not any(
-                              abs(candidate[1] - position) < self.sps * 80
-                              for position in incomplete_bursts
-                          )]
         return self._select_candidates(candidates, validator)
 
     @staticmethod

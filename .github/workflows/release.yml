@@ -36,20 +36,12 @@ jobs:
             throw "Tag ${{ github.ref_name }} does not match Guardian version $version."
           }
 
-      - name: Fetch verified JPEG XL tools
-        shell: pwsh
-        run: .\tools\fetch_jpegxl.ps1
-
       - name: Test
         run: python -m pytest
 
       - name: Build application
         shell: pwsh
         run: .\build.ps1 -SkipTests
-
-      - name: Verify frozen Qt and image compression
-        shell: pwsh
-        run: .\tools\test_frozen.ps1
 
       - name: Install Inno Setup
         id: tools

@@ -10,7 +10,6 @@ from .bands import AMATEUR_BANDS, band_for, same_band
 from .base import RadioDriver, RadioState, NullRadio
 from .hamlib import HamlibRadio
 from .generic_vox import VoxRadio
-from .guardian_handheld import GuardianK5Radio, GuardianK61Radio
 from .presets import DUMMY_MODEL
 from .scanner import Channel, ChannelPlan, ChannelScanner
 
@@ -34,21 +33,7 @@ def make_driver(cfg) -> RadioDriver:
         )
         return driver
     if backend == "vox":
-        driver = VoxRadio(cfg.cat_port, ptt_line=cfg.ptt_line)
-        driver.manual_frequency_hz = int(getattr(cfg, "manual_frequency_hz", 0) or 0)
-        return driver
-    if backend == "guardian_k5":
-        return GuardianK5Radio(
-            cfg.cat_port,
-            baud=cfg.cat_baud,
-            ptt_mode=getattr(cfg, "guardian_ptt_mode", "AIOC"),
-        )
-    if backend == "guardian_k61":
-        return GuardianK61Radio(
-            cfg.cat_port,
-            baud=cfg.cat_baud,
-            ptt_mode=getattr(cfg, "guardian_ptt_mode", "AIOC"),
-        )
+        return VoxRadio(cfg.cat_port, ptt_line=cfg.ptt_line)
     return NullRadio()
 
 
@@ -61,8 +46,6 @@ __all__ = [
     "NullRadio",
     "HamlibRadio",
     "VoxRadio",
-    "GuardianK5Radio",
-    "GuardianK61Radio",
     "Channel",
     "ChannelPlan",
     "ChannelScanner",

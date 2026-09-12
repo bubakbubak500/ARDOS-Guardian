@@ -1,10 +1,4 @@
 # Python
-# Local port audits, previews, downloaded codecs and test scratch directories
-output/
-codecs/vendor/
-.codex-pytest-*/
-.pytest-tmp-*/
-
 __pycache__/
 *.py[cod]
 *.egg-info/

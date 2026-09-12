@@ -79,24 +79,6 @@ class NetworkSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class StationLabSnapshot:
-    """Immutable progress for the optional SC-FTN AutoTune workspace."""
-
-    state: str = "idle"
-    peer: str = ""
-    session_id: int = 0
-    mode: str = "quick"
-    progress: int = 0
-    total: int = 0
-    current: str = ""
-    message: str = ""
-    pending_offer: bool = False
-    report_json: str = ""
-    report_csv: str = ""
-    error: str = ""
-
-
-@dataclass(frozen=True, slots=True)
 class DependencySnapshot:
     hamlib_available: bool = False
     hamlib_path: str | None = None
@@ -112,7 +94,6 @@ class ApplicationSnapshot:
     mailbox: MailboxSnapshot = MailboxSnapshot()
     network: NetworkSnapshot = NetworkSnapshot()
     dependencies: DependencySnapshot = DependencySnapshot()
-    station_lab: StationLabSnapshot = StationLabSnapshot()
 
 
 class SnapshotStore:

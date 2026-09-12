@@ -24,7 +24,7 @@ from guardian.services import (
     SnapshotStore,
     WorkerPool,
 )
-from guardian.session import LoopbackBus, Message, Orchestrator, SessionState
+from guardian.session import LoopbackBus, Orchestrator, SessionState
 from guardian.session.orchestrator import (
     ACK_TIMEOUT,
     START_TIMEOUT,
@@ -84,76 +84,6 @@ def _operations(tmp_path, **overrides) -> tuple[Operations, WorkerPool, MessageS
         HeardStations(),
     )
     return operations, workers, mailstore
-
-
-def test_payload_ownership_defers_control_without_disabling_transfer_watchdog(
-    tmp_path, monkeypatch,
-) -> None:
-    operations, workers, _store = _operations(
-        tmp_path, discovery_mode="assisted", discovery_forward=True,
-        auto_relay=True, link_advert_enabled=True,
-    )
-    sent = []
-    net = operations.net
-    net.transport.send = sent.append
-    net.discovery.send = sent.append
-    net.discovery_channel_active = True
-    try:
-        monkeypatch.setattr("guardian.operations.time.monotonic", lambda: 1000.0)
-        operations.tick()
-        query = net.discover_route("OK2JLD")
-        net.discovery.receive(ControlFrame(
-            FrameType.MULTIHOP_RREQ, source="OK2MTV", destination="OK2ABC",
-            next_hop="OK2MTV", message_id=991, ttl=3,
-        ))
-        announce = net.send_message("OK2IPW", "waiting", msg_id=992, next_hop="OK2IPW")
-        payload = Message(993, "OK7PS", "OK2XYZ", "OK2XYZ", direction="out")
-        net.sessions[payload.msg_id] = payload
-        net._enter(payload, SessionState.TRANSFERRING)
-        sent.clear()
-
-        operations._payload_active.set()
-        monkeypatch.setattr("guardian.operations.time.monotonic", lambda: 1200.0)
-        operations.tick()
-
-        assert sent == [], "route maintenance must not key over VARA"
-        assert query.query_id in net.discovery.pending
-        assert query.deadline > 1200
-        assert announce.state is SessionState.ANNOUNCING
-        assert announce.attempts == 1
-        assert payload.state is SessionState.FAILED
-        assert "no progress" in payload.error
-
-        operations._payload_active.clear()
-        monkeypatch.setattr("guardian.operations.time.monotonic", lambda: 1202.0)
-        operations.tick()
-        assert any(frame.type is FrameType.MULTIHOP_RREQ
-                   and frame.message_id == 991 for frame in sent)
-        assert announce.state is SessionState.ANNOUNCING
-    finally:
-        operations._payload_active.clear()
-        operations.close()
-        workers.close(wait=True)
-
-
-def test_payload_acquisition_gates_new_control_before_releasing_codec(tmp_path) -> None:
-    operations, workers, _store = _operations(tmp_path)
-    calls = []
-    operations.audio_transport = SimpleNamespace(
-        suspend=lambda **kwargs: calls.append(("suspend", kwargs["timeout"])) or True,
-        start=lambda: calls.append(("start",)),
-    )
-    try:
-        operations._suspend_control()
-        assert operations._payload_active.is_set()
-        assert calls == [("suspend", max(8.0, operations.net.start_timeout))]
-        operations._resume_control()
-        assert not operations._payload_active.is_set()
-        assert calls[-1] == ("start",)
-    finally:
-        operations.audio_transport = None
-        operations.close()
-        workers.close(wait=True)
 
 
 def test_vara_state_notifications_are_retained_but_hidden_from_activity(
@@ -1306,22 +1236,18 @@ def test_fm_is_never_sent_a_bandwidth_or_p2p_command(tmp_path) -> None:
         assert not [c for c in operations.vara.commands if c.startswith("BW")]
         assert "P2P SESSION" not in operations.vara.commands
         assert "CHAT OFF" in operations.vara.commands
-        assert "COMPRESSION FILES" in operations.vara.commands
-        assert "COMPRESSION TEXT" not in operations.vara.commands
+        assert "COMPRESSION TEXT" in operations.vara.commands
     finally:
         operations.close()
         workers.close(wait=True)
 
 
-def test_vara_files_compression_survives_legacy_checkbox_migration(tmp_path) -> None:
+def test_vara_files_compression_replaces_text_mode(tmp_path) -> None:
     operations, workers, _ = _operations(
         tmp_path, vara_mode="FM", vara_file_compression=True
     )
     operations.vara = _FakeVara()
     try:
-        operations.config.enforce_production_policy()
-        assert operations.config.vara_file_compression is False
-        assert operations.config.guardian_aggressive_compression is True
         assert operations.apply_vara_session_settings()
         assert "COMPRESSION FILES" in operations.vara.commands
         assert "COMPRESSION TEXT" not in operations.vara.commands
@@ -2146,15 +2072,15 @@ def test_guardian_keys_for_vara_out_of_the_box(tmp_path) -> None:
         workers.close(wait=True)
 
 
-def test_old_profile_uses_guardian_keying_under_fixed_policy(
+def test_a_profile_that_already_chose_its_own_keying_is_left_alone(
     tmp_path,
 ) -> None:
-    # Keying belongs to Guardian in the shipped station policy, including
-    # profiles saved before the user-facing toggle was removed.
+    # A station may be keying through VARA deliberately; taking that over
+    # behind the operator's back could double-key the radio.
     path = tmp_path / "config.json"
     path.write_text('{"callsign": "OK7PS", "vara_host_ptt": false}', encoding="utf-8")
 
-    assert StationConfig.load(path).vara_host_ptt is True
+    assert StationConfig.load(path).vara_host_ptt is False
 
 
 def test_a_station_that_cannot_key_for_vara_is_warned_before_the_handoff(

@@ -26,14 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..config import (
-    SC_FTN_BANDWIDTHS,
-    SC_FTN_WAVEFORM,
-    StationConfig,
-    radio_profile_name,
-)
-from ..ofdm.automatic import automatic_g2_policy
-from ..waveforms.config import profile_for
+from ..config import StationConfig, radio_profile_name
 from ..i18n import Language, dual, language, set_language, tr
 from ..install.dependencies import find_vara_fm, find_vara_hf
 from ..install.hamlib_installer import existing_rigctld
@@ -285,12 +278,6 @@ class SettingsDialog(QDialog):
         self.radio_backend.addItem(
             dual("VOX / serial PTT", "VOX / sériové PTT"), "vox"
         )
-        self.radio_backend.addItem(
-            "Guardian K5FW / AIOC UART", "guardian_k5"
-        )
-        self.radio_backend.addItem(
-            "Guardian K61FW / AIOC UART", "guardian_k61"
-        )
         index = self.radio_backend.findData(self.config.radio_backend)
         self.radio_backend.setCurrentIndex(max(0, index))
         self.radio_model = QComboBox()
@@ -307,14 +294,6 @@ class SettingsDialog(QDialog):
             self.radio_model.addItem(label, self.config.rig_model)
             selected = self.radio_model.count() - 1
         self.radio_model.setCurrentIndex(max(0, selected))
-        self.guardian_radio_model = QLineEdit(self.config.radio)
-        self.guardian_radio_model.setPlaceholderText(
-            dual("K5 / K61 radio model", "Model rádia K5 / K61")
-        )
-        self.vox_radio_model = QLineEdit(self.config.radio)
-        self.vox_radio_model.setPlaceholderText(
-            dual("VOX radio model (optional)", "Model rádia VOX (volitelné)")
-        )
         browse_radios = QPushButton(
             dual("Browse all supported radios…", "Všechna podporovaná rádia…")
         )
@@ -352,19 +331,6 @@ class SettingsDialog(QDialog):
         self.ptt_line = QComboBox()
         self.ptt_line.addItems(["RTS", "DTR"])
         self.ptt_line.setCurrentText(self.config.ptt_line)
-        self.guardian_ptt_mode = QComboBox()
-        self.guardian_ptt_mode.addItems(["AIOC", "RTS", "DTR"])
-        self.guardian_ptt_mode.setCurrentText(
-            str(getattr(self.config, "guardian_ptt_mode", "AIOC") or "AIOC").upper()
-        )
-        self.guardian_ptt_mode.setToolTip(
-            dual(
-                "AIOC uses the safe DTR && !RTS sequence. RTS and DTR are "
-                "available for interfaces wired as a single active-high line.",
-                "AIOC používá bezpečnou sekvenci DTR && !RTS. RTS a DTR jsou "
-                "pro rozhraní zapojená jako jediná aktivní linka.",
-            )
-        )
         # rigctld can key three ways; the default CAT command only exists on
         # radios that *have* CAT. A no-CAT handheld behind an AIOC or data
         # cable is keyed by a serial control line, paired with the Dummy model.
@@ -397,14 +363,6 @@ class SettingsDialog(QDialog):
         )
         form.addRow(dual("Control method", "Způsob řízení"), self.radio_backend)
         form.addRow(dual("Radio model", "Model rádia"), radio_picker)
-        self.guardian_radio_model_label = QLabel(
-            dual("Guardian radio model", "Model rádia Guardian")
-        )
-        form.addRow(self.guardian_radio_model_label, self.guardian_radio_model)
-        self.vox_radio_model_label = QLabel(
-            dual("VOX radio model", "Model rádia VOX")
-        )
-        form.addRow(self.vox_radio_model_label, self.vox_radio_model)
         form.addRow(
             dual("CAT / PTT serial port", "Sériový port CAT / PTT"),
             cat_port_row,
@@ -415,10 +373,6 @@ class SettingsDialog(QDialog):
         form.addRow(dual("rigctld executable", "Program rigctld"), self.rigctld_path)
         form.addRow(dual("Hamlib PTT via", "PTT přes (Hamlib)"), self.ptt_type)
         form.addRow(dual("VOX PTT line", "Linka PTT pro VOX"), self.ptt_line)
-        self.guardian_ptt_mode_label = QLabel(
-            dual("Guardian PTT wiring", "Zapojení PTT Guardian")
-        )
-        form.addRow(self.guardian_ptt_mode_label, self.guardian_ptt_mode)
 
         # Slow-keying gap for cheap handhelds (AIOC-class cables): negotiated
         # with the peer during the handshake, applied before each VARA key-up.
@@ -455,43 +409,6 @@ class SettingsDialog(QDialog):
             dual("VARA FM keying delay", "Zpoždění klíčování VARA FM"),
             self.vara_ptt_delay,
         )
-
-        self.ofdm_tx_lead = _spin(
-            0, 3_000, int(getattr(self.config, "ofdm_tx_lead_ms", 60) or 0)
-        )
-        self.ofdm_tx_tail = _spin(
-            0, 3_000, int(getattr(self.config, "ofdm_tx_tail_ms", 60) or 0)
-        )
-        self.ofdm_min_burst_bytes = _spin(
-            256,
-            16_384,
-            int(getattr(self.config, "ofdm_min_burst_bytes", 2_048) or 2_048),
-        )
-        self.ofdm_arq_block_bytes = _spin(
-            128,
-            8_192,
-            int(getattr(self.config, "ofdm_arq_block_bytes", 2_048) or 2_048),
-        )
-        form.addRow(
-            dual("SC-FTN TX lead (ms)", "Náběh TX SC-FTN (ms)"),
-            self.ofdm_tx_lead,
-        )
-        form.addRow(
-            dual("SC-FTN TX tail (ms)", "Doběh TX SC-FTN (ms)"),
-            self.ofdm_tx_tail,
-        )
-        form.addRow(
-            dual("SC-FTN minimum burst (B)", "Minimum dávky SC-FTN (B)"),
-            self.ofdm_min_burst_bytes,
-        )
-        form.addRow(
-            dual("SC-FTN ARQ block (B)", "Blok ARQ SC-FTN (B)"),
-            self.ofdm_arq_block_bytes,
-        )
-        self.radio_backend.currentIndexChanged.connect(
-            self._sync_radio_backend_rows
-        )
-        self._sync_radio_backend_rows(self.radio_backend.currentIndex())
 
         # Proving that keying works is the one thing this page cannot tell you
         # from its own fields: the wiring is only ever confirmed on air.
@@ -548,18 +465,6 @@ class SettingsDialog(QDialog):
         form.addRow("", test_row)
         form.addRow("", self.ptt_status)
 
-    def _sync_radio_backend_rows(self, _index: int = -1) -> None:
-        """Show the model and PTT fields owned by the selected radio path."""
-        backend = self.radio_backend.currentData()
-        guardian = backend in {"guardian_k5", "guardian_k61"}
-        vox = backend == "vox"
-        self.guardian_radio_model.setVisible(guardian)
-        self.guardian_radio_model_label.setVisible(guardian)
-        self.vox_radio_model.setVisible(vox)
-        self.vox_radio_model_label.setVisible(vox)
-        self.guardian_ptt_mode.setVisible(guardian)
-        self.guardian_ptt_mode_label.setVisible(guardian)
-
     # --- radio profiles --------------------------------------------------- #
     def _refresh_radio_profiles(self, selected: str = "") -> None:
         """Rebuild the picker, keeping a name selected when there is one."""
@@ -581,17 +486,9 @@ class SettingsDialog(QDialog):
         """The radio settings as the fields currently read them."""
         backend = self.radio_backend.currentData()
         hamlib = backend == "hamlib"
-        if hamlib:
-            radio = self.radio_model.currentText().strip()
-        elif backend in {"guardian_k5", "guardian_k61"}:
-            radio = self.guardian_radio_model.text().strip()
-        elif backend == "vox":
-            radio = self.vox_radio_model.text().strip()
-        else:
-            radio = ""
         return {
             "radio_backend": backend,
-            "radio": radio,
+            "radio": self.radio_model.currentText() if hamlib else "",
             "rig_model": int(self.radio_model.currentData() or 0) if hamlib else 0,
             "cat_port": self.selected_cat_port(),
             "cat_baud": self.cat_baud.value(),
@@ -600,12 +497,7 @@ class SettingsDialog(QDialog):
             "rigctld_path": self.rigctld_path.text() or "rigctld",
             "ptt_type": self.ptt_type.currentData(),
             "ptt_line": self.ptt_line.currentText(),
-            "guardian_ptt_mode": self.guardian_ptt_mode.currentText(),
             "vara_ptt_delay_ms": self.vara_ptt_delay.value(),
-            "ofdm_tx_lead_ms": self.ofdm_tx_lead.value(),
-            "ofdm_tx_tail_ms": self.ofdm_tx_tail.value(),
-            "ofdm_min_burst_bytes": self.ofdm_min_burst_bytes.value(),
-            "ofdm_arq_block_bytes": self.ofdm_arq_block_bytes.value(),
         }
 
     def _load_radio_form(self, values: dict) -> None:
@@ -627,8 +519,6 @@ class SettingsDialog(QDialog):
             self.radio_model.setCurrentIndex(index)
         else:
             self.radio_model.setCurrentIndex(0)
-        self.guardian_radio_model.setText(str(values.get("radio", "") or ""))
-        self.vox_radio_model.setText(str(values.get("radio", "") or ""))
         port = port_device(str(values.get("cat_port", "")))
         labels = [
             self.cat_port.itemText(row) for row in range(self.cat_port.count())
@@ -644,35 +534,14 @@ class SettingsDialog(QDialog):
             max(0, self.ptt_type.findData(str(values.get("ptt_type", "RIG")).upper()))
         )
         self.ptt_line.setCurrentText(str(values.get("ptt_line", "RTS")))
-        self.guardian_ptt_mode.setCurrentText(
-            str(values.get("guardian_ptt_mode", "AIOC") or "AIOC").upper()
-        )
         self.vara_ptt_delay.setValue(
             max(0, min(int(values.get("vara_ptt_delay_ms", 0) or 0), MAX_PTT_DELAY_MS))
         )
-        self.ofdm_tx_lead.setValue(
-            max(0, min(int(values.get("ofdm_tx_lead_ms", 60) or 0), 3_000))
-        )
-        self.ofdm_tx_tail.setValue(
-            max(0, min(int(values.get("ofdm_tx_tail_ms", 60) or 0), 3_000))
-        )
-        self.ofdm_min_burst_bytes.setValue(
-            max(256, min(int(values.get("ofdm_min_burst_bytes", 2_048) or 2_048), 16_384))
-        )
-        self.ofdm_arq_block_bytes.setValue(
-            max(128, min(int(values.get("ofdm_arq_block_bytes", 2_048) or 2_048), 8_192))
-        )
-        self._sync_radio_backend_rows(self.radio_backend.currentIndex())
 
     def _save_radio_profile(self) -> None:
-        locked = self._settings_locked_reason()
-        if locked is not None:
-            self.ptt_status.setText(locked)
-            return
         suggestion = str(self.radio_profile_picker.currentData() or "")
-        if not suggestion:
-            values = self._radio_form_values()
-            suggestion = str(values.get("radio") or self.radio_backend.currentData() or "")
+        if not suggestion and self.radio_backend.currentData() == "hamlib":
+            suggestion = self.radio_model.currentText()
         name, accepted = QInputDialog.getText(
             self,
             dual("Save radio profile", "Uložit profil rádia"),
@@ -772,22 +641,8 @@ class SettingsDialog(QDialog):
             pass
 
     def _radio_settings_changed(self) -> bool:
-        backend = self.radio_backend.currentData()
-        current_radio = (
-            self.radio_model.currentText().strip()
-            if backend == "hamlib"
-            else self.guardian_radio_model.text().strip()
-            if backend in {"guardian_k5", "guardian_k61"}
-            else self.vox_radio_model.text().strip()
-            if backend == "vox"
-            else ""
-        )
         return (
-            backend != self.config.radio_backend
-            or (
-                backend != "hamlib"
-                and current_radio != str(self.config.radio or "").strip()
-            )
+            self.radio_backend.currentData() != self.config.radio_backend
             or int(self.radio_model.currentData() or 0) != self.config.rig_model
             or self.selected_cat_port() != self.config.cat_port
             or self.cat_baud.value() != self.config.cat_baud
@@ -795,16 +650,7 @@ class SettingsDialog(QDialog):
             or self.rigctld_port.value() != self.config.rigctld_port
             or self.rigctld_path.text() != self.config.rigctld_path
             or self.ptt_line.currentText() != self.config.ptt_line
-            or self.guardian_ptt_mode.currentText()
-            != (getattr(self.config, "guardian_ptt_mode", "AIOC") or "AIOC")
             or self.ptt_type.currentData() != (self.config.ptt_type or "RIG").upper()
-            or self.vara_ptt_delay.value() != int(self.config.vara_ptt_delay_ms or 0)
-            or self.ofdm_tx_lead.value() != int(self.config.ofdm_tx_lead_ms or 0)
-            or self.ofdm_tx_tail.value() != int(self.config.ofdm_tx_tail_ms or 0)
-            or self.ofdm_min_burst_bytes.value()
-            != int(self.config.ofdm_min_burst_bytes or 0)
-            or self.ofdm_arq_block_bytes.value()
-            != int(self.config.ofdm_arq_block_bytes or 0)
         )
 
     def _browse_radios(self) -> None:
@@ -1012,29 +858,7 @@ class SettingsDialog(QDialog):
         # being rebuilt from scratch.
         self.payload_backend = QComboBox()
         self.payload_backend.addItem("Guardian VARA P2P", "vara_p2p")
-        self.payload_backend.addItem("Guardian SC-FTN", "ofdm_vhf")
-        self.payload_backend.setCurrentIndex(
-            max(0, self.payload_backend.findData(self.config.payload_backend))
-        )
-        self.g2_waveform = QComboBox()
-        self.g2_waveform.addItem("SC-FTN", SC_FTN_WAVEFORM)
-        self.g2_waveform.setCurrentIndex(0)
-        self.g2_waveform.setEnabled(False)
-        self.g2_bandwidth = QComboBox()
-        for width in SC_FTN_BANDWIDTHS:
-            self.g2_bandwidth.addItem(width, width)
-        self.g2_bandwidth.setCurrentIndex(
-            max(0, self.g2_bandwidth.findData(
-                str(getattr(self.config, "g2_bandwidth", "2K7")).upper()
-            ))
-        )
-        self.g2_summary = QLabel()
-        self.g2_summary.setObjectName("Metadata")
-        self.g2_summary.setWordWrap(True)
-        # Short aliases keep the SC naming usable by the diagnostics and UI
-        # tests without adding a second set of configuration controls.
-        self.sc_bandwidth = self.g2_bandwidth
-        self.sc_summary = self.g2_summary
+        self.payload_backend.setCurrentIndex(0)
         self.vara_host = QLineEdit(self.config.vara_host)
         self.vara_fm_cmd = _spin(1, 65_535, self.config.vara_fm_cmd_port)
         self.vara_fm_data = _spin(1, 65_535, self.config.vara_fm_data_port)
@@ -1081,12 +905,19 @@ class SettingsDialog(QDialog):
             "Obě stanice se musí shodnout. Užší je pomalejší, ale snese horší "
             "podmínky a vejde se do obsazeného pásma.",
         ))
+        self.vara_host_ptt = QCheckBox(dual(
+            "Let Guardian key the radio for VARA",
+            "Klíčovat rádio pro VARA prostřednictvím Guardianu",
+        ))
+        self.vara_host_ptt.setChecked(self.config.vara_host_ptt)
+        self.vara_host_ptt.setToolTip(dual(
+            "Guardian reacts to VARA PTT ON/OFF through Hamlib. "
+            "Do not configure VARA to own the same COM port.",
+            "Guardian reaguje na povely VARA PTT ON/OFF přes Hamlib. "
+            "Nenastavujte ve VARA současně vlastnictví stejného portu COM.",
+        ))
         form.addRow(dual("Active VARA mode", "Aktivní režim VARA"), self.vara_mode)
         form.addRow(dual("Payload workflow", "Způsob přenosu"), self.payload_backend)
-        form.addRow(dual("Guardian waveform", "Vlna Guardian"), self.g2_waveform)
-        form.addRow(dual("SC-FTN bandwidth", "Šířka pásma SC-FTN"), self.g2_bandwidth)
-        form.addRow(dual("Resolved SC-FTN policy", "Výsledná politika SC-FTN"), self.g2_summary)
-        self._modem_form = form
         form.addRow(dual("VARA host", "Adresa VARA"), self.vara_host)
         form.addRow(dual("VARA FM command port", "Příkazový port VARA FM"), self.vara_fm_cmd)
         form.addRow(dual("VARA FM data port", "Datový port VARA FM"), self.vara_fm_data)
@@ -1099,93 +930,48 @@ class SettingsDialog(QDialog):
         )
         form.addRow(self.vara_hf_bandwidth_label, self.vara_hf_bandwidth)
         self.vara_mode.currentTextChanged.connect(self._sync_bandwidth_row)
-        self.payload_backend.currentIndexChanged.connect(
-            lambda _index: self._sync_bandwidth_row(self.vara_mode.currentText())
-        )
-        self.g2_bandwidth.currentIndexChanged.connect(self._sync_sc_summary)
-        self.radio_backend.currentIndexChanged.connect(
-            lambda _index: self._sync_sc_summary()
-        )
-        self.radio_model.currentIndexChanged.connect(
-            lambda _index: self._sync_sc_summary()
-        )
-        self.guardian_radio_model.textChanged.connect(self._sync_sc_summary)
         self._sync_bandwidth_row(self.vara_mode.currentText())
-        self._sync_sc_summary()
         form.addRow(dual("Control-burst modem", "Modem řídicích rámců"), self.control_modem)
 
+        form.addRow(self.vara_host_ptt)
 
     def _sync_bandwidth_row(self, mode: str) -> None:
-        """Show only the selected transport's waveform and bandwidth rows."""
-        sc_selected = self.payload_backend.currentData() == "ofdm_vhf"
-        for widget in (self.g2_waveform, self.g2_bandwidth, self.g2_summary):
-            self._modem_form.setRowVisible(widget, sc_selected)
-        visible = (
-            mode.upper() == "HF"
-            and self.payload_backend.currentData() == "vara_p2p"
-        )
+        """Bandwidth is a VARA HF command; hide it when the station is on FM."""
+        visible = mode.upper() == "HF"
         self.vara_hf_bandwidth.setVisible(visible)
         self.vara_hf_bandwidth_label.setVisible(visible)
-
-    def _sync_sc_summary(self, _index: int = -1) -> None:
-        """Show the exact policy selected by the current SC-FTN path."""
-        width = str(self.g2_bandwidth.currentData() or "2K7").upper()
-        values = self._radio_form_values()
-        try:
-            policy = automatic_g2_policy(
-                SC_FTN_WAVEFORM,
-                width,
-                radio_backend=str(values.get("radio_backend") or ""),
-                radio_model=str(values.get("radio") or ""),
-            )
-            profile = profile_for(SC_FTN_WAVEFORM, width)
-            geometry = {
-                name: value
-                for name, value in (
-                    ("center_hz", policy.center_hz),
-                    ("nyquist_symbol_rate", policy.nyquist_symbol_rate),
-                    ("symbol_rate", policy.symbol_rate),
-                )
-                if value is not None
-            }
-            from dataclasses import replace
-
-            profile = replace(
-                profile,
-                bootstrap_modulation=policy.bootstrap_modulation,
-                data_acquisition_lead_seconds=policy.acquisition_lead_seconds,
-                reference_metric_blocks=policy.reference_metric_blocks,
-                **geometry,
-            )
-            self.g2_summary.setText(
-                f"AUTO · {policy.summary()}\n"
-                f"{profile.name}: {profile.occupied_bandwidth:.0f} Hz, "
-                f"center {profile.center_hz:.1f} Hz, "
-                f"symbol {profile.symbol_rate:.1f} sym/s"
-            )
-        except ValueError as exc:
-            self.g2_summary.setText(str(exc))
 
     def _build_payload_options(self) -> None:
         form = self._page(
             dual("Compression & identification", "Komprese a identifikace"),
             dual(
-                "Guardian XZ compresses the payload and repacks images losslessly.",
-                "Guardian XZ komprimuje obsah a bezeztrátově přebaluje obrázky.",
+                "Choose either native VARA FILES compression or Guardian's "
+                "one-pass BZIP2 compression; both may remain off, but they "
+                "cannot be combined. Guardian BZIP2 leaves already packed data "
+                "unchanged when compression would make it larger.",
+                "Zvolte buď nativní kompresi VARA FILES, nebo jeden průchod "
+                "Guardian BZIP2; obě mohou zůstat vypnuté, ale nelze je "
+                "kombinovat. Guardian BZIP2 ponechá již komprimovaná data beze "
+                "změny, pokud by je komprese zvětšila.",
             ),
         )
-        self.guardian_aggressive_compression = QCheckBox(dual(
-            "Use aggressive Guardian compression (XZ)",
-            "Použít agresivní kompresi Guardian (XZ)",
+        self.vara_file_compression = QCheckBox(dual(
+            "Use native VARA FILES compression",
+            "Použít nativní kompresi VARA FILES",
         ))
-        self.guardian_aggressive_compression.setChecked(
-            bool(getattr(self.config, "guardian_aggressive_compression", False))
-        )
-        self.guardian_aggressive_compression.setToolTip(dual(
-            "Runs the optional XZ path for payloads where size matters more than "
-            "CPU time. Images are repacked losslessly.",
-            "Použije volitelnou cestu XZ tam, kde je důležitější velikost než čas "
-            "CPU. Obrázky se přebalují bezeztrátově.",
+        self.vara_file_compression.setChecked(self.config.vara_file_compression)
+        self.vara_file_compression.setToolTip(dual(
+            "Switches VARA from COMPRESSION TEXT to its binary FILES codec.",
+            "Přepne VARA z COMPRESSION TEXT na jeho binární kodek FILES.",
+        ))
+        self.guardian_compression = QCheckBox(dual(
+            "Use Guardian compression (BZIP2)",
+            "Použít kompresi Guardian (BZIP2)",
+        ))
+        self.guardian_compression.setChecked(self.config.guardian_compression)
+        self.guardian_compression.setToolTip(dual(
+            "Runs BZIP2 once and keeps the standard ZIP when it is not smaller.",
+            "Spustí BZIP2 jednou a ponechá standardní ZIP, pokud není menší.",
         ))
         self.morse_id_after_ack = QCheckBox(dual(
             "After the final ACK, send both callsigns in Morse at 40 WPM",
@@ -1196,8 +982,25 @@ class SettingsDialog(QDialog):
             "Only the final destination transmits once: SENDER DE RECEIVER.",
             "Pouze cílová stanice odvysílá jednou: ODESÍLATEL DE PŘÍJEMCE.",
         ))
-        form.addRow(self.guardian_aggressive_compression)
+        form.addRow(self.vara_file_compression)
+        form.addRow(self.guardian_compression)
         form.addRow(self.morse_id_after_ack)
+        self.vara_file_compression.toggled.connect(self._native_compression_toggled)
+        self.guardian_compression.toggled.connect(self._guardian_compression_toggled)
+        if self.vara_file_compression.isChecked():
+            self._native_compression_toggled(True)
+        elif self.guardian_compression.isChecked():
+            self._guardian_compression_toggled(True)
+
+    def _native_compression_toggled(self, checked: bool) -> None:
+        if checked:
+            self.guardian_compression.setChecked(False)
+        self.guardian_compression.setEnabled(not checked)
+
+    def _guardian_compression_toggled(self, checked: bool) -> None:
+        if checked:
+            self.vara_file_compression.setChecked(False)
+        self.vara_file_compression.setEnabled(not checked)
 
     def _build_network(self) -> None:
         form = self._page(
@@ -1210,6 +1013,31 @@ class SettingsDialog(QDialog):
             ),
         )
         self.default_ttl = _spin(1, 32, self.config.default_ttl)
+        self.auto_route = QCheckBox(
+            dual(
+                "Discover routes when no manual route exists",
+                "Vyhledat trasu, pokud není nastavena ručně",
+            )
+        )
+        self.auto_route.setChecked(self.config.auto_route)
+        self.auto_relay = QCheckBox(
+            dual("Relay messages for other stations", "Předávat zprávy jiným stanicím")
+        )
+        self.auto_relay.setChecked(self.config.auto_relay)
+        self.auto_deliver = QCheckBox(
+            dual(
+                "Deliver queued mail when a hop is heard",
+                "Doručit zprávy z fronty po zaslechnutí další stanice",
+            )
+        )
+        self.auto_deliver.setChecked(self.config.auto_deliver)
+        self.auto_qsy = QCheckBox(
+            dual(
+                "Tune automatically before VARA P2P",
+                "Automaticky přeladit před VARA P2P",
+            )
+        )
+        self.auto_qsy.setChecked(self.config.auto_qsy)
         self.separate_working_channels = QCheckBox(
             tr("settings.separate_working_channels")
         )
@@ -1218,6 +1046,9 @@ class SettingsDialog(QDialog):
         )
         self.separate_working_channels.setToolTip(
             tr("settings.separate_working_channels_hint")
+        )
+        self.separate_working_channels.toggled.connect(
+            lambda enabled: self.auto_qsy.setChecked(True) if enabled else None
         )
         self.beacon_enabled = QCheckBox(
             dual("Transmit presence beacons", "Vysílat majáky přítomnosti")
@@ -1228,6 +1059,8 @@ class SettingsDialog(QDialog):
         # Bounds for the multi-hop discovery plane. They are set once for the
         # station and belong with the rest of its network behaviour; Network →
         # Route discovery keeps only what an operator touches while working.
+        self.discovery_forward = QCheckBox(tr("network.discovery_forward"))
+        self.discovery_forward.setChecked(self.config.discovery_forward)
         self.discovery_ttl = _spin(2, 8, self.config.discovery_ttl)
         self.discovery_lifetime = _spin(
             1, 1440, max(1, int(self.config.discovery_route_lifetime / 60))
@@ -1242,10 +1075,15 @@ class SettingsDialog(QDialog):
             ", ".join(self.config.discovery_denylist)
         )
         form.addRow(dual("Default hop limit (TTL)", "Výchozí limit skoků (TTL)"), self.default_ttl)
+        form.addRow(self.auto_route)
+        form.addRow(self.auto_relay)
+        form.addRow(self.auto_deliver)
+        form.addRow(self.auto_qsy)
         form.addRow(self.separate_working_channels)
         form.addRow(self.beacon_enabled)
         form.addRow(dual("Beacon interval (seconds)", "Interval majáku (sekundy)"), self.beacon_interval)
         form.addRow(dual("Channel scan dwell (seconds)", "Doba poslechu kanálu (sekundy)"), self.scan_dwell)
+        form.addRow(self.discovery_forward)
         form.addRow(tr("network.discovery_ttl"), self.discovery_ttl)
         form.addRow(tr("network.discovery_lifetime"), self.discovery_lifetime)
         form.addRow(tr("network.discovery_budget"), self.discovery_budget)
@@ -1272,55 +1110,6 @@ class SettingsDialog(QDialog):
         self.language.setCurrentIndex(max(0, self.language.findData(current)))
         form.addRow(tr("menu.theme"), self.theme)
         form.addRow(tr("settings.language"), self.language)
-
-    def _settings_locked_reason(self) -> str | None:
-        """Return why applying a new station profile must wait.
-
-        The dialog edits a live ``StationConfig`` object.  Check the runtime
-        before touching it so a later Operations guard cannot leave half of a
-        profile applied while an AutoTune run, payload transfer, or radio
-        handoff still owns the path.
-        """
-        operations = self.operations
-        if operations is None:
-            return None
-        payload_active = getattr(operations, "payload_active", None)
-        if callable(payload_active) and payload_active():
-            return dual(
-                "Settings cannot be applied while a payload transfer is active.",
-                "Nastavení nelze použít, dokud probíhá přenos dat.",
-            )
-        handoff_pending = getattr(operations, "payload_handoff_pending", None)
-        if callable(handoff_pending) and handoff_pending():
-            return dual(
-                "Settings cannot be applied while the radio handoff is active.",
-                "Nastavení nelze použít během předávání rádia.",
-            )
-        status = getattr(operations, "station_lab", None)
-        state = str(getattr(status, "state", "") or "").strip().lower()
-        active_states = {
-            "offering",
-            "waiting_approval",
-            "preparing",
-            "measuring",
-            "waiting_report",
-        }
-        if state in active_states or bool(getattr(status, "pending_offer", False)):
-            return dual(
-                "Settings cannot be applied while Station Lab AutoTune is active.",
-                "Nastavení nelze použít během AutoTune ve Station Lab.",
-            )
-        # A profile handshake owns the current backend before Operations sets
-        # its payload-active event.  Use the explicit Operations contract when
-        # the live runtime supplies it; lightweight preview/test doubles may
-        # omit the method and are already covered by the guards above.
-        network_busy = getattr(operations, "network_settings_busy", None)
-        if callable(network_busy) and network_busy():
-            return dual(
-                "Settings cannot be applied while a network session is active.",
-                "Nastavení nelze použít během aktivní síťové relace.",
-            )
-        return None
 
     @property
     def selected_theme(self) -> ThemePreference:
@@ -1351,14 +1140,11 @@ class SettingsDialog(QDialog):
                     "Při řízení přes Hamlib vyberte podporovaný model rádia.",
                 )
             )
-        if self.radio_backend.currentData() in {"guardian_k5", "guardian_k61", "vox"}:
-            if not self.selected_cat_port():
-                errors.append(
-                    dual(
-                        "Choose the serial port used by the selected PTT/radio path.",
-                        "Vyberte sériový port pro zvolenou cestu rádia/PTT.",
-                    )
-                )
+        if self.vara_file_compression.isChecked() and self.guardian_compression.isChecked():
+            errors.append(dual(
+                "Choose VARA FILES compression or Guardian compression, not both.",
+                "Zvolte kompresi VARA FILES, nebo kompresi Guardian, nikoli obě.",
+            ))
         for label, field in (
             ("rigctld", self.rigctld_path),
             ("VARA FM", self.vara_fm_path),
@@ -1378,11 +1164,6 @@ class SettingsDialog(QDialog):
         errors = self.validation_errors()
         if errors:
             self.error.setText("\n".join(f"• {message}" for message in errors))
-            self.error.show()
-            return False
-        locked = self._settings_locked_reason()
-        if locked is not None:
-            self.error.setText(locked)
             self.error.show()
             return False
         self.error.hide()
@@ -1405,68 +1186,29 @@ class SettingsDialog(QDialog):
         cfg.vara_fm_path = self.vara_fm_path.text()
         cfg.vara_hf_path = self.vara_hf_path.text()
         cfg.payload_backend = self.payload_backend.currentData()
-        cfg.g2_waveform = SC_FTN_WAVEFORM
-        cfg.g2_bandwidth = str(self.g2_bandwidth.currentData() or "2K7").upper()
-        cfg.g2_adaptive_mcs = True
-        if cfg.payload_backend == "ofdm_vhf":
-            policy = automatic_g2_policy(
-                cfg.g2_waveform,
-                cfg.g2_bandwidth,
-                radio_backend=cfg.radio_backend,
-                radio_model=cfg.radio,
-            )
-            cfg.g2_mcs = policy.maximum_mcs
-            # Keep the historical ofdm_* settings populated with the selected
-            # policy so older payload/link callers see the same negotiated values.
-            cfg.ofdm_profile = policy.profile_name
-            cfg.ofdm_mcs = policy.maximum_mcs
-            cfg.ofdm_max_retries = policy.maximum_retries + policy.rescue_retries
-            cfg.ofdm_adaptive_fec = True
-            cfg.ofdm_modern_ldpc = True
-            cfg.ofdm_fec = policy.fec_label
-            cfg.ofdm_adaptive_burst = True
-            cfg.ofdm_burst_bytes = policy.initial_burst_bytes
-            cfg.ofdm_min_burst_bytes = policy.minimum_burst_bytes
-            cfg.ofdm_max_burst_bytes = policy.maximum_burst_bytes
-            cfg.ofdm_arq_block_bytes = policy.arq_block_bytes
-            cfg.ofdm_timeout_multiplier = 1.0
-            cfg.ofdm_legacy_mode = False
-            cfg.ofdm_train_bursts = 1
-            cfg.ofdm_adaptive_train = False
-            cfg.ofdm_superframe = True
-            cfg.ofdm_train_gap_ms = 30
-            cfg.ofdm_max_train_seconds = policy.maximum_train_seconds
-            # The burst controls are radio-profile fields, but AUTO derives
-            # their safe values. Keep the page truthful after Apply.
-            self.ofdm_min_burst_bytes.setValue(policy.minimum_burst_bytes)
-            self.ofdm_arq_block_bytes.setValue(policy.arq_block_bytes)
         cfg.control_modem = self.control_modem.currentData()
         cfg.vara_hf_bandwidth = self.vara_hf_bandwidth.currentData()
-        cfg.vara_host_ptt = True
-        cfg.vara_file_compression = False
-        cfg.guardian_compression = False
-        cfg.guardian_aggressive_compression = (
-            self.guardian_aggressive_compression.isChecked()
-        )
+        cfg.vara_host_ptt = self.vara_host_ptt.isChecked()
+        cfg.vara_file_compression = self.vara_file_compression.isChecked()
+        cfg.guardian_compression = self.guardian_compression.isChecked()
         cfg.morse_id_after_ack = self.morse_id_after_ack.isChecked()
         cfg.apply_vara_mode(self.vara_mode.currentText())
         cfg.default_ttl = self.default_ttl.value()
-        cfg.auto_route = True
-        cfg.auto_relay = True
-        cfg.auto_deliver = True
-        cfg.auto_qsy = True
+        cfg.auto_route = self.auto_route.isChecked()
+        cfg.auto_relay = self.auto_relay.isChecked()
+        cfg.auto_deliver = self.auto_deliver.isChecked()
+        cfg.auto_qsy = self.auto_qsy.isChecked()
         cfg.separate_working_channels = self.separate_working_channels.isChecked()
         cfg.beacon_enabled = self.beacon_enabled.isChecked()
         cfg.beacon_interval = float(self.beacon_interval.value())
         cfg.scan_dwell = float(self.scan_dwell.value())
-        cfg.discovery_forward = True
+        cfg.discovery_forward = self.discovery_forward.isChecked()
         cfg.discovery_ttl = self.discovery_ttl.value()
         cfg.discovery_route_lifetime = float(self.discovery_lifetime.value() * 60)
         cfg.discovery_frame_budget = self.discovery_budget.value()
         cfg.discovery_allowlist = callsign_list(self.discovery_allowlist.text())
         cfg.discovery_denylist = callsign_list(self.discovery_denylist.text())
         cfg.appearance = self.selected_theme.value.title()
-        cfg.enforce_production_policy()
         cfg.save()
         selected_language = self.selected_language
         self.settings.setValue("ui/language", selected_language.value)

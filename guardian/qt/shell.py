@@ -33,9 +33,6 @@ from ..routing.csv_io import TEMPLATE_ROWS
 from ..radio.presets import DUMMY_MODEL
 from ..services import ApplicationSnapshot
 from ..services import LogLevel
-from ..config import SC_FTN_WAVEFORM
-from ..ofdm.automatic import automatic_g2_policy
-from ..waveforms.config import profile_for
 from .alerts import AlertBanner
 from .notifications import EmergencyDialog, NotificationCenter, SoundPlayer
 from .diagnostics_dialog import DiagnosticsDialog
@@ -49,18 +46,10 @@ from .readiness_dialog import ReadinessDialog
 from .runtime import ShellRuntime
 from .settings_dialog import SettingsDialog
 from .map_window import MapWindow
-from .modem_workspace import ModemWorkspace
 from .spectrum_window import SpectrumWindow
-from .station_lab_workspace import StationLabWorkspace
 from .theme import ThemeController, ThemePreference
 from .transfer_progress import TransferPanel, transfer_state
 from .update_dialog import UpdateDialog
-
-
-PAYLOAD_LABELS = {
-    "vara_p2p": "VARA P2P",
-    "ofdm_vhf": "SC-FTN",
-}
 
 
 def _repolish(widget: QWidget) -> None:
@@ -107,7 +96,6 @@ class GuardianMainWindow(QMainWindow):
         super().__init__()
         self.runtime = runtime
         self.settings = settings
-        self._last_station_lab_offer: tuple[str, int] | None = None
         self.runtime.operations.confirm_manual_qsy = self._confirm_manual_qsy
         self.theme_controller = ThemeController(settings, self)
         self.theme_controller.theme_changed.connect(self._refresh_log_format)
@@ -134,12 +122,6 @@ class GuardianMainWindow(QMainWindow):
         self.refresh_timer.setInterval(500)
         self.refresh_timer.timeout.connect(self._refresh)
         self.refresh_timer.start()
-        # Protocol work must run promptly enough for ARQ/control handshakes;
-        # rendering and notification polling remain on the slower UI cadence.
-        self.protocol_timer = QTimer(self)
-        self.protocol_timer.setInterval(100)
-        self.protocol_timer.timeout.connect(self._protocol_tick)
-        self.protocol_timer.start()
         QTimer.singleShot(5_000, self._check_for_updates_silently)
 
     def _build_menu(self) -> None:
@@ -180,8 +162,6 @@ class GuardianMainWindow(QMainWindow):
             ("mail", tr("menu.mail")),
             ("network", tr("menu.network")),
             ("log", tr("menu.log")),
-            ("modem", tr("menu.modem")),
-            ("station_lab", tr("menu.station_lab")),
         )
         for index, (name, label) in enumerate(workspace_labels):
             action = QAction(label, self)
@@ -192,20 +172,26 @@ class GuardianMainWindow(QMainWindow):
                 self._show_workspace(name)
             )
             workspace_group.addAction(action)
-            if name != "modem":
-                view_menu.addAction(action)
+            view_menu.addAction(action)
             self.workspace_actions[name] = action
 
         tools_menu = self.menuBar().addMenu(tr("menu.tools"))
+        connect_radio = QAction(tr("menu.radio_toggle"), self)
+        connect_radio.triggered.connect(self._toggle_radio)
+        tools_menu.addAction(connect_radio)
+        connect_vara = QAction(tr("menu.vara_toggle"), self)
+        connect_vara.triggered.connect(self._toggle_vara)
+        tools_menu.addAction(connect_vara)
+        control_channel = QAction(tr("menu.control_toggle"), self)
+        control_channel.triggered.connect(self._toggle_control)
+        tools_menu.addAction(control_channel)
+        tools_menu.addSeparator()
         readiness = QAction(tr("menu.readiness"), self)
         readiness.triggered.connect(self._show_readiness)
         tools_menu.addAction(readiness)
         diagnostics = QAction(tr("menu.diagnostics"), self)
         diagnostics.triggered.connect(self._show_diagnostics)
-        diagnostics_menu = tools_menu.addMenu(tr("menu.diagnostics"))
-        diagnostics.setText(dual("Connection diagnostics", "Diagnostika připojení"))
-        diagnostics_menu.addAction(diagnostics)
-        diagnostics_menu.addAction(self.workspace_actions["modem"])
+        tools_menu.addAction(diagnostics)
         tools_menu.addSeparator()
         updates = QAction(tr("menu.updates"), self)
         updates.triggered.connect(self._check_for_updates)
@@ -269,8 +255,6 @@ class GuardianMainWindow(QMainWindow):
             "mail": MailWorkspace(self.runtime),
             "network": NetworkWorkspace(self.runtime),
             "log": LogWorkspace(self.runtime),
-            "modem": ModemWorkspace(self.runtime),
-            "station_lab": StationLabWorkspace(self.runtime),
         }
         for workspace in self.workspace_names.values():
             self.workspace_stack.addWidget(workspace)
@@ -544,15 +528,11 @@ class GuardianMainWindow(QMainWindow):
         self.emergency_dialog.announce(title, body)
         QApplication.alert(self)
 
-    def _protocol_tick(self) -> None:
-        """Advance workers and protocol state on the dedicated 100 ms clock."""
+    def _refresh(self) -> None:
         self.runtime.drain_workers()
         self.runtime.tick()
-
-    def _refresh(self) -> None:
         snapshot = self.runtime.snapshots.read()
         self._apply_snapshot(snapshot)
-        self._poll_station_lab_offer()
         self.notifications.poll()
         self.runtime.events.drain()
         activity_history = self.runtime.events.activity_history()
@@ -572,50 +552,6 @@ class GuardianMainWindow(QMainWindow):
         if callable(refresh):
             refresh()
 
-    def _poll_station_lab_offer(self) -> None:
-        """Prompt once for an incoming paired SC-FTN calibration offer."""
-        if self.runtime.config.payload_backend != "ofdm_vhf":
-            return
-        status = getattr(self.runtime.operations, "station_lab", None)
-        peer = str(getattr(status, "peer", "") or "").strip().upper()
-        session_id = int(getattr(status, "session_id", 0) or 0)
-        pending = bool(getattr(status, "pending_offer", False))
-        key = (peer, session_id)
-        if not pending or not peer or not session_id:
-            self._last_station_lab_offer = None
-            return
-        if key == self._last_station_lab_offer:
-            return
-        self._last_station_lab_offer = key
-        self._show_workspace("station_lab")
-        answer = QMessageBox.question(
-            self,
-            dual("Incoming SC-FTN AutoTune", "Příchozí AutoTune SC-FTN"),
-            dual(
-                f"{peer} requests a bounded station calibration run. Accept the "
-                "request and allow the peer to key this station?",
-                f"{peer} žádá o omezenou kalibraci stanice. Přijmout žádost a "
-                "dovolit protistanici zaklíčovat tuto stanici?",
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        current = getattr(self.runtime.operations, "station_lab", None)
-        still_pending = (
-            bool(getattr(current, "pending_offer", False))
-            and str(getattr(current, "peer", "") or "").strip().upper() == peer
-            and int(getattr(current, "session_id", 0) or 0) == session_id
-        )
-        if still_pending:
-            if answer == QMessageBox.StandardButton.Yes:
-                self.runtime.operations.accept_station_calibration()
-            else:
-                self.runtime.operations.reject_station_calibration()
-        workspace = self.workspace_names.get("station_lab")
-        refresh = getattr(workspace, "refresh", None)
-        if callable(refresh):
-            refresh()
-
     def _show_workspace(self, name: str) -> None:
         workspace = self.workspace_names.get(name)
         if workspace is None:
@@ -630,8 +566,6 @@ class GuardianMainWindow(QMainWindow):
             "mail": tr("menu.mail"),
             "network": tr("menu.network"),
             "log": tr("menu.log"),
-            "modem": tr("menu.modem"),
-            "station_lab": tr("menu.station_lab"),
         }
         self.statusBar().showMessage(
             tr("workspace.status", name=display_names[name])
@@ -655,20 +589,9 @@ class GuardianMainWindow(QMainWindow):
         if self.runtime.config.payload_backend == "vara_p2p":
             self.show_spectrum()
 
-    def _sc_status(self):
-        """Read the explicit SC-FTN status contract from Operations.
-
-        The shell must not reach through payload implementation details to
-        discover a status object.  Operations returns ``None`` when SC-FTN is
-        not selected or has no active backend.
-        """
-        return self.runtime.operations.ofdm_status()
-
     def _apply_snapshot(self, snapshot: ApplicationSnapshot) -> None:
         self.alert_banner.show_latest(self.runtime.operations.alerts)
         config = self.runtime.config
-        sc_selected = config.payload_backend == "ofdm_vhf"
-        sc_status = self._sc_status() if sc_selected else None
         no_cat = (
             config.radio_backend == "hamlib"
             and int(config.rig_model or 0) == DUMMY_MODEL
@@ -676,14 +599,13 @@ class GuardianMainWindow(QMainWindow):
         self.manual_frequency_row.setVisible(no_cat)
         if no_cat and not self.manual_frequency.hasFocus():
             self.manual_frequency.setValue(int(config.manual_frequency_hz or 0))
-        payload = PAYLOAD_LABELS.get(config.payload_backend, "VARA P2P")
-        mode_label = (
-            f"SC-FTN {str(config.g2_bandwidth).strip().upper()}"
-            if sc_selected
-            else config.vara_mode
+        payload = (
+            "VARA P2P"
+            if config.payload_backend == "vara_p2p"
+            else "Winlink"
         )
         self.context_value.setText(
-            f"{config.callsign or 'NOCALL'}  ·  {mode_label}  ·  {payload}"
+            f"{config.callsign or 'NOCALL'}  ·  {config.vara_mode}  ·  {payload}"
         )
         radio_name = (
             config.radio
@@ -722,11 +644,7 @@ class GuardianMainWindow(QMainWindow):
         self.context_activity.setText("  ·  ".join(context_items))
         self.context_activity.setVisible(bool(context_items))
         self.transfer_panel.apply(
-            transfer_state(
-                snapshot,
-                self.runtime.operations.payload_active(),
-                sc_status,
-            )
+            transfer_state(snapshot, self.runtime.operations.payload_active())
         )
 
         values = {
@@ -746,7 +664,6 @@ class GuardianMainWindow(QMainWindow):
             "success" if snapshot.network.control_channel_active else "inactive"
         )
         dependency = snapshot.dependencies
-        hamlib_required = config.radio_backend == "hamlib"
         hamlib_role = "success" if dependency.hamlib_available else "warning"
         self.radio_status.set_status(
             radio_role,
@@ -754,37 +671,24 @@ class GuardianMainWindow(QMainWindow):
             if snapshot.radio.connected
             else tr("status.radio_off"),
         )
-        if sc_selected:
-            sc_state = str(getattr(sc_status, "state", "idle") or "idle").lower()
-            self.vara_status.set_status(
-                "success" if sc_state != "idle" else "inactive",
-                dual("SC-FTN: active", "SC-FTN: aktivní")
-                if sc_state != "idle"
-                else dual("SC-FTN: ready", "SC-FTN: připraveno"),
-            )
-        else:
-            self.vara_status.set_status(
-                vara_role,
-                tr("status.vara_on")
-                if snapshot.vara.command_connected
-                else tr("status.vara_off"),
-            )
+        self.vara_status.set_status(
+            vara_role,
+            tr("status.vara_on")
+            if snapshot.vara.command_connected
+            else tr("status.vara_off"),
+        )
         self.control_status.set_status(
             control_role,
             tr("status.control_on")
             if snapshot.network.control_channel_active
             else tr("status.control_off"),
         )
-        # Guardian UART and VOX paths do not use Hamlib.  Keeping a visible
-        # "Hamlib missing" badge for those paths falsely reports a blocker.
-        self.hamlib_status.setVisible(hamlib_required)
-        if hamlib_required:
-            self.hamlib_status.set_status(
-                hamlib_role,
-                tr("status.hamlib_ready")
-                if dependency.hamlib_available
-                else tr("status.hamlib_missing"),
-            )
+        self.hamlib_status.set_status(
+            hamlib_role,
+            tr("status.hamlib_ready")
+            if dependency.hamlib_available
+            else tr("status.hamlib_missing"),
+        )
         self.radio_button.setText(
             tr("shell.disconnect_radio")
             if snapshot.radio.connected
@@ -813,98 +717,39 @@ class GuardianMainWindow(QMainWindow):
                 "inactive", tr("shell.station_idle")
             )
 
-        identity_row = (
-            tr("ready.identity"),
-            tr("common.ready")
-            if config.callsign and config.callsign != "NOCALL"
-            else tr("ready.needs_setup"),
-            config.callsign or tr("ready.no_callsign"),
-        )
-        radio_row = (
-            tr("ready.radio"),
-            tr("common.configured")
-            if config.radio_backend != "none"
-            else tr("common.not_configured"),
-            radio_name,
-        )
-        if sc_selected:
-            sc_policy_summary = ""
-            try:
-                policy = automatic_g2_policy(
-                    SC_FTN_WAVEFORM,
-                    str(config.g2_bandwidth).strip().upper(),
-                    radio_backend=config.radio_backend,
-                    radio_model=config.radio,
-                )
-                profile = ModemWorkspace.effective_profile(
-                    policy, policy.bandwidth
-                )
-                geometry = (
-                    f"{profile.name}; {profile.occupied_bandwidth:.0f} Hz; "
-                    f"center {profile.center_hz:.1f} Hz; "
-                    f"symbol {profile.symbol_rate:.1f} sym/s"
-                )
-                sc_state = tr("common.ready")
-                sc_policy_summary = policy.summary()
-            except ValueError as exc:
-                geometry = str(exc)
-                sc_state = tr("common.missing")
-            rows = [identity_row, radio_row]
-            if config.radio_backend == "hamlib":
-                rows.append(
-                    (
-                        "Hamlib",
-                        tr("common.available")
-                        if dependency.hamlib_available
-                        else tr("common.missing"),
-                        dependency.hamlib_path or tr("ready.hamlib_guidance"),
-                    )
-                )
-            rows.extend(
-                [
-                    (
-                        dual("Audio RX", "Zvuk RX"),
-                        tr("common.configured")
-                        if str(config.audio_input).strip()
-                        else tr("common.not_configured"),
-                        str(config.audio_input).strip() or dual("Select an input", "Vyberte vstup"),
-                    ),
-                    (
-                        dual("Audio TX", "Zvuk TX"),
-                        tr("common.configured")
-                        if str(config.audio_output).strip()
-                        else tr("common.not_configured"),
-                        str(config.audio_output).strip() or dual("Select an output", "Vyberte výstup"),
-                    ),
-                    (
-                        tr("ready.payload"),
-                        f"{payload} / AUTO / {sc_state}",
-                        geometry + (f"; {sc_policy_summary}" if sc_policy_summary else ""),
-                    ),
-                ]
-            )
-        else:
-            rows = [
-                identity_row,
-                radio_row,
-                (
-                    "Hamlib",
-                    tr("common.available")
-                    if dependency.hamlib_available
-                    else tr("common.missing"),
-                    dependency.hamlib_path or tr("ready.hamlib_guidance"),
-                ),
-                (
-                    f"VARA {config.vara_mode}",
-                    tr("ready.endpoint"),
-                    f"{config.vara_host}:{config.vara_cmd_port}",
-                ),
-                (
-                    tr("ready.payload"),
-                    payload,
-                    tr("ready.payload_detail"),
-                ),
-            ]
+        rows = [
+            (
+                tr("ready.identity"),
+                tr("common.ready")
+                if config.callsign and config.callsign != "NOCALL"
+                else tr("ready.needs_setup"),
+                config.callsign or tr("ready.no_callsign"),
+            ),
+            (
+                tr("ready.radio"),
+                tr("common.configured")
+                if config.radio_backend != "none"
+                else tr("common.not_configured"),
+                radio_name,
+            ),
+            (
+                "Hamlib",
+                tr("common.available")
+                if dependency.hamlib_available
+                else tr("common.missing"),
+                dependency.hamlib_path or tr("ready.hamlib_guidance"),
+            ),
+            (
+                f"VARA {config.vara_mode}",
+                tr("ready.endpoint"),
+                f"{config.vara_host}:{config.vara_cmd_port}",
+            ),
+            (
+                tr("ready.payload"),
+                payload,
+                tr("ready.payload_detail"),
+            ),
+        ]
         self.readiness.clear()
         for component, state, detail in rows:
             self.readiness.addTopLevelItem(
@@ -1225,8 +1070,6 @@ class GuardianMainWindow(QMainWindow):
             self.restoreGeometry(geometry)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self.refresh_timer.stop()
-        self.protocol_timer.stop()
         self.settings.setValue("ui/main_geometry", self.saveGeometry())
         self.settings.sync()
         if getattr(self, "tray", None) is not None:

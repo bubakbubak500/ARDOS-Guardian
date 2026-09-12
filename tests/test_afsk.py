@@ -4,32 +4,6 @@ from guardian.modem.afsk import AFSKModem, FEC_SYNC, PREAMBLE
 from guardian.protocol import ControlFrame, FrameType
 
 
-def _valid_control(payload: bytes) -> bool:
-    from guardian.protocol import FrameError
-    try:
-        ControlFrame.decode(payload)
-    except FrameError:
-        return False
-    return True
-
-
-def test_incomplete_multihop_fec_does_not_report_false_short_bad_magic() -> None:
-    # The 2026-09-12 radio capture has this CRC-valid first RREQ copy, but
-    # ends before all three repetitions arrive. Mistimed hypotheses read its
-    # 34-byte length as 17 and emitted a spurious bad-magic payload.
-    payload = bytes.fromhex(
-        "415244010e00021010200072064f4b32495057064f4b324a4c44054f4b375053e1e6"
-    )
-    modem = AFSKModem()
-    burst = modem.modulate(payload)
-    prefix = np.zeros(48_000, dtype=np.float32)
-    incomplete = np.concatenate((prefix, burst[:int(0.6 * modem.fs)]))
-
-    assert modem.demodulate(incomplete, validator=_valid_control) == []
-    complete = np.concatenate((prefix, burst, np.zeros(4800, dtype=np.float32)))
-    assert modem.demodulate(complete, validator=_valid_control) == [payload]
-
-
 def _control_payload() -> bytes:
     return ControlFrame(
         FrameType.HAVE_MSG,

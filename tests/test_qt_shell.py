@@ -30,9 +30,6 @@ def test_shell_has_native_menu_minimum_size_and_snapshot_content(tmp_path) -> No
     )
     settings.setValue("ui/theme", ThemePreference.LIGHT.value)
     runtime = ShellRuntime()
-    # This case covers the five VARA readiness checks, independently of
-    # profiles saved by earlier settings tests in the same process.
-    runtime.config.payload_backend = "vara_p2p"
     window = GuardianMainWindow(runtime, settings)
     try:
         assert window.spectrum_window.parent() is None

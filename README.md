@@ -387,7 +387,7 @@ Once the required software and map data are present, the core messaging system o
 
 # Current status
 
-Guardian **1.1.3** adds the SC-FTN modem alongside VARA, automatic MCS/FEC/LDPC and ARQ adaptation, paired Auto Tune, and aggressive XZ compression with lossless image repacking. Network routing and topology policies are automatic, and the bilingual help explains their dependencies. Peers should use the current release for the new payload format. See [release notes](docs/RELEASE_NOTES_1.1.3.md) for details and validation limits. Windows builds fetch SHA-256-verified libjxl tools through `tools/fetch_jpegxl.ps1` and include their licenses; `tools/test_frozen.ps1` checks the packaged Qt and image-compression paths.
+Guardian **1.1.2** adds transfer identities, one-shot IC-705 GPS-to-locator input, a manual beacon, bulk mail selection/deletion, local received/sent timestamps, clearer logs and reliable queued urgent notifications. The existing radio frame and message bundle formats are unchanged. See [release notes](docs/RELEASE_NOTES_1.1.2.md) for details and validation limits.
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |
