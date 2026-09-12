@@ -26,6 +26,6 @@ Guardian 1.1.3 brings the SC-FTN modem and image-aware XZ compression from Guard
 ## Compatibility and verification
 
 - Use current Guardian versions at both ends for the new compressed payload format. Existing local mailboxes remain readable. Other G2 waveforms and Companion features are not included.
-- The final local automated suite passed 648 tests, including G2 reference parity probes, modem/session integration, compression, configuration migration, routing and Qt behavior. Release CI repeats the checkout-independent suite and verifies the frozen application's Qt imports and real JPEG XL/PNG/XZ round trip before publishing.
+- The final local automated suite passed 649 tests, including G2 reference parity probes, modem/session integration, compression, configuration migration, routing and Qt behavior. Clean CI skips the 11 optional comparisons that require the separate G2 reference snapshot; these passed locally. Release CI repeats the checkout-independent suite and verifies the frozen application's Qt imports and real JPEG XL/PNG/XZ round trip before publishing.
 - Windows packages include pinned, SHA-256-verified libjxl tools and their license notices. The release includes the installer, portable ZIP, update manifest and SHA-256 checksums.
 - Physical two-station RF throughput and the new radio/GPS paths have not been revalidated on hardware as part of these automated release checks.

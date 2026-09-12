@@ -36,11 +36,8 @@ def main() -> None:
         QTimer.singleShot(0, window.show_spectrum_if_applicable)
         QTimer.singleShot(0, window.show_readiness_if_needed)
 
-    if preview:
-        from .startup_animation import StartupAnimation
-        window.startup_animation = StartupAnimation(window)
-        window.startup_animation.finished.connect(finish_startup)
-        window.startup_animation.show()
-    else:
-        finish_startup()
+    from .startup_animation import StartupAnimation
+    window.startup_animation = StartupAnimation(window)
+    window.startup_animation.finished.connect(finish_startup)
+    window.startup_animation.show()
     application.exec()
