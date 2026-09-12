@@ -387,7 +387,7 @@ Once the required software and map data are present, the core messaging system o
 
 # Current status
 
-Guardian **1.1.2** adds transfer identities, one-shot IC-705 GPS-to-locator input, a manual beacon, bulk mail selection/deletion, local received/sent timestamps, clearer logs and reliable queued urgent notifications. The existing radio frame and message bundle formats are unchanged. See [release notes](docs/RELEASE_NOTES_1.1.2.md) for details and validation limits.
+Guardian **1.1.6** continues the 1.1.5 VARA and SC-FTN feature set with a correction to control-channel receive/transmit scheduling. See [release notes](docs/RELEASE_NOTES_1.1.6.md) for the changes and verification limits. Automatic MCS/FEC/LDPC and ARQ adaptation, paired Auto Tune, and aggressive XZ compression with lossless image repacking remain available. Windows builds fetch SHA-256-verified libjxl tools through `tools/fetch_jpegxl.ps1` and include their licenses; `tools/test_frozen.ps1` checks the packaged Qt and image-compression paths.
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |

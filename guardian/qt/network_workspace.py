@@ -7,7 +7,6 @@ import time
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
-    QCheckBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -74,8 +73,9 @@ class NetworkWorkspace(QWidget):
         # for.
         self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
         self.tabs.tabBar().setUsesScrollButtons(False)
-        # Planned network first, then what is actually on the air, then the one
-        # experiment. Nothing here nests a second row of tabs inside a tab.
+        # Planned network first, then what is actually on the air, followed by
+        # discovery and live topology. Nothing here nests a second row of tabs
+        # inside a tab.
         self.tabs.addTab(self._routes_page(), tr("network.routes"))
         self.tabs.addTab(self._heard_page(), tr("network.heard"))
         self.tabs.addTab(self._topology_page(), tr("network.topology"))
@@ -271,15 +271,16 @@ class NetworkWorkspace(QWidget):
         mode_row = QHBoxLayout()
         self.discovery_mode = QComboBox()
         for mode in DISCOVERY_MODES:
-            self.discovery_mode.addItem(tr(f"network.discovery_mode_{mode}"), mode)
+            label_key = (
+                "network.discovery_mode_on"
+                if mode == DISCOVERY_ASSISTED
+                else f"network.discovery_mode_{mode}"
+            )
+            self.discovery_mode.addItem(tr(label_key), mode)
         index = self.discovery_mode.findData(self.runtime.config.discovery_mode)
         self.discovery_mode.setCurrentIndex(max(0, index))
-        self.discovery_auto_use = QCheckBox(tr("network.discovery_auto_use"))
-        self.discovery_auto_use.setChecked(self.runtime.config.discovery_auto_use)
         mode_row.addWidget(QLabel(tr("network.discovery_mode")))
         mode_row.addWidget(self.discovery_mode)
-        mode_row.addSpacing(16)
-        mode_row.addWidget(self.discovery_auto_use)
         mode_row.addStretch()
         layout.addLayout(mode_row)
 
@@ -373,17 +374,12 @@ class NetworkWorkspace(QWidget):
         live_hint.setObjectName("Metadata")
         live_layout.addWidget(live_hint)
         live_form = QFormLayout()
-        self.link_advert_enabled = QCheckBox(tr("network.link_advert_enabled"))
-        self.link_advert_enabled.setChecked(
-            self.runtime.config.link_advert_enabled
-        )
         self.link_advert_interval = QSpinBox()
         self.link_advert_interval.setRange(1, 1440)
         self.link_advert_interval.setSuffix(" min")
         self.link_advert_interval.setValue(
             max(1, int(self.runtime.config.link_advert_interval / 60))
         )
-        live_form.addRow(self.link_advert_enabled)
         live_form.addRow(
             tr("network.link_advert_interval"), self.link_advert_interval
         )
@@ -475,8 +471,6 @@ class NetworkWorkspace(QWidget):
         config = self.runtime.config
         return (
             self.discovery_mode.currentData() != config.discovery_mode
-            or self.discovery_auto_use.isChecked() != config.discovery_auto_use
-            or self.link_advert_enabled.isChecked() != config.link_advert_enabled
             or self.link_advert_interval.value() * 60
             != int(config.link_advert_interval)
         )
@@ -485,9 +479,11 @@ class NetworkWorkspace(QWidget):
         """Adopt both discovery pages at once; limits live in Station settings."""
         config = self.runtime.config
         config.discovery_mode = self.discovery_mode.currentData()
-        config.discovery_auto_use = self.discovery_auto_use.isChecked()
-        config.link_advert_enabled = self.link_advert_enabled.isChecked()
         config.link_advert_interval = float(self.link_advert_interval.value() * 60)
+        # These controls are part of the shipped station policy.  Keep this
+        # page an apply boundary as well, including when a test/runtime uses a
+        # directly constructed config or save is replaced with a stub.
+        config.enforce_production_policy()
         config.save()
         self.runtime.operations.apply_network_settings()
         self.runtime.events.publish(
@@ -1006,11 +1002,6 @@ class NetworkWorkspace(QWidget):
         notices = self._discovery_blockers()
         if self.runtime.config.discovery_forward and not self.runtime.config.auto_relay:
             notices.append(tr("network.discovery_relay_warning"))
-        if (
-            self.runtime.config.discovery_auto_use
-            and discovery.mode != DISCOVERY_ASSISTED
-        ):
-            notices.append(tr("network.discovery_auto_inactive"))
         if self._unsaved_discovery_changes():
             notices.append(
                 tr("network.discovery_unsaved", action=tr("network.discovery_save"))

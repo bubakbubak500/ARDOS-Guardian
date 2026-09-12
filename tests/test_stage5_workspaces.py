@@ -348,7 +348,7 @@ def test_network_tables_are_read_only_row_selectors() -> None:
         runtime.close()
 
 
-def test_network_pages_are_flat_with_the_experiment_last() -> None:
+def test_network_pages_are_flat_with_live_topology_last() -> None:
     _application()
     runtime = ShellRuntime()
     workspace = NetworkWorkspace(runtime)
@@ -373,7 +373,7 @@ def test_network_pages_are_flat_with_the_experiment_last() -> None:
         runtime.close()
 
 
-def test_only_off_and_assisted_are_offered_and_a_monitor_profile_is_migrated(
+def test_only_off_and_on_are_offered_and_a_monitor_profile_is_migrated(
     tmp_path,
 ) -> None:
     _application()
@@ -390,6 +390,12 @@ def test_only_off_and_assisted_are_offered_and_a_monitor_profile_is_migrated(
             workspace.discovery_mode.itemData(index)
             for index in range(workspace.discovery_mode.count())
         ] == ["off", "assisted"]
+        assert [
+            workspace.discovery_mode.itemText(index)
+            for index in range(workspace.discovery_mode.count())
+        ] == [tr("network.discovery_mode_off"), tr("network.discovery_mode_on")]
+        assert not hasattr(workspace, "discovery_auto_use")
+        assert not hasattr(workspace, "link_advert_enabled")
     finally:
         workspace.close()
         runtime.close()
@@ -409,10 +415,7 @@ def test_discovery_actions_are_disabled_and_explained_without_a_control_channel(
         assert tr("shell.start_control") in workspace.discovery_query.toolTip()
         assert tr("shell.start_control") in workspace.heard_status.text()
         assert workspace.link_advert_now.isEnabled() is False
-        assert (
-            tr("network.link_advert_disabled_notice")
-            in workspace.link_advert_now.toolTip()
-        )
+        assert tr("shell.start_control") in workspace.link_advert_now.toolTip()
     finally:
         workspace.close()
         runtime.close()
@@ -441,7 +444,7 @@ def test_a_directly_heard_station_shows_as_a_usable_one_hop_route() -> None:
         runtime.close()
 
 
-def test_discovery_page_saves_the_mode_without_enabling_automatic_use(
+def test_discovery_page_saves_the_mode_with_fixed_network_policy(
     monkeypatch,
 ) -> None:
     _application()
@@ -455,15 +458,21 @@ def test_discovery_page_saves_the_mode_without_enabling_automatic_use(
         workspace._save_discovery_settings()
 
         assert runtime.config.discovery_mode == "assisted"
-        assert runtime.config.discovery_auto_use is False
-        assert runtime.config.link_advert_enabled is False
+        assert runtime.config.discovery_auto_use is True
+        assert runtime.config.link_advert_enabled is True
         assert runtime.operations.net.discovery.mode == "assisted"
-        # Assisted on its own never hands a fresh route to a message: it waits.
+        # The shipped policy uses discovered routes immediately.
         learned = runtime.operations.net.discovery.routes.learn(
             "S1", "N1", 4, 1, 99, time.monotonic()
         )
-        assert learned.approved is False
-        assert runtime.operations.net._resolve_next_hop("S1") == (None, "none")
+        runtime.operations.net.discovery.configure(
+            auto_use=runtime.config.discovery_auto_use
+        )
+        assert learned.approved is True
+        assert runtime.operations.net._resolve_next_hop("S1") == (
+            "N1",
+            "assisted discovery",
+        )
     finally:
         workspace.close()
         runtime.close()
@@ -475,23 +484,24 @@ def test_one_save_action_applies_both_network_pages(monkeypatch) -> None:
     monkeypatch.setattr(runtime.config, "save", lambda *args, **kwargs: None)
     workspace = NetworkWorkspace(runtime)
     try:
-        workspace.discovery_auto_use.setChecked(True)
-        workspace.link_advert_enabled.setChecked(False)
         workspace.link_advert_interval.setValue(12)
         workspace._save_discovery_settings()
 
         assert runtime.config.discovery_auto_use is True
-        assert runtime.config.link_advert_enabled is False
+        assert runtime.config.link_advert_enabled is True
         assert runtime.config.link_advert_interval == 720.0
         assert runtime.operations.net.discovery.auto_use is True
-        assert runtime.operations.net.discovery.link_advert_enabled is False
+        assert runtime.operations.net.discovery.link_advert_enabled is True
 
-        workspace.discovery_auto_use.setChecked(False)
-        workspace.link_advert_enabled.setChecked(True)
+        workspace.discovery_mode.setCurrentIndex(
+            workspace.discovery_mode.findData("off")
+        )
         workspace._save_discovery_settings()
-        assert runtime.config.discovery_auto_use is False
+        assert runtime.config.discovery_mode == "off"
+        assert runtime.config.discovery_auto_use is True
         assert runtime.config.link_advert_enabled is True
-        assert runtime.operations.net.discovery.auto_use is False
+        assert runtime.operations.net.discovery.mode == "off"
+        assert runtime.operations.net.discovery.auto_use is True
         assert runtime.operations.net.discovery.link_advert_enabled is True
     finally:
         workspace.close()

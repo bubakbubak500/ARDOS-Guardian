@@ -62,6 +62,8 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "menu.mail": ("Mail", "Pošta"),
     "menu.network": ("Network", "Síť"),
     "menu.log": ("Log", "Provozní log"),
+    "menu.modem": ("SC-FTN modem", "Modem SC-FTN"),
+    "menu.station_lab": ("Auto Tune", "Auto Tune"),
     "menu.tools": ("&Tools", "&Provoz"),
     "menu.radio_toggle": (
         "Connect / disconnect radio",
@@ -485,7 +487,10 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     ),
     "network.discovery_mode": ("Operating mode", "Provozní režim"),
     "network.discovery_mode_off": ("Off", "Vypnuto"),
-    "network.discovery_mode_assisted": ("Assisted", "Asistovaný"),
+    # The application keeps ``assisted`` as its internal value for backwards
+    # compatibility, while the operator sees the two-state On/Off choice.
+    "network.discovery_mode_assisted": ("On", "Zapnuto"),
+    "network.discovery_mode_on": ("On", "Zapnuto"),
     "network.discovery_forward": (
         "Forward bounded discovery requests for other stations",
         "Předávat omezené discovery dotazy jiných stanic",
@@ -515,8 +520,8 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     ),
     "network.discovery_start": ("Find route", "Najít trasu"),
     "network.discovery_not_started": (
-        "Discovery needs Assisted mode and a running control channel.",
-        "Discovery vyžaduje Asistovaný režim a spuštěný řídicí kanál.",
+        "Discovery needs On mode and a running control channel.",
+        "Discovery vyžaduje režim Zapnuto a spuštěný řídicí kanál.",
     ),
     "network.discovery_hops": ("Hops", "Skoky"),
     "network.discovery_next_hop": ("Next hop", "Další hop"),
@@ -549,13 +554,13 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     ),
     "network.discovery_off_notice": (
         "Route discovery is off: this station neither looks for a route nor "
-        "answers a query about itself. Select Assisted and save.",
+        "answers a query about itself. Select On and save.",
         "Hledání trasy je vypnuté: stanice trasu nehledá ani neodpovídá na dotaz "
-        "po sobě samé. Zvolte Asistovaný a uložte.",
+        "po sobě samé. Zvolte Zapnuto a uložte.",
     ),
     "network.link_advert_disabled_notice": (
-        "Enable the experimental LINK_ADVERT switch and save the settings.",
-        "Zapněte experimentální přepínač LINK_ADVERT a uložte nastavení.",
+        "Live topology advertisements are disabled for this station.",
+        "Oznámení živé topologie jsou pro tuto stanici vypnuta.",
     ),
     "network.discovery_unsaved": (
         "Unsaved changes — press “{action}” to put them on the air.",
@@ -568,30 +573,30 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "tlačítkem „{action}“ na Přehledu.",
     ),
     "network.discovery_route_approved": (
-        "Route to {destination} via {next_hop} approved for assisted use.",
-        "Trasa k {destination} přes {next_hop} byla schválena pro asistované použití.",
+        "Route to {destination} via {next_hop} approved for use.",
+        "Trasa k {destination} přes {next_hop} byla schválena k použití.",
     ),
     "network.live_topology": (
-        "Live topology (experimental)",
-        "Živá topologie (experimentální)",
+        "Live topology",
+        "Živá topologie",
     ),
     "network.discovery_auto_use": (
-        "Use a discovered route immediately, without waiting for approval",
-        "Použít nalezenou trasu hned, bez čekání na schválení",
+        "Use discovered routes automatically",
+        "Používat nalezené trasy automaticky",
     ),
     "network.discovery_auto_inactive": (
         "Automatic use does nothing while route discovery is off.",
         "Automatické použití nic nedělá, dokud je hledání trasy vypnuté.",
     ),
     "network.link_advert_hint": (
-        "Experimental LINK_ADVERT: neighbours exchange direct observations and "
-        "the network draws its own map. Details are in Guardian help.",
-        "Experimentální LINK_ADVERT: sousedé si vyměňují přímá pozorování a síť "
-        "si kreslí vlastní mapu. Podrobnosti jsou v nápovědě Guardianu.",
+        "Neighbours exchange direct observations and the network draws its own "
+        "map. Details are in Guardian help.",
+        "Sousedé si vyměňují přímá pozorování a síť si kreslí vlastní mapu. "
+        "Podrobnosti jsou v nápovědě Guardianu.",
     ),
     "network.link_advert_enabled": (
-        "Experimental: exchange LINK_ADVERT live topology",
-        "Experimentální: vyměňovat živou topologii LINK_ADVERT",
+        "Exchange live topology advertisements",
+        "Vyměňovat oznámení živé topologie",
     ),
     "network.link_advert_interval": ("Advertisement interval", "Interval oznámení"),
     "network.link_owner": ("Station", "Stanice"),

@@ -1,0 +1,1645 @@
+"""Selective-repeat ARQ over one half-duplex SC-FTN audio channel.
+
+Version 2 amortises keying and turnaround over several independently protected
+512-byte sub-blocks.  One robust manifest identifies the members, one compact
+bitmap reports everything the receiver already holds, and a retry contains only
+the missing members.  The same state machine drives the deterministic simulated
+pipe and the real soundcard/PTT pipe.
+"""
+
+from __future__ import annotations
+
+import math
+import queue
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Protocol
+
+import numpy as np
+
+from .adaptation import AdaptationConfig, LinkAdaptationController, fec_snr_margin_db
+from .channel import Channel, ChannelSpec
+from .coding import FecProfile, fec_spec
+from .config import DEFAULT_MCS_INDEX, SC_MCS_TABLE, OfdmProfile
+from .framing import (AckBitmap, CAPACITY_FRAME_VERSION, DEFER_ACK_FLAG,
+                      FINAL_ACK_CONFIRM_FLAG, FRAME_VERSION,
+                      LEGACY_FRAME_VERSION, SUPERFRAME_VERSION,
+                      MAX_CAPACITY_SUBBLOCKS, MAX_SUBBLOCKS,
+                      MAX_SUPERFRAME_SUBBLOCKS, OfdmFrameError,
+                      OfdmFrameType, PhyHeader, SubBlock, build_burst,
+                      burst_duration, decode_burst, decode_many,
+                      probe_burst_info, probe_burst_span,
+                      protocol_overhead_bytes,
+                      split_blocks)
+from .metrics import AdaptationState, LinkMetrics, OfdmStatus
+from ..timing import TxTiming
+
+
+class HalfDuplexPipe(Protocol):
+    def send(self, samples: np.ndarray) -> TxTiming | None:
+        """Put a waveform on the channel and return once it has all gone."""
+
+    def receive(self, timeout: float) -> np.ndarray | None:
+        """Wait up to `timeout` seconds for a burst. None means nothing came."""
+
+
+class BurstCodec(Protocol):
+    """Physical burst implementation consumed by the proven ARQ state machine.
+
+    SC-FTN owns the physical implementation.  Keeping this deliberately small
+    boundary means framing/ARQ semantics are shared without copying them into
+    the audio backend.
+    """
+
+    def build_burst(self, profile, header: PhyHeader, payload: bytes = b"", *,
+                    blocks: list[SubBlock] | None = None) -> np.ndarray: ...
+
+    def decode_burst(self, profile, samples, **kwargs): ...
+
+    def decode_many(self, profile, samples, **kwargs): ...
+
+    def burst_duration(self, profile, header: PhyHeader,
+                       block_lengths: list[int] | None = None) -> float: ...
+
+
+class OfdmBurstCodec:
+    """Compatibility name for the shared SC-FTN codec.
+
+    Older backend code imports this symbol. It delegates to
+    :class:`guardian.waveforms.framing.ExperimentalBurstCodec`, so the name does
+    not re-enable an OFDM physical layer.
+    """
+
+    @staticmethod
+    def build_burst(profile, header: PhyHeader, payload: bytes = b"", *,
+                    blocks: list[SubBlock] | None = None) -> np.ndarray:
+        from ..waveforms.framing import ExperimentalBurstCodec
+        return ExperimentalBurstCodec.build_burst(profile, header, payload,
+                                                   blocks=blocks)
+
+    @staticmethod
+    def decode_burst(profile, samples, **kwargs):
+        from ..waveforms.framing import ExperimentalBurstCodec
+        return ExperimentalBurstCodec.decode_burst(profile, samples, **kwargs)
+
+    @staticmethod
+    def decode_many(profile, samples, **kwargs):
+        from ..waveforms.framing import ExperimentalBurstCodec
+        return ExperimentalBurstCodec.decode_many(profile, samples, **kwargs)
+
+    @staticmethod
+    def probe_burst_span(profile, samples):
+        from ..waveforms.framing import ExperimentalBurstCodec
+        return ExperimentalBurstCodec.probe_burst_span(profile, samples)
+
+    @staticmethod
+    def probe_burst_info(profile, samples):
+        from ..waveforms.framing import ExperimentalBurstCodec
+        return ExperimentalBurstCodec.probe_burst_info(profile, samples)
+
+    @staticmethod
+    def burst_duration(profile, header: PhyHeader,
+                       block_lengths: list[int] | None = None) -> float:
+        from ..waveforms.framing import ExperimentalBurstCodec
+        return ExperimentalBurstCodec.burst_duration(profile, header, block_lengths)
+
+
+@dataclass
+class SimulatedDuplexPipe:
+    outbound: queue.Queue
+    inbound: queue.Queue
+    channel: Channel
+    damage: Callable[[int, np.ndarray], np.ndarray] | None = None
+    transmissions: int = 0
+    samples_sent: int = 0
+
+    def send(self, samples: np.ndarray) -> TxTiming:
+        self.transmissions += 1
+        self.samples_sent += len(samples)
+        aired = self.channel(samples)
+        if self.damage is not None:
+            aired = self.damage(self.transmissions, aired)
+        self.outbound.put(aired)
+        return TxTiming.deterministic(len(samples) / self.channel.profile.sample_rate)
+
+    def receive(self, timeout: float) -> np.ndarray | None:
+        try:
+            return self.inbound.get(timeout=max(0.0, timeout))
+        except queue.Empty:
+            return None
+
+
+def simulated_pair(profile: OfdmProfile, spec: ChannelSpec | None = None,
+                   seed: int = 0xA5) -> tuple[SimulatedDuplexPipe, SimulatedDuplexPipe]:
+    spec = spec if spec is not None else ChannelSpec()
+    forward: queue.Queue = queue.Queue()
+    reverse: queue.Queue = queue.Queue()
+    return (
+        SimulatedDuplexPipe(forward, reverse, Channel(profile, spec, seed=seed)),
+        SimulatedDuplexPipe(reverse, forward,
+                            Channel(profile, spec, seed=seed ^ 0xFFFF)),
+    )
+
+
+@dataclass
+class BurstTxState:
+    msg_id: int
+    burst_id: int
+    total_blocks: int
+    blocks: dict[int, bytes]
+    pending: set[int]
+    retry_count: dict[int, int]
+    first_pass_acked: set[int] = field(default_factory=set)
+    started: float = field(default_factory=time.monotonic)
+
+
+@dataclass
+class RxBurstState:
+    msg_id: int
+    total_blocks: int
+    blocks: dict[int, bytes] = field(default_factory=dict)
+    started: float = field(default_factory=time.monotonic)
+    updated: float = field(default_factory=time.monotonic)
+    train_seen: bool = False
+    # Keep the receiver listening at least as long as the sender can spend
+    # decoding the last capture before deciding that its bitmap was lost.
+    reply_decode_margin: float = 0.0
+    feedback_burst_id: int | None = None
+    feedback_metrics: LinkMetrics | None = None
+
+
+@dataclass
+class OfdmLink:
+    """Move one message per link, using aggregated bursts and selective repeat."""
+
+    profile: OfdmProfile
+    pipe: HalfDuplexPipe
+    mcs_index: int = DEFAULT_MCS_INDEX
+    max_retries: int = 4
+    ptt_turnaround: float = 0.5
+    timeout_margin: float = 1.0
+    timeout_multiplier: float = 1.0
+    train_bursts: int = 1
+    superframe: bool = False
+    adaptive_train: bool = False
+    adaptive_mcs: bool = False
+    train_gap_seconds: float = 0.03
+    split_train_ptt: bool = False
+    chase_first_retry: bool = False
+    max_train_seconds: float = 20.0
+    decode_margin_per_burst: float = 1.5
+    rescue_after_attempt: int | None = None
+    rescue_mcs_index: int = DEFAULT_MCS_INDEX
+    on_log: Callable[[str], None] | None = None
+    on_status: Callable[[OfdmStatus], None] | None = None
+    cancelled: Callable[[], bool] | None = None
+    controller: LinkAdaptationController | None = None
+    legacy_mode: bool = False
+    codec: BurstCodec | None = None
+
+    status: OfdmStatus = field(default_factory=OfdmStatus)
+    adaptation: AdaptationState = field(default_factory=AdaptationState)
+    last_metrics: LinkMetrics | None = None
+    last_reply_reason: str = ""
+    channel_seconds: float = 0.0
+    _next_burst_id: int = 0
+    _started_at: float | None = None
+    _current_train_bursts: int = 1
+    _train_clean_streak: int = 0
+    _mcs_clean_streak: int = 0
+    _maximum_mcs_index: int = 0
+    _soft_cache: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.max_retries = max(0, int(self.max_retries))
+        if self.rescue_after_attempt is not None:
+            self.rescue_after_attempt = max(
+                1, min(self.max_retries, int(self.rescue_after_attempt))
+            )
+        self.train_bursts = max(1, min(8, int(self.train_bursts)))
+        self._current_train_bursts = 1 if self.adaptive_train else self.train_bursts
+        self._maximum_mcs_index = int(self.mcs_index)
+        shared_mcs = (self.controller.mcs_index
+                      if self.controller is not None else None)
+        if self.adaptive_mcs and self._maximum_mcs_index > DEFAULT_MCS_INDEX:
+            # A backend-owned controller persists what the previous transfer
+            # learned. A standalone link has no history and therefore acquires
+            # at QPSK. This distinction prevents every new mail item from
+            # throwing away the capacity state earned by the previous one.
+            self.mcs_index = (int(shared_mcs) if shared_mcs is not None
+                              else DEFAULT_MCS_INDEX)
+            if self.controller is not None:
+                self._mcs_clean_streak = self.controller.mcs_clean_streak
+        gap_ceiling = 2.0 if self.split_train_ptt else 0.20
+        self.train_gap_seconds = max(0.0, min(gap_ceiling, float(self.train_gap_seconds)))
+        self.max_train_seconds = max(1.0, min(60.0, float(self.max_train_seconds)))
+        self.decode_margin_per_burst = max(
+            0.0, min(10.0, float(self.decode_margin_per_burst))
+        )
+        if self.codec is None:
+            from ..waveforms.framing import ExperimentalBurstCodec
+            self.codec = ExperimentalBurstCodec()
+        if self.controller is None:
+            self.controller = LinkAdaptationController(
+                AdaptationConfig(adaptive_fec=True, adaptive_burst=True),
+                mcs_index=self.mcs_index,
+            )
+        else:
+            self.controller.mcs_index = self.mcs_index
+        self.status.profile = self.profile.name
+        self.status.mcs = self.mcs_index
+        self._publish_profile()
+
+    def _build_burst(self, header: PhyHeader, payload: bytes = b"", *,
+                     blocks: list[SubBlock] | None = None) -> np.ndarray:
+        return self.codec.build_burst(  # type: ignore[union-attr]
+            self.profile, header, payload, blocks=blocks
+        )
+
+    def _decode_burst(self, samples):
+        started = time.monotonic()
+        decoded = self.codec.decode_burst(  # type: ignore[union-attr]
+            self.profile, samples, soft_cache=self._soft_cache
+        )
+        elapsed = time.monotonic() - started
+        self.status.rx_decode_seconds += elapsed
+        rx = getattr(self.pipe, "last_rx_timing", None)
+        if rx is not None:
+            self.status.rx_trigger_wait_seconds += max(0.0, rx.trigger_wait)
+            self.status.rx_capture_seconds += max(0.0, rx.capture)
+            self.status.rx_hangover_seconds += max(0.0, rx.hangover)
+            try:
+                self.pipe.last_rx_timing = None
+            except (AttributeError, TypeError):
+                pass
+        return decoded
+
+    def _decode_many(self, samples):
+        method = getattr(self.codec, "decode_many", None)
+        if method is None:
+            return [self._decode_burst(samples)]
+        started = time.monotonic()
+        decoded = method(self.profile, samples, soft_cache=self._soft_cache)
+        self.status.rx_decode_seconds += time.monotonic() - started
+        rx = getattr(self.pipe, "last_rx_timing", None)
+        if rx is not None:
+            self.status.rx_trigger_wait_seconds += max(0.0, rx.trigger_wait)
+            self.status.rx_capture_seconds += max(0.0, rx.capture)
+            self.status.rx_hangover_seconds += max(0.0, rx.hangover)
+            try:
+                self.pipe.last_rx_timing = None
+            except (AttributeError, TypeError):
+                pass
+        return decoded
+
+    def _report_train_feedback(self, sent: int, received: int) -> None:
+        """Adapt aggregation separately from FEC and payload burst sizing.
+
+        A single loss shortens the next train immediately; three completely
+        clean windows buy one additional microburst.  This slow-up/fast-down
+        asymmetry keeps a long superframe from magnifying a transient fade.
+        """
+        if not self.adaptive_train:
+            return
+        if int(received) < int(sent):
+            self._train_clean_streak = 0
+            self._current_train_bursts = max(1, self._current_train_bursts - 1)
+            return
+        self._train_clean_streak += 1
+        if self._train_clean_streak >= 3:
+            self._train_clean_streak = 0
+            self._current_train_bursts = min(
+                self.train_bursts, self._current_train_bursts + 1
+            )
+
+    def _report_mcs_feedback(self, sent: int, received: int,
+                             remote_snr_db: float | None,
+                             remote_evm_rms: float | None = None) -> None:
+        if not self.adaptive_mcs:
+            return
+        allowed = self._mcs_ladder()
+        position = next((index for index, item in enumerate(allowed)
+                         if item.index == self.mcs_index), 0)
+
+        if int(received) < int(sent):
+            self._mcs_clean_streak = 0
+            self.controller.mcs_clean_streak = 0
+            self.controller.mcs_upgrade_cooldown = (
+                self.controller.config.loss_cooldown_bursts
+            )
+            floor_position = 0
+            if self.rescue_after_attempt is not None:
+                floor_position = next(
+                    (
+                        index for index, item in enumerate(allowed)
+                        if item.index == self.rescue_mcs_index
+                    ),
+                    0,
+                )
+            if position > floor_position:
+                self.mcs_index = allowed[position - 1].index
+                self.controller.mcs_index = self.mcs_index
+            return
+        if remote_snr_db is None:
+            return
+        if self.controller.mcs_upgrade_cooldown > 0:
+            self.controller.mcs_upgrade_cooldown -= 1
+            self._mcs_clean_streak = 0
+            self.controller.mcs_clean_streak = 0
+            return
+        self._mcs_clean_streak += 1
+        self.controller.mcs_clean_streak = self._mcs_clean_streak
+        rapid = (
+            self.controller.config.rapid_acquisition
+            and int(sent) >= 2
+            and float(allowed[position].bits_per_symbol) <= 2.0
+            and remote_evm_rms is not None and remote_evm_rms <= 0.25
+        )
+        if self._mcs_clean_streak < (1 if rapid else 3):
+            return
+        self._mcs_clean_streak = 0
+        self.controller.mcs_clean_streak = 0
+        fec_margin = (fec_snr_margin_db(self.controller.profile.fec)
+                      if self.controller.config.rapid_acquisition else 0.0)
+        usable_positions = [
+            index for index, item in enumerate(allowed)
+            if float(remote_snr_db) >= item.min_snr_db + 1.5 + fec_margin
+            and (not rapid or float(item.bits_per_symbol) <= 4.0)
+        ]
+        if usable_positions:
+            # Ordinary learning advances one rung. The opt-in acquisition path
+            # can skip to at most four bits/symbol after a measured clean probe;
+            # denser constellations still require subsequent delivery evidence.
+            target_position = (max(position, max(usable_positions)) if rapid else
+                               min(position + 1, max(usable_positions)))
+            target = allowed[target_position]
+            if target.index != self.mcs_index:
+                self.mcs_index = target.index
+                self.controller.mcs_index = target.index
+
+    def _mcs_ladder(self):
+        """Return one real robustness step for each useful density.
+
+        The experimental wire table intentionally contains several competing
+        constellations at the same density. Walking it numerically made a loss at
+        GQAM64 step to ordinary QAM64 -- no robustness gain and one wasted RF
+        retry. Production SC uses the measured GQAM path and genuine steps.
+        """
+        table = SC_MCS_TABLE
+        ceiling = next((item for item in table
+                        if item.index == self._maximum_mcs_index), table[0])
+        if ceiling.index == 17:
+            wanted = (1, 7, 16, 8, 17)
+            by_index = {item.index: item for item in table}
+            return [by_index[index] for index in wanted]
+        # New experimental IDs preserve old wire assignments, so numeric MCS
+        # order is intentionally not a robustness ladder (for example 8-PSK is
+        # MCS7, after 256-QAM MCS4). Define "below the selected ceiling" by both
+        # information density and measured SNR threshold, then sort physically.
+        allowed = sorted(
+            (item for item in table
+             if float(item.bits_per_symbol) <= float(ceiling.bits_per_symbol)
+             and item.min_snr_db <= ceiling.min_snr_db),
+            key=lambda item: (
+                item.min_snr_db, float(item.bits_per_symbol), item.index,
+            ),
+        )
+        return allowed
+
+    def _burst_duration(self, header: PhyHeader,
+                        block_lengths: list[int] | None = None) -> float:
+        return self.codec.burst_duration(  # type: ignore[union-attr]
+            self.profile, header, block_lengths
+        )
+
+    # -- plumbing ---------------------------------------------------------
+
+    def _log(self, message: str) -> None:
+        if self.on_log:
+            self.on_log(message)
+
+    def _publish_profile(self) -> None:
+        selected = self.controller.profile
+        self.status.fec = fec_spec(selected.fec).label
+        self.status.mcs = self.mcs_index
+        self.status.burst_bytes = selected.burst_bytes
+        self.status.arq_block_bytes = selected.arq_block_bytes
+
+    def _publish(self, state: str | None = None) -> None:
+        if state is not None:
+            self.status.state = state
+        self._publish_profile()
+        if self.on_status:
+            self.on_status(self.status)
+
+    def _reset_timing(self) -> None:
+        self.status.tx_lead_seconds = 0.0
+        self.status.tx_guard_seconds = 0.0
+        self.status.tx_tail_seconds = 0.0
+        self.status.keyed_seconds = 0.0
+        self.status.rx_trigger_wait_seconds = 0.0
+        self.status.rx_capture_seconds = 0.0
+        self.status.rx_hangover_seconds = 0.0
+        self.status.rx_decode_seconds = 0.0
+
+    def _rate(self, moved: int) -> None:
+        if moved and self.channel_seconds > 0.0:
+            self.status.est_bitrate_bps = moved * 8.0 / self.channel_seconds
+        self.status.elapsed_seconds = (
+            0.0 if self._started_at is None
+            else max(0.0, time.monotonic() - self._started_at)
+        )
+        if moved and self.status.elapsed_seconds > 0.0:
+            self.status.goodput_bps = moved * 8.0 / self.status.elapsed_seconds
+
+    def _transmit(self, waveform: np.ndarray, *, header: PhyHeader,
+                  control: bool = False) -> None:
+        self._publish("transmitting")
+        context = getattr(self.pipe, "set_transmit_context", None)
+        if context is not None:
+            context((header,), control=control)
+        timing = self.pipe.send(waveform)
+        airtime = len(waveform) / self.profile.sample_rate
+        if isinstance(timing, TxTiming):
+            occupied = timing.wall_clock + self.ptt_turnaround
+            self.status.tx_lead_seconds += timing.lead
+            self.status.tx_guard_seconds += timing.guard
+            self.status.tx_tail_seconds += timing.tail
+            self.status.keyed_seconds += timing.keyed_total
+        else:
+            # Third-party/test pipes written for format 2 return None. Preserve
+            # compatibility while making the omitted timing visible as the
+            # configured deterministic turnaround.
+            occupied = airtime + self.ptt_turnaround
+        self.channel_seconds += occupied
+        if control:
+            self.status.ack_bursts += 1
+            self.status.ack_airtime_seconds += airtime
+        else:
+            self.status.data_bursts += 1
+            self.status.data_airtime_seconds += airtime
+        self.status.ptt_cycles += 1
+        self.status.turnaround_seconds += max(0.0, occupied - airtime)
+        self.status.protocol_overhead_bytes += protocol_overhead_bytes(header)
+
+    def _record(self, decoded, *, turnaround: bool = True) -> None:
+        metrics = decoded.metrics
+        self.last_metrics = metrics
+        self.adaptation.record_burst(metrics)
+        self.status.snr_db = metrics.residual_snr_db or metrics.snr_db
+        self.status.evm_rms = metrics.evm_rms
+        if decoded.header is not None:
+            lengths = ([decoded.block_lengths[sequence]
+                        for sequence in decoded.block_order]
+                       if decoded.block_lengths else None)
+            airtime = self._burst_duration(decoded.header, lengths)
+            self.channel_seconds += airtime
+            if turnaround:
+                self.channel_seconds += self.ptt_turnaround
+            control = decoded.header.frame_type is not OfdmFrameType.DATA
+            if control:
+                self.status.ack_bursts += 1
+                self.status.ack_airtime_seconds += airtime
+            else:
+                self.status.data_bursts += 1
+                self.status.data_airtime_seconds += airtime
+            if turnaround:
+                self.status.turnaround_seconds += self.ptt_turnaround
+            self.status.protocol_overhead_bytes += protocol_overhead_bytes(
+                decoded.header
+            )
+
+    # -- duration-aware timeouts ----------------------------------------
+
+    def reply_timeout(self, total_blocks: int = 1) -> float:
+        bitmap = AckBitmap(max(1, int(total_blocks)), frozenset()).encode()
+        header = PhyHeader(
+            OfdmFrameType.ACK, 0, block_count=max(1, int(total_blocks)),
+            payload_len=len(bitmap),
+        )
+        airtime = self._burst_duration(header)
+        return ((airtime + 2.0 * self.ptt_turnaround + self.timeout_margin)
+                * max(0.5, float(self.timeout_multiplier)))
+
+    def data_timeout(self) -> float:
+        if self.legacy_mode:
+            header = PhyHeader(
+                OfdmFrameType.DATA, 0, mcs=self.mcs_index,
+                payload_len=self.profile.block_size,
+                version=LEGACY_FRAME_VERSION,
+            )
+            airtime = self._burst_duration(header)
+        else:
+            selected = self.controller.profile
+            capacity_mode = (
+                int(selected.fec) > 7 or selected.arq_block_bytes > 1024
+            )
+            capacity_version = (
+                CAPACITY_FRAME_VERSION if capacity_mode
+                else SUPERFRAME_VERSION if self.superframe else FRAME_VERSION
+            )
+            frame_limit = (MAX_CAPACITY_SUBBLOCKS if capacity_mode else
+                           MAX_SUPERFRAME_SUBBLOCKS if self.superframe else MAX_SUBBLOCKS)
+            base_count = min(frame_limit, max(1, math.ceil(
+                selected.burst_bytes / selected.arq_block_bytes
+            )))
+            count = base_count
+            version = FRAME_VERSION
+            if self.superframe:
+                prototype_lengths = [selected.arq_block_bytes] * base_count
+                prototype = PhyHeader(
+                    OfdmFrameType.DATA, 0, block_count=base_count,
+                    mcs=self.mcs_index, fec=selected.fec,
+                    payload_len=sum(prototype_lengths), subblock_count=base_count,
+                    version=capacity_version,
+                )
+                micro_seconds = self._burst_duration(prototype, prototype_lengths)
+                by_time = max(1, int(
+                    (self.max_train_seconds + self.train_gap_seconds)
+                    / max(0.001, micro_seconds + self.train_gap_seconds)
+                ))
+                limit = (MAX_CAPACITY_SUBBLOCKS
+                         if capacity_mode else MAX_SUPERFRAME_SUBBLOCKS)
+                count = min(
+                    limit,
+                    base_count * min(self._current_train_bursts, by_time),
+                )
+                version = (
+                    CAPACITY_FRAME_VERSION if capacity_mode
+                    else SUPERFRAME_VERSION
+                )
+            elif capacity_mode:
+                version = CAPACITY_FRAME_VERSION
+            lengths = [selected.arq_block_bytes] * count
+            header = PhyHeader(
+                OfdmFrameType.DATA, 0, block_count=count, mcs=self.mcs_index,
+                fec=selected.fec, payload_len=sum(lengths),
+                subblock_count=count, version=version,
+            )
+            airtime = self._burst_duration(header, lengths)
+        return ((airtime + 2.0 * self.ptt_turnaround + self.timeout_margin)
+                * max(0.5, float(self.timeout_multiplier)))
+
+    def _is_cancelled(self) -> bool:
+        return bool(self.cancelled is not None and self.cancelled())
+
+    def receive_idle_timeout(self, total_blocks: int = MAX_SUPERFRAME_SUBBLOCKS) -> float:
+        """Stay available for the peer's complete DATA/POLL/rescue cycle.
+
+        The local cold-start burst says nothing about the peer's remembered
+        mode or retry timing. A receiver must not depart while a conforming
+        sender can still recover the transfer. Explicit caller timeouts remain
+        authoritative; this is the production default for rescue-capable links.
+        """
+        if self.rescue_after_attempt is None or self.legacy_mode:
+            return self.data_timeout()
+        reply = self.reply_timeout(total_blocks)
+        attempt = (self.max_train_seconds + 2.0 * reply
+                   + 2.0 * self.ptt_turnaround
+                   + 2.0 * self.decode_margin_per_burst)
+        return max(self.data_timeout(), (self.max_retries + 1) * attempt)
+
+    def _fec_for_attempt(self, attempt: int) -> FecProfile:
+        attempt = max(0, int(attempt))
+        if self._is_rescue_attempt(attempt):
+            # The conventional rate-1/2 mother code is understood by every
+            # capacity-frame peer and is the final delivery escape hatch.
+            return FecProfile.FEC_1_2
+        if self.chase_first_retry and attempt > 0:
+            attempt -= 1
+        return self.controller.fec_for_retry(attempt)
+
+    def _is_rescue_attempt(self, attempt: int) -> bool:
+        return (self.rescue_after_attempt is not None
+                and int(attempt) >= self.rescue_after_attempt)
+
+    def _mcs_for_attempt(self, attempt: int) -> int:
+        return (int(self.rescue_mcs_index) if self._is_rescue_attempt(attempt)
+                else int(self.mcs_index))
+
+    def _reply_capture_seconds(self, total_blocks: int) -> float:
+        bitmap = AckBitmap(max(1, int(total_blocks)), frozenset()).encode()
+        header = PhyHeader(
+            OfdmFrameType.ACK, 0, block_count=max(1, int(total_blocks)),
+            payload_len=len(bitmap),
+        )
+        # Once squelch opens, a false trigger must not inherit the maximum DATA
+        # capture length. ACK airtime plus the existing decode margin is enough
+        # for the complete control waveform and its hangover.
+        return max(1.0, self._burst_duration(header) + self.timeout_margin)
+
+    def _receive_reply(self, timeout: float,
+                       total_blocks: int) -> np.ndarray | None:
+        limited = getattr(self.pipe, "receive_limited", None)
+        if limited is not None:
+            return limited(
+                timeout, self._reply_capture_seconds(total_blocks)
+            )
+        # Third-party/test pipes implementing the original protocol remain
+        # valid; only the real soundcard pipe needs the capture hard cap.
+        return self.pipe.receive(timeout)
+
+    def _guard_peer_receiver(self) -> None:
+        guard = getattr(self.pipe, "guard_peer_receiver", None)
+        if guard is not None:
+            guard()
+            return
+        seconds = max(
+            0.0, float(getattr(self.pipe, "peer_turnaround_guard", 0.0))
+        )
+        if seconds and not self._is_cancelled():
+            time.sleep(seconds)
+
+    def _reserve_window(self, data_samples: int, total_blocks: int, *,
+                        data_ptt_cycles: int = 1) -> None:
+        """Let an RF lab pace long messages only between complete ARQ windows."""
+        reserve = getattr(self.pipe, "reserve_keyed_budget", None)
+        if reserve is None:
+            return
+        count = max(1, int(total_blocks))
+        bitmap = AckBitmap(count, frozenset()).encode()
+        ack = PhyHeader(
+            OfdmFrameType.ACK, 0, block_count=count, payload_len=len(bitmap)
+        )
+        control = PhyHeader(OfdmFrameType.POLL, 0, block_count=count)
+        # Reserve the DATA waveform, first bitmap, a possible POLL/re-ACK pair,
+        # and the final ACK confirmation. No pause can then land inside the
+        # timing-sensitive exchange; a long duty wait happens before DATA.
+        waveform_seconds = (
+            max(0, int(data_samples)) / self.profile.sample_rate
+            + 2.0 * self._burst_duration(ack)
+            + 2.0 * self._burst_duration(control)
+        )
+        # Happy path: DATA cycle(s), bitmap, and final confirmation.  Keep two
+        # extra control cycles in reserve for a POLL/re-ACK recovery.
+        reserve(waveform_seconds, max(1, int(data_ptt_cycles)) + 4)
+
+    def _save_rejected_capture(self, samples, reason: str) -> None:
+        save = getattr(self.pipe, "save_rejected_capture", None)
+        if save is not None:
+            try:
+                save(samples, reason)
+            except Exception as exc:  # noqa: BLE001 - evidence must not break ARQ
+                self._log(f"OFDM diagnostic capture failed: {exc}")
+
+    # -- sending ---------------------------------------------------------
+
+    def send_message(self, msg_id: int, payload: bytes) -> bool:
+        self._started_at = time.monotonic()
+        self.status.direction = "send"
+        if self._is_cancelled():
+            self._publish("failed")
+            return False
+        if self.legacy_mode:
+            return self._send_message_legacy(msg_id, payload)
+        if (self.controller.config.rapid_acquisition
+                and self.controller.config.adaptive_burst):
+            # The same callsign and USB cable can now lead to another radio.
+            # Keep a recent learned modulation as a short warm-start hint, but
+            # require fresh delivery/quality feedback before long aggregation.
+            # Starting the controller at the minimum also prevents a failed
+            # probe from inheriting a large window after its rescue succeeds.
+            self.controller.current_burst_bytes = (
+                self.controller.config.initial_burst_bytes
+                or self.controller.config.min_burst_bytes)
+        selected = self.controller.profile
+        blocks_list = split_blocks(payload, selected.arq_block_bytes)
+        if len(blocks_list) > 0xFFFF:
+            raise ValueError("OFDM message exceeds 65535 ARQ blocks")
+        blocks = dict(enumerate(blocks_list))
+        self.status.total_bytes = len(payload)
+        self.status.tx_bytes = 0
+        self.status.retries = 0
+        self.status.retransmitted_bytes = 0
+        self.status.protocol_overhead_bytes = 0
+        self.status.data_bursts = 0
+        self.status.ack_bursts = 0
+        self.status.ptt_cycles = 0
+        self.status.data_airtime_seconds = 0.0
+        self.status.ack_airtime_seconds = 0.0
+        self.status.train_gap_seconds = 0.0
+        self.status.turnaround_seconds = 0.0
+        self._reset_timing()
+        self.status.elapsed_seconds = 0.0
+        self.status.goodput_bps = None
+        self.channel_seconds = 0.0
+        self._log(
+            f"OFDM: sending #{msg_id} as {len(blocks)} block(s), "
+            f"{self.controller.summary()}, MCS{self.mcs_index}"
+        )
+
+        next_sequence = 0
+        while next_sequence < len(blocks):
+            if self._is_cancelled():
+                self._publish("failed")
+                self._log(f"OFDM: sending #{msg_id} cancelled")
+                return False
+            selected = self.controller.profile
+            capacity_mode = (
+                int(selected.fec) > 7 or selected.arq_block_bytes > 1024
+            )
+            capacity_version = (
+                CAPACITY_FRAME_VERSION if capacity_mode
+                else SUPERFRAME_VERSION if self.superframe else FRAME_VERSION
+            )
+            frame_limit = (MAX_CAPACITY_SUBBLOCKS if capacity_mode else
+                           MAX_SUPERFRAME_SUBBLOCKS if self.superframe else MAX_SUBBLOCKS)
+            base_capacity = min(frame_limit, max(
+                1, selected.burst_bytes // selected.arq_block_bytes
+            ))
+            prototype_lengths = [selected.arq_block_bytes] * base_capacity
+            prototype = PhyHeader(
+                OfdmFrameType.DATA, msg_id, block_count=len(blocks),
+                mcs=self.mcs_index, fec=selected.fec,
+                payload_len=sum(prototype_lengths), subblock_count=base_capacity,
+                version=capacity_version,
+            )
+            micro_seconds = self._burst_duration(prototype, prototype_lengths)
+            by_time = (
+                self._current_train_bursts
+                if self.split_train_ptt and not self.superframe
+                else max(1, int(
+                    (self.max_train_seconds + self.train_gap_seconds)
+                    / max(0.001, micro_seconds + self.train_gap_seconds)
+                ))
+            )
+            train_count = min(self._current_train_bursts, by_time)
+            limit = (MAX_CAPACITY_SUBBLOCKS
+                     if capacity_mode else MAX_SUPERFRAME_SUBBLOCKS)
+            capacity = (min(limit,
+                            base_capacity * train_count)
+                        if self.superframe else base_capacity)
+            window_capacity = (capacity if self.superframe
+                               else capacity * train_count)
+            sequences = list(range(
+                next_sequence,
+                min(len(blocks), next_sequence + window_capacity),
+            ))
+            burst_id = self._next_burst_id
+            reserved_ids = (1 if self.superframe else
+                            max(1, math.ceil(len(sequences) / capacity)))
+            self._next_burst_id = (self._next_burst_id + reserved_ids) & 0xFFFF
+            state = BurstTxState(
+                msg_id=msg_id, burst_id=burst_id, total_blocks=len(blocks),
+                blocks={sequence: blocks[sequence] for sequence in sequences},
+                pending=set(sequences),
+                retry_count={sequence: 0 for sequence in sequences},
+            )
+            if self.superframe and self.controller.config.rapid_acquisition:
+                # End this logical window at the physical airtime boundary.
+                # Otherwise a 16 KiB window becomes (11 + 5) KiB, and the next
+                # repeats that short remainder instead of filling another TX.
+                # Each ACK can now apply freshly learned MCS/FEC to the next
+                # full window. Rescue still splits its slower retries below.
+                sequences = self._bounded_window_batches(
+                    state, sequences, selected.fec, retransmission=False,
+                    mcs_index=self.mcs_index)[0]
+                state.blocks = {sequence: blocks[sequence] for sequence in sequences}
+                state.pending = set(sequences)
+                state.retry_count = {sequence: 0 for sequence in sequences}
+            send = self._send_window if reserved_ids == 1 else self._send_train_window
+            if not send(state):
+                self.status.last_block_ok = False
+                self._publish("failed")
+                self._log(
+                    f"OFDM: burst {burst_id} of #{msg_id} failed; "
+                    f"missing={sorted(state.pending)}"
+                )
+                return False
+            next_sequence = sequences[-1] + 1
+
+        # Tell the receiver its final bitmap arrived. Without this one-bit
+        # handshake it has to keep the OFDM soundcard open for a complete reply
+        # timeout in case that ACK was lost; for a large bitmap that can be
+        # minutes and delays the session-layer RECEIVED frame on the control
+        # channel. A lost confirmation is harmless: the existing linger/re-ACK
+        # path remains active until its normal timeout.
+        if self._is_cancelled():
+            self._publish("failed")
+            return False
+        self._confirm_final_bitmap(state)
+        self.status.last_block_ok = True
+        self._publish("idle")
+        self._log(
+            f"OFDM: #{msg_id} complete -- {self.adaptation.summary()}, "
+            f"goodput={self.status.goodput_bps or 0:.0f} bit/s over "
+            f"{self.status.elapsed_seconds:.2f} s, "
+            f"modeled={self.status.est_bitrate_bps or 0:.0f} bit/s, "
+            f"retransmitted={self.status.retransmitted_bytes} B, "
+            f"protocol_overhead={self.status.protocol_overhead_bytes} B, "
+            f"rx_wait={self.status.rx_trigger_wait_seconds:.2f} s, "
+            f"rx_capture={self.status.rx_capture_seconds:.2f} s, "
+            f"rx_hangover={self.status.rx_hangover_seconds:.2f} s, "
+            f"rx_decode={self.status.rx_decode_seconds:.2f} s"
+        )
+        return True
+
+    def _confirm_final_bitmap(self, state: BurstTxState) -> None:
+        if self._is_cancelled():
+            return
+        confirmation = PhyHeader(
+            OfdmFrameType.POLL,
+            state.msg_id,
+            block_seq=state.burst_id,
+            block_count=state.total_blocks,
+            flags=FINAL_ACK_CONFIRM_FLAG,
+        )
+        self._log(f"OFDM ACK CONFIRM #{state.burst_id}")
+        try:
+            # The ACK capture ends at its length-delimited payload, before the
+            # far transmitter's guard/tail necessarily has elapsed.  Keying the
+            # confirmation immediately makes it land while that radio is still
+            # deaf in TX, forcing the receiver to pay its full lost-ACK hold.
+            self._guard_peer_receiver()
+            self._transmit(
+                self._build_burst(confirmation),
+                header=confirmation,
+                control=True,
+            )
+        except Exception as exc:  # delivered data must not become a false failure
+            self._log(
+                f"OFDM ACK CONFIRM #{state.burst_id} could not be sent: {exc}; "
+                "receiver will use its bounded re-ACK hold"
+            )
+
+    def _send_window(self, state: BurstTxState) -> bool:
+        self.adaptation.blocks_sent += len(state.blocks)
+        acknowledged: set[int] = set()
+        for attempt in range(self.max_retries + 1):
+            if self._is_cancelled():
+                return False
+            fec = self._fec_for_attempt(attempt)
+            attempt_mcs = self._mcs_for_attempt(attempt)
+            sequences = sorted(state.pending)
+            batches = self._bounded_window_batches(
+                state, sequences, fec, retransmission=attempt > 0,
+                mcs_index=attempt_mcs,
+            )
+            if attempt:
+                self.status.retries += 1
+                self.adaptation.retransmissions += len(sequences)
+                resent = sum(len(state.blocks[value]) for value in sequences)
+                self.status.retransmitted_bytes += resent
+                for sequence in sequences:
+                    state.retry_count[sequence] += 1
+            answer = None
+            for batch_index, batch in enumerate(batches, start=1):
+                if self._is_cancelled():
+                    return False
+                members = [SubBlock(sequence, state.blocks[sequence])
+                           for sequence in batch if sequence in state.pending]
+                if not members:
+                    continue
+                header = self._window_data_header(
+                    state, [block.sequence for block in members], fec,
+                    retransmission=attempt > 0,
+                    mcs_index=attempt_mcs,
+                )
+                waveform = self._build_burst(header, blocks=members)
+                self.status.last_burst_blocks = len(members)
+                split = (f", part={batch_index}/{len(batches)}"
+                         if len(batches) > 1 else "")
+                self._log(
+                    f"OFDM TX BURST #{state.burst_id}: "
+                    f"payload={header.payload_len} B, blocks={len(members)}, "
+                    f"MCS{header.mcs}, FEC={fec_spec(fec).label}, "
+                    f"airtime={len(waveform) / self.profile.sample_rate:.2f} s"
+                    f"{', delivery rescue' if self._is_rescue_attempt(attempt) else ''}"
+                    f"{split}"
+                )
+                before = self.channel_seconds
+                self._reserve_window(len(waveform), state.total_blocks)
+                self._transmit(waveform, header=header)
+                self._publish("waiting_ack")
+                answer = self._await_bitmap(
+                    state.msg_id, state.burst_id, state.total_blocks,
+                    extra_timeout=self.decode_margin_per_burst,
+                )
+                if answer is None and not self._is_cancelled():
+                    answer = self._poll_bitmap(
+                        state, state.burst_id,
+                        "DATA/ACK missing; requesting held bitmap before resend",
+                    )
+                reported = set() if answer is None else set(answer.received)
+                sent_sequences = {block.sequence for block in members}
+                received = state.pending & reported
+                received_here = sent_sequences & reported
+                self._report_train_feedback(len(members), len(received_here))
+                self._report_mcs_feedback(
+                    len(members), len(received_here),
+                    answer.remote_snr_db if answer else None,
+                    answer.remote_evm_rms if answer else None,
+                )
+                if attempt == 0:
+                    state.first_pass_acked.update(received_here)
+                newly = received - acknowledged
+                acknowledged.update(received)
+                for sequence in newly:
+                    self.status.tx_bytes += len(state.blocks[sequence])
+                self.adaptation.blocks_acked += len(newly)
+                state.pending.difference_update(received)
+                if answer is not None:
+                    self.adaptation.blocks_nacked += len(
+                        sent_sequences - reported
+                    )
+                moved = sum(len(state.blocks[sequence]) for sequence in newly)
+                self.controller.report_burst(
+                    mcs_index=attempt_mcs,
+                    sent_blocks=len(members), acked_blocks=len(received_here),
+                    retransmitted_bytes=(sum(len(block.payload)
+                                             for block in members)
+                                         if attempt else 0),
+                    unique_bytes=moved,
+                    elapsed_seconds=max(0.0, self.channel_seconds - before),
+                    remote_snr_db=(answer.remote_snr_db if answer else None),
+                    remote_evm_rms=(answer.remote_evm_rms if answer else None),
+                )
+                if answer is not None and answer.remote_snr_db is not None:
+                    self.status.remote_snr_db = answer.remote_snr_db
+                if answer is not None and answer.remote_evm_rms is not None:
+                    self.status.remote_evm_rms = answer.remote_evm_rms
+                self._rate(self.status.tx_bytes)
+                self._publish()
+                if not state.pending:
+                    self.status.last_first_pass_ok = len(state.first_pass_acked)
+                    self._log(
+                        f"OFDM COMPLETE #{state.burst_id}: "
+                        f"{len(state.blocks)}/{len(state.blocks)} blocks, "
+                        f"retries={attempt}"
+                    )
+                    return True
+            last = attempt == self.max_retries
+            reason = (self.last_reply_reason if answer is None else
+                      f"missing={sorted(state.pending)}")
+            self._log(
+                f"OFDM RETX #{state.burst_id}: {reason}"
+                f"{'' if last else ', selective resend'}"
+            )
+        return False
+
+    def _window_data_header(self, state: BurstTxState,
+                            sequences: list[int], fec: FecProfile, *,
+                            retransmission: bool,
+                            mcs_index: int | None = None) -> PhyHeader:
+        return PhyHeader(
+            OfdmFrameType.DATA, state.msg_id,
+            block_seq=state.burst_id, block_count=state.total_blocks,
+            mcs=(self.mcs_index if mcs_index is None else int(mcs_index)), fec=fec,
+            payload_len=sum(len(state.blocks[value]) for value in sequences),
+            subblock_count=len(sequences), retransmission=retransmission,
+            version=(
+                CAPACITY_FRAME_VERSION
+                if int(fec) > 7 or self.controller.profile.arq_block_bytes > 1024
+                else SUPERFRAME_VERSION if self.superframe
+                else FRAME_VERSION
+            ),
+        )
+
+    def _poll_bitmap(self, state: BurstTxState, block_seq: int,
+                     reason: str) -> AckBitmap | None:
+        """Resolve ACK ambiguity with one short control burst.
+
+        A missing reply does not prove that DATA was lost.  Asking the receiver
+        what it already holds prevents a lost final ACK from retransmitting an
+        entire long window and lets selective ARQ resend only genuinely missing
+        blocks.
+        """
+        poll = PhyHeader(
+            OfdmFrameType.POLL, state.msg_id, block_seq=block_seq,
+            block_count=state.total_blocks,
+        )
+        self._log(f"OFDM POLL #{state.burst_id}: {reason}")
+        self._transmit(self._build_burst(poll), header=poll, control=True)
+        return self._await_bitmap(state.msg_id, block_seq, state.total_blocks)
+
+    def _bounded_window_batches(self, state: BurstTxState,
+                                sequences: list[int], fec: FecProfile, *,
+                                retransmission: bool,
+                                mcs_index: int | None = None) -> list[list[int]]:
+        """Split every data window so a learned mode cannot exceed the PTT cap."""
+        if not sequences:
+            return []
+        # Burst-byte adaptation alone does not bound airtime: the same learned
+        # 16 KiB window is 14.62 s at OFDM MCS3/LDPC-4/5 but 23.09 s at
+        # MCS2/LDPC-1/2. Therefore the duration check must cover the first pass
+        # as well as retries and must use this attempt's actual MCS and FEC.
+        batches: list[list[int]] = []
+        remaining = list(sequences)
+        version = self._window_data_header(
+            state, sequences[:1], fec, retransmission=retransmission,
+            mcs_index=mcs_index).version
+        frame_limit = (MAX_CAPACITY_SUBBLOCKS if version == CAPACITY_FRAME_VERSION else
+                       MAX_SUPERFRAME_SUBBLOCKS if version == SUPERFRAME_VERSION else MAX_SUBBLOCKS)
+        while remaining:
+            batch: list[int] = []
+            for sequence in remaining:
+                # A retry may select a different wire format: v3 holds 63
+                # subblocks, but v4 (including LDPC 7/10) holds only 31.
+                # Split before constructing a header that cannot encode.
+                if len(batch) >= frame_limit:
+                    break
+                candidate = [*batch, sequence]
+                header = self._window_data_header(
+                    state, candidate, fec, retransmission=retransmission,
+                    mcs_index=mcs_index,
+                )
+                lengths = [len(state.blocks[value]) for value in candidate]
+                duration = self._burst_duration(header, lengths)
+                if batch and duration > self.max_train_seconds:
+                    break
+                batch = candidate
+            batches.append(batch)
+            remaining = remaining[len(batch):]
+        return batches
+
+    def _send_train_window(self, state: BurstTxState) -> bool:
+        """Send independently decodable microbursts under one PTT and one ACK."""
+        self.adaptation.blocks_sent += len(state.blocks)
+        acknowledged: set[int] = set()
+        selected = self.controller.profile
+        capacity = min(32, max(1, selected.burst_bytes // selected.arq_block_bytes))
+        for attempt in range(self.max_retries + 1):
+            if self._is_cancelled():
+                return False
+            sequences = sorted(state.pending)
+            chunks = [sequences[index:index + capacity]
+                      for index in range(0, len(sequences), capacity)]
+            fec = self._fec_for_attempt(attempt)
+            attempt_mcs = self._mcs_for_attempt(attempt)
+            if attempt:
+                self.status.retries += 1
+                self.adaptation.retransmissions += len(sequences)
+                resent = sum(len(state.blocks[value]) for value in sequences)
+                self.status.retransmitted_bytes += resent
+                for sequence in sequences:
+                    state.retry_count[sequence] += 1
+            waveforms: list[np.ndarray] = []
+            headers: list[PhyHeader] = []
+            for index, chunk in enumerate(chunks):
+                members = [SubBlock(sequence, state.blocks[sequence])
+                           for sequence in chunk]
+                header = PhyHeader(
+                    OfdmFrameType.DATA, state.msg_id,
+                    block_seq=(state.burst_id + index) & 0xFFFF,
+                    block_count=state.total_blocks, mcs=attempt_mcs, fec=fec,
+                    payload_len=sum(len(item.payload) for item in members),
+                    subblock_count=len(members), retransmission=attempt > 0,
+                    flags=(DEFER_ACK_FLAG if index < len(chunks) - 1 else 0),
+                    version=(CAPACITY_FRAME_VERSION
+                             if int(fec) > 7
+                             or selected.arq_block_bytes > 1024
+                             else FRAME_VERSION),
+                )
+                headers.append(header)
+                waveforms.append(self._build_burst(header, blocks=members))
+            gap = np.zeros(int(self.profile.sample_rate * self.train_gap_seconds))
+            train = np.concatenate([
+                part for index, waveform in enumerate(waveforms)
+                for part in ((gap if index else np.zeros(0)), waveform)
+            ])
+            final_id = headers[-1].block_seq
+            self.status.last_burst_blocks = len(sequences)
+            self._log(
+                f"OFDM TX TRAIN #{state.burst_id}: {len(headers)} microburst(s), "
+                f"payload={sum(headers[index].payload_len for index in range(len(headers)))} B, "
+                f"MCS{attempt_mcs}, FEC={fec_spec(fec).label}, "
+                f"airtime={len(train) / self.profile.sample_rate:.2f} s"
+                f"{', delivery rescue' if self._is_rescue_attempt(attempt) else ''}"
+            )
+            before = self.channel_seconds
+            if self.split_train_ptt and len(waveforms) > 1:
+                self._reserve_window(
+                    sum(len(waveform) for waveform in waveforms),
+                    state.total_blocks,
+                    data_ptt_cycles=len(waveforms),
+                )
+                for index, (waveform, header) in enumerate(zip(waveforms, headers)):
+                    self._transmit(waveform, header=header)
+                    if index < len(waveforms) - 1 and self.train_gap_seconds:
+                        time.sleep(self.train_gap_seconds)
+                        self.channel_seconds += self.train_gap_seconds
+                        self.status.train_gap_seconds += self.train_gap_seconds
+                        self.status.turnaround_seconds += self.train_gap_seconds
+            else:
+                self._reserve_window(len(train), state.total_blocks)
+                self._transmit_train(train, headers)
+            self._publish("waiting_ack")
+            answer = self._await_bitmap(
+                state.msg_id, final_id, state.total_blocks,
+                extra_timeout=len(headers) * self.decode_margin_per_burst,
+            )
+            if answer is None:
+                if self._is_cancelled():
+                    return False
+                answer = self._poll_bitmap(
+                    state, final_id, "final microburst/ACK missing",
+                )
+            received = (set() if answer is None else
+                        state.pending & set(answer.received))
+            self._report_train_feedback(len(sequences), len(received))
+            self._report_mcs_feedback(
+                len(sequences), len(received),
+                answer.remote_snr_db if answer else None,
+                answer.remote_evm_rms if answer else None,
+            )
+            if attempt == 0:
+                state.first_pass_acked.update(received)
+            newly = received - acknowledged
+            acknowledged.update(received)
+            for sequence in newly:
+                self.status.tx_bytes += len(state.blocks[sequence])
+            self.adaptation.blocks_acked += len(newly)
+            state.pending.difference_update(received)
+            if answer is not None and state.pending:
+                self.adaptation.blocks_nacked += len(state.pending)
+            moved = sum(len(state.blocks[sequence]) for sequence in received)
+            self.controller.report_burst(
+                mcs_index=attempt_mcs,
+                sent_blocks=len(sequences), acked_blocks=len(received),
+                retransmitted_bytes=(sum(len(state.blocks[value]) for value in sequences)
+                                     if attempt else 0),
+                unique_bytes=moved,
+                elapsed_seconds=max(0.0, self.channel_seconds - before),
+                remote_snr_db=(answer.remote_snr_db if answer else None),
+                remote_evm_rms=(answer.remote_evm_rms if answer else None),
+            )
+            self._rate(self.status.tx_bytes)
+            self._publish()
+            if not state.pending:
+                self.status.last_first_pass_ok = len(state.first_pass_acked)
+                self._log(
+                    f"OFDM TRAIN COMPLETE #{state.burst_id}: "
+                    f"{len(state.blocks)}/{len(state.blocks)} blocks, retries={attempt}"
+                )
+                return True
+            self._log(
+                f"OFDM TRAIN RETX #{state.burst_id}: "
+                f"missing={sorted(state.pending)}"
+            )
+        return False
+
+    def _transmit_train(self, waveform: np.ndarray,
+                        headers: list[PhyHeader]) -> None:
+        self._publish("transmitting")
+        context = getattr(self.pipe, "set_transmit_context", None)
+        if context is not None:
+            context(tuple(headers), control=False)
+        timing = self.pipe.send(waveform)
+        airtime = len(waveform) / self.profile.sample_rate
+        if isinstance(timing, TxTiming):
+            occupied = timing.wall_clock + self.ptt_turnaround
+            self.status.tx_lead_seconds += timing.lead
+            self.status.tx_guard_seconds += timing.guard
+            self.status.tx_tail_seconds += timing.tail
+            self.status.keyed_seconds += timing.keyed_total
+        else:
+            occupied = airtime + self.ptt_turnaround
+        self.channel_seconds += occupied
+        gap_seconds = min(
+            airtime,
+            max(0, len(headers) - 1) * self.train_gap_seconds,
+        )
+        self.status.data_bursts += len(headers)
+        self.status.data_airtime_seconds += airtime - gap_seconds
+        self.status.train_gap_seconds += gap_seconds
+        self.status.ptt_cycles += 1
+        self.status.turnaround_seconds += max(0.0, occupied - airtime)
+        self.status.protocol_overhead_bytes += sum(
+            protocol_overhead_bytes(header) for header in headers
+        )
+
+    def _await_bitmap(self, msg_id: int, burst_id: int,
+                      total_blocks: int,
+                      extra_timeout: float = 0.0) -> AckBitmap | None:
+        deadline = (time.monotonic() + self.reply_timeout(total_blocks)
+                    + max(0.0, float(extra_timeout)))
+        heard = 0
+        why = ""
+        while True:
+            if self._is_cancelled():
+                self.last_reply_reason = "transfer cancelled"
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            samples = self._receive_reply(remaining, total_blocks)
+            if samples is None:
+                break
+            heard += 1
+            decoded = self._decode_burst(samples)
+            self._record(decoded)
+            header = decoded.header
+            if header is None or not decoded.ok:
+                why = decoded.metrics.error or "burst did not decode"
+                self._save_rejected_capture(samples, f"reply: {why}")
+                continue
+            if header.frame_type is OfdmFrameType.DATA:
+                why = "the far end was still sending data"
+                continue
+            if header.msg_id != msg_id or header.block_seq != burst_id:
+                why = f"heard an answer for burst {header.block_seq}, not {burst_id}"
+                continue
+            try:
+                bitmap = AckBitmap.decode(decoded.payload or b"")
+            except OfdmFrameError as exc:
+                why = str(exc)
+                continue
+            if bitmap.total_blocks != total_blocks:
+                why = "ACK bitmap has the wrong message block count"
+                continue
+            self.last_reply_reason = ""
+            quality = ""
+            if bitmap.remote_snr_db is not None:
+                quality += f", remote_snr={bitmap.remote_snr_db:.1f} dB"
+            if bitmap.remote_evm_rms is not None:
+                quality += f", remote_evm={bitmap.remote_evm_rms:.3f}"
+            self._log(
+                f"OFDM RX {header.frame_type.label} #{burst_id}: "
+                f"held={len(bitmap.received)}/{bitmap.total_blocks}{quality}"
+            )
+            # A real soundcard can finish capturing the ACK/NACK hangover while
+            # the far radio still has PTT asserted for its output guard/tail.
+            # Guard every valid bitmap, not only a fully successful one: sparse
+            # retries are prepared so quickly that the missing guard after a
+            # NACK made them collide with the peer's own acknowledgement.
+            self._guard_peer_receiver()
+            return bitmap
+        self.last_reply_reason = (
+            f"{heard} burst(s) heard, none usable: {why}" if heard
+            else f"nothing heard{self._squelch_note()}"
+        )
+        return None
+
+    # -- receiving -------------------------------------------------------
+
+    def receive_message(self, msg_id: int | None = None,
+                        timeout: float | None = None) -> bytes | None:
+        self._started_at = time.monotonic()
+        self.status.direction = "receive"
+        wait = self.receive_idle_timeout() if timeout is None else timeout
+        idle_deadline = time.monotonic() + wait
+        state: RxBurstState | None = None
+        self.status.rx_bytes = 0
+        self.status.total_bytes = 0
+        self.status.data_bursts = 0
+        self.status.ack_bursts = 0
+        self.status.ptt_cycles = 0
+        self.status.data_airtime_seconds = 0.0
+        self.status.ack_airtime_seconds = 0.0
+        self.status.turnaround_seconds = 0.0
+        self._reset_timing()
+        self.status.elapsed_seconds = 0.0
+        self.status.goodput_bps = None
+        self.status.protocol_overhead_bytes = 0
+        self.channel_seconds = 0.0
+        while True:
+            if self._is_cancelled():
+                self._publish("failed")
+                self._log("OFDM: receive cancelled")
+                return None
+            self._publish("synchronizing")
+            remaining = idle_deadline - time.monotonic()
+            samples = self.pipe.receive(remaining) if remaining > 0.0 else None
+            if samples is None:
+                self._publish("failed")
+                self._log("OFDM: peer went quiet")
+                return None
+            self._publish("receiving")
+            batch = self._decode_many(samples)
+            if not batch:
+                self._save_rejected_capture(
+                    samples, "DATA capture contained no readable burst header"
+                )
+                self._log("OFDM: capture contained no readable burst header")
+                continue
+            recorded_airtime = 0.0
+            answer: tuple[OfdmFrameType, PhyHeader, LinkMetrics] | None = None
+            for decoded in batch:
+                self._record(decoded, turnaround=False)
+                header = decoded.header
+                if header is None:
+                    continue
+                if not decoded.ok:
+                    self._save_rejected_capture(
+                        samples,
+                        decoded.metrics.error or "DATA block CRC failed",
+                    )
+                lengths = ([decoded.block_lengths[value]
+                            for value in decoded.block_order]
+                           if decoded.block_lengths else None)
+                recorded_airtime += self._burst_duration(header, lengths)
+                if header.frame_type is OfdmFrameType.POLL:
+                    expected_id = state.msg_id if state is not None else msg_id
+                    if (expected_id is None or header.msg_id == expected_id) and (
+                            state is None or header.block_count == state.total_blocks):
+                        if timeout is None:
+                            wait = self.receive_idle_timeout(header.block_count)
+                        idle_deadline = time.monotonic() + wait
+                    if state is not None and header.msg_id == state.msg_id:
+                        self._answer_bitmap(
+                            OfdmFrameType.ACK, header, state, decoded.metrics
+                        )
+                    continue
+                if header.frame_type is not OfdmFrameType.DATA:
+                    continue
+                if msg_id is not None and header.msg_id != msg_id:
+                    self._log(f"OFDM: ignoring burst for #{header.msg_id}")
+                    continue
+                if header.version == LEGACY_FRAME_VERSION:
+                    return self._receive_legacy_burst(decoded, msg_id, wait)
+                if state is None:
+                    state = RxBurstState(header.msg_id, header.block_count)
+                    self.status.total_bytes = state.total_blocks * self.profile.block_size
+                if header.msg_id != state.msg_id or header.block_count != state.total_blocks:
+                    self._log("OFDM: inconsistent message identity or block count")
+                    continue
+                if timeout is None:
+                    wait = self.receive_idle_timeout(state.total_blocks)
+                idle_deadline = time.monotonic() + wait
+                state.updated = time.monotonic()
+                state.train_seen = state.train_seen or header.defer_ack or len(batch) > 1
+
+                if not decoded.block_order:
+                    self.status.last_block_ok = False
+                    self._log(
+                        f"OFDM: burst {header.block_seq} manifest rejected -- "
+                        f"{decoded.metrics.error}"
+                    )
+                    if not header.defer_ack:
+                        answer = (OfdmFrameType.NACK, header, decoded.metrics)
+                    continue
+
+                for sequence, payload in decoded.blocks.items():
+                    if sequence in state.blocks:
+                        self.adaptation.duplicates += 1
+                    else:
+                        state.blocks[sequence] = payload
+                        self.status.rx_bytes += len(payload)
+                        self.adaptation.blocks_received += 1
+                held = set(state.blocks)
+                missing_here = set(decoded.block_order) - held
+                self.adaptation.blocks_nacked += len(missing_here)
+                self.status.last_block_ok = not missing_here
+                self.status.last_burst_blocks = len(decoded.block_order)
+                self.status.last_first_pass_ok = (
+                    len(decoded.block_order) - len(missing_here)
+                )
+                if not header.defer_ack:
+                    kind = (OfdmFrameType.ACK if not missing_here
+                            else OfdmFrameType.NACK)
+                    answer = (kind, header, decoded.metrics)
+
+            # One capture is one remote PTT cycle even when it contained several
+            # independently decoded bursts. Count short train gaps from the real
+            # buffer, then one radio turnaround -- never one per microburst.
+            capture_airtime = len(samples) / self.profile.sample_rate
+            self.channel_seconds += max(0.0, capture_airtime - recorded_airtime)
+            self.channel_seconds += self.ptt_turnaround
+            self.status.turnaround_seconds += self.ptt_turnaround
+            self.status.ptt_cycles += 1
+            if answer is not None and state is not None:
+                kind, incoming, metrics = answer
+                # The sender's ACK deadline includes one decoder allowance per
+                # microburst in this capture. Mirror that allowance during the
+                # completed-message linger so a lost final ACK is recoverable.
+                state.reply_decode_margin = (
+                    max(1, len(batch)) * self.decode_margin_per_burst
+                )
+                self._answer_bitmap(kind, incoming, state, metrics)
+            self._rate(self.status.rx_bytes)
+            self._publish()
+
+            if state is not None and len(state.blocks) == state.total_blocks:
+                message = b"".join(state.blocks[index]
+                                   for index in range(state.total_blocks))
+                self.status.total_bytes = len(message)
+                self._publish("idle")
+                self._log(
+                    f"OFDM: #{state.msg_id} received -- {len(message)} B in "
+                    f"{state.total_blocks} block(s), {self.adaptation.summary()}, "
+                    f"rx_wait={self.status.rx_trigger_wait_seconds:.2f} s, "
+                    f"rx_capture={self.status.rx_capture_seconds:.2f} s, "
+                    f"rx_hangover={self.status.rx_hangover_seconds:.2f} s, "
+                    f"rx_decode={self.status.rx_decode_seconds:.2f} s"
+                )
+                self._linger_bitmap(state)
+                return message
+
+    def _answer_bitmap(self, kind: OfdmFrameType, incoming: PhyHeader,
+                       state: RxBurstState, metrics: LinkMetrics) -> None:
+        if incoming.frame_type is OfdmFrameType.DATA:
+            state.feedback_burst_id = incoming.block_seq
+            state.feedback_metrics = metrics
+        elif incoming.frame_type is OfdmFrameType.POLL:
+            # A robust POLL can look much cleaner than the lost DATA. Repeat
+            # that DATA's measurements only when this exact window was seen;
+            # otherwise report unknown quality instead of teaching a false jump.
+            metrics = (state.feedback_metrics
+                       if state.feedback_burst_id == incoming.block_seq
+                       and state.feedback_metrics is not None else LinkMetrics())
+        report = AckBitmap(
+            state.total_blocks, frozenset(state.blocks),
+            remote_snr_db=metrics.residual_snr_db,
+            remote_evm_rms=metrics.evm_rms,
+        )
+        payload = report.encode_compact() if state.train_seen else report.encode()
+        reply = PhyHeader(
+            kind, incoming.msg_id, block_seq=incoming.block_seq,
+            block_count=state.total_blocks, payload_len=len(payload),
+        )
+        self._log(
+            f"OFDM TX {kind.label} #{incoming.block_seq}: "
+            f"held={len(state.blocks)}/{state.total_blocks}"
+        )
+        # Length-delimited capture can finish before the far radio's keyed
+        # guard/tail has elapsed. Wait only for the *remaining* physical
+        # turnaround; decoder time has already consumed part of it. Keeping the
+        # guard next to the actual transmission covers DATA, POLL and duplicate
+        # recovery paths without introducing a blind inter-frame delay.
+        # Construct the answer during any remaining peer tail, rather than
+        # adding waveform synthesis after the turnaround has already elapsed.
+        waveform = self._build_burst(reply, payload)
+        self._guard_peer_receiver()
+        self._transmit(waveform, header=reply, control=True)
+
+    def _linger_bitmap(self, state: RxBurstState) -> None:
+        rounds = max(1, self.max_retries)
+        # The sender can only decide that the ACK was lost after one complete
+        # reply timeout, then it keys a POLL.  Holding for twice that interval
+        # removes the old deadline race while the positive ACK confirmation
+        # still ends every healthy transfer immediately.
+        linger_timeout = (
+            2.0 * self.reply_timeout(state.total_blocks)
+            + state.reply_decode_margin
+        )
+        self._log(
+            f"OFDM: #{state.msg_id} complete, holding "
+            f"{linger_timeout:.1f} s for a lost ACK"
+        )
+        for _ in range(rounds):
+            if self._is_cancelled():
+                return
+            # A confirmation is a short control burst. A false squelch trigger
+            # must not inherit the maximum DATA capture and stretch a completed
+            # transfer by another multi-second frame window.
+            samples = self._receive_reply(linger_timeout, state.total_blocks)
+            if samples is None:
+                return
+            decoded = self._decode_burst(samples)
+            header = decoded.header
+            if header is None:
+                self._record(decoded)
+                continue
+            if header.msg_id != state.msg_id or header.frame_type not in {
+                OfdmFrameType.DATA, OfdmFrameType.POLL,
+            }:
+                self._record(decoded)
+                return
+            if (header.frame_type is OfdmFrameType.POLL
+                    and header.flags & FINAL_ACK_CONFIRM_FLAG):
+                self._log(
+                    f"OFDM: final bitmap for #{state.msg_id} confirmed; "
+                    "returning to the control channel"
+                )
+                return
+            self._record(decoded)
+            if header.frame_type is OfdmFrameType.DATA:
+                self.adaptation.duplicates += len(
+                    set(decoded.block_order) & set(state.blocks)
+                )
+            self._log(
+                f"OFDM: sender repeated burst {header.block_seq}; "
+                "sending the complete bitmap again"
+            )
+            self._answer_bitmap(OfdmFrameType.ACK, header, state, decoded.metrics)
+
+    # -- version-1 fixed legacy mode ------------------------------------
+
+    def _send_message_legacy(self, msg_id: int, payload: bytes) -> bool:
+        self._started_at = time.monotonic()
+        blocks = split_blocks(payload, self.profile.block_size)
+        self.status.total_bytes = len(payload)
+        self.status.tx_bytes = 0
+        self.status.retries = 0
+        self.status.retransmitted_bytes = 0
+        self.status.protocol_overhead_bytes = 0
+        self.status.data_bursts = 0
+        self.status.ack_bursts = 0
+        self.status.ptt_cycles = 0
+        self.status.data_airtime_seconds = 0.0
+        self.status.ack_airtime_seconds = 0.0
+        self.status.turnaround_seconds = 0.0
+        self._reset_timing()
+        self.status.elapsed_seconds = 0.0
+        self.status.goodput_bps = None
+        self.channel_seconds = 0.0
+        self._log(f"OFDM legacy: sending #{msg_id} as {len(blocks)} block(s)")
+        for sequence, block in enumerate(blocks):
+            if self._is_cancelled():
+                self._publish("failed")
+                return False
+            if not self._send_legacy_block(msg_id, sequence, len(blocks), block):
+                self.status.last_block_ok = False
+                self._publish("failed")
+                return False
+            self.status.tx_bytes += len(block)
+            self._rate(self.status.tx_bytes)
+        self.status.last_block_ok = True
+        self._publish("idle")
+        return True
+
+    def _send_legacy_block(self, msg_id: int, sequence: int, count: int,
+                           block: bytes) -> bool:
+        header = PhyHeader(
+            OfdmFrameType.DATA, msg_id, block_seq=sequence, block_count=count,
+            mcs=self.mcs_index, payload_len=len(block),
+            version=LEGACY_FRAME_VERSION,
+        )
+        waveform = self._build_burst(header, block)
+        self.adaptation.blocks_sent += 1
+        for attempt in range(self.max_retries + 1):
+            if self._is_cancelled():
+                return False
+            if attempt:
+                self.status.retries += 1
+                self.adaptation.retransmissions += 1
+            self._transmit(waveform, header=header)
+            answer = self._await_legacy_reply(msg_id, sequence)
+            if answer is OfdmFrameType.ACK:
+                self.adaptation.blocks_acked += 1
+                return True
+            if answer is OfdmFrameType.NACK:
+                self.adaptation.blocks_nacked += 1
+        return False
+
+    def _await_legacy_reply(self, msg_id: int,
+                            sequence: int) -> OfdmFrameType | None:
+        deadline = time.monotonic() + self.reply_timeout()
+        while time.monotonic() < deadline:
+            if self._is_cancelled():
+                return None
+            samples = self._receive_reply(
+                deadline - time.monotonic(), 1
+            )
+            if samples is None:
+                return None
+            decoded = self._decode_burst(samples)
+            self._record(decoded)
+            header = decoded.header
+            if (header is not None and decoded.ok
+                    and header.version == LEGACY_FRAME_VERSION
+                    and header.frame_type is not OfdmFrameType.DATA
+                    and header.msg_id == msg_id and header.block_seq == sequence):
+                self._guard_peer_receiver()
+                return header.frame_type
+        return None
+
+    def _receive_legacy_burst(self, first, msg_id: int | None,
+                              wait: float) -> bytes | None:
+        blocks: dict[int, bytes] = {}
+        decoded = first
+        expected: int | None = None
+        while True:
+            if self._is_cancelled():
+                self._publish("failed")
+                return None
+            header = decoded.header
+            if (header is not None and header.frame_type is OfdmFrameType.DATA
+                    and (msg_id is None or header.msg_id == msg_id)):
+                expected = header.block_count
+                if decoded.ok and header.block_seq not in blocks:
+                    blocks[header.block_seq] = decoded.payload or b""
+                    self.adaptation.blocks_received += 1
+                self._answer_legacy(
+                    OfdmFrameType.ACK if decoded.ok else OfdmFrameType.NACK,
+                    header,
+                )
+                if expected is not None and len(blocks) == expected:
+                    message = b"".join(blocks[index] for index in range(expected))
+                    self.status.rx_bytes = len(message)
+                    self.status.total_bytes = len(message)
+                    self._publish("idle")
+                    return message
+            samples = self.pipe.receive(wait)
+            if samples is None:
+                self._publish("failed")
+                return None
+            decoded = self._decode_burst(samples)
+            self._record(decoded)
+
+    def _answer_legacy(self, kind: OfdmFrameType, header: PhyHeader) -> None:
+        reply = PhyHeader(
+            kind, header.msg_id, block_seq=header.block_seq,
+            block_count=header.block_count, version=LEGACY_FRAME_VERSION,
+        )
+        self._transmit(self._build_burst(reply),
+                       header=reply, control=True)
+
+    def _squelch_note(self) -> str:
+        describe = getattr(self.pipe, "describe_squelch", None)
+        if describe is None:
+            return ""
+        try:
+            return f" ({describe()})"
+        except Exception:  # noqa: BLE001 - diagnostics must not fail a transfer
+            return ""

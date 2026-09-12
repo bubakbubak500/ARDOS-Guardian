@@ -55,9 +55,12 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         assert config.operator_name == "Operator"
         assert config.vara_mode == "HF"
         assert config.vara_cmd_port == config.vara_hf_cmd_port
-        # The manual Winlink hand-off was removed in 0.6.26; VARA P2P is
-        # the only transport the picker offers.
-        assert dialog.payload_backend.count() == 1
+        # VARA remains the default while the opt-in SC-FTN transport is
+        # available beside it.
+        assert [
+            dialog.payload_backend.itemData(index)
+            for index in range(dialog.payload_backend.count())
+        ] == ["vara_p2p", "ofdm_vhf"]
         assert config.payload_backend == "vara_p2p"
         assert config.audio_input == "USB Audio CODEC RX"
         assert config.audio_output == "USB Audio CODEC TX"
@@ -74,7 +77,7 @@ def test_network_behaviour_page_owns_the_discovery_limits_and_trust_lists() -> N
     config = StationConfig(callsign="OK7PS")
     dialog = SettingsDialog(config, ThemePreference.SYSTEM)
     try:
-        dialog.discovery_forward.setChecked(True)
+        assert not hasattr(dialog, "discovery_forward")
         dialog.discovery_ttl.setValue(6)
         dialog.discovery_lifetime.setValue(45)
         dialog.discovery_budget.setValue(9)
@@ -225,7 +228,7 @@ def test_separate_working_channels_are_opt_in_and_enable_auto_qsy() -> None:
     try:
         assert not dialog.separate_working_channels.isChecked()
         dialog.separate_working_channels.setChecked(True)
-        assert dialog.auto_qsy.isChecked()
+        assert not hasattr(dialog, "auto_qsy")
         dialog.callsign.setText("OK7PS")
         assert dialog.apply()
         assert config.separate_working_channels is True
@@ -278,6 +281,34 @@ def test_readiness_and_diagnostics_are_non_transmitting(tmp_path) -> None:
     finally:
         diagnostics.close()
         readiness.close()
+        runtime.close()
+
+
+def test_diagnostics_identify_waiting_transfer_without_exporting_contents(monkeypatch) -> None:
+    _application()
+    runtime = ShellRuntime()
+    monkeypatch.setattr(
+        "guardian.qt.diagnostics_dialog.audio_backend_report", lambda: {},
+    )
+    diagnostics = DiagnosticsDialog(runtime)
+    try:
+        net = runtime.operations.net
+        msg = net.send_message(
+            "OK2JLD", "private diagnostic body", msg_id=987654,
+            next_hop="OK2IPW", payload_bytes=b"private attachment bytes",
+        )
+        report = diagnostics.report()["protocol"]
+        entry = next(item for item in report["sessions"] if item["message_id"] == msg.msg_id)
+        assert entry["state"] == "announcing"
+        assert entry["next_hop"] == "OK2IPW"
+        assert entry["destination"] == "OK2JLD"
+        assert entry["payload_bytes"] == len(b"private attachment bytes")
+        assert not report["payload_active"]
+        assert not report["handoff_pending"]
+        assert "private diagnostic body" not in str(report)
+        assert "private attachment bytes" not in str(report)
+    finally:
+        diagnostics.close()
         runtime.close()
 
 

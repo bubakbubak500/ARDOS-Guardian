@@ -469,6 +469,88 @@ def test_experimental_auto_use_delivers_without_operator_approval() -> None:
     assert (route.next_hop, route.source) == ("N1", "rreq")
 
 
+def test_retry_same_mail_after_lost_rrep_uses_fresh_query_and_delivers() -> None:
+    drop_replies = True
+    frames = []
+    bus = GraphRadioBus(
+        {("OK7PS", "OK2IPW"), ("OK2IPW", "OK2JLD")},
+        drop=lambda sender, receiver, frame: (
+            drop_replies and frame.type is FrameType.MULTIHOP_RREP
+        ),
+        monitor=lambda sender, frame: frames.append((sender, frame)),
+    )
+    stations = {}
+    for call in ("OK7PS", "OK2IPW", "OK2JLD"):
+        station = Orchestrator(
+            call, bus.endpoint(call), auto_route=False, auto_complete=True,
+            relay=call == "OK2IPW", discovery_mode=DISCOVERY_ASSISTED,
+            discovery_forward=call == "OK2IPW", discovery_ttl=2,
+            discovery_auto_use=True,
+        )
+        station.discovery.query_timeout = 2
+        station.discovery.settle_time = 0
+        station.discovery.jitter_min = station.discovery.jitter_max = 0
+        stations[call] = station
+
+    sender = stations["OK7PS"]
+    first = sender.send_message("OK2JLD", "retry me", msg_id=270532722)
+    now = 0.0
+    while now <= 5:
+        for station in stations.values():
+            station.tick(now)
+        bus.pump()
+        now += 0.25
+    assert first.state is SessionState.FAILED
+    assert stations["OK2IPW"].discovery.breadcrumbs
+
+    drop_replies = False
+    retry = sender.send_message("OK2JLD", "retry me", msg_id=first.msg_id)
+    while now <= 15 and retry.state is not SessionState.DELIVERED:
+        for station in stations.values():
+            station.tick(now)
+        bus.pump()
+        now += 0.25
+
+    assert retry.state is SessionState.DELIVERED
+    queries = [frame for call, frame in frames
+               if call == "OK7PS" and frame.type is FrameType.MULTIHOP_RREQ]
+    assert len(queries) == 2
+    assert queries[0].message_id != queries[1].message_id
+    assert stations["OK2JLD"].sessions[first.msg_id].state is SessionState.DELIVERED
+
+
+def test_cancelled_mail_stops_its_discovery_but_preserves_manual_query() -> None:
+    bus = GraphRadioBus(set())
+    sender = Orchestrator(
+        "OK7PS", bus.endpoint("OK7PS"), discovery_mode=DISCOVERY_ASSISTED,
+    )
+    manual = sender.discover_route("OK2MTV")
+    message = sender.send_message("OK2JLD", "cancel me", msg_id=270532722)
+    assert message.state is SessionState.MULTIHOP_DISCOVERY
+    assert message.discovery_query_id in sender.discovery.pending
+
+    sender.cancel(message.msg_id, notify=False)
+
+    assert message.state is SessionState.CANCELLED
+    assert list(sender.discovery.pending) == [manual.query_id]
+
+
+def test_failure_from_prior_discovery_cannot_fail_retried_message() -> None:
+    sender = Orchestrator(
+        "OK7PS", GraphRadioBus(set()).endpoint("OK7PS"),
+        discovery_mode=DISCOVERY_ASSISTED,
+    )
+    first = sender.send_message("OK2JLD", "retry me", msg_id=270532722)
+    old_query = sender.discovery.pending[first.discovery_query_id]
+    sender.cancel(first.msg_id, notify=False)
+    retry = sender.send_message("OK2JLD", "retry me", msg_id=first.msg_id)
+
+    sender._on_discovery_failure(old_query, "late old failure")
+
+    assert retry.state is SessionState.MULTIHOP_DISCOVERY
+    assert retry.discovery_query_id in sender.discovery.pending
+
+
 def test_link_advert_flag_off_consumes_frame_without_learning_or_relaying() -> None:
     sent = []
     engine = DiscoveryEngine(
@@ -795,14 +877,106 @@ def test_auto_use_never_activates_routes_while_discovery_is_off() -> None:
     assert route.approved is False
 
 
-def test_two_stations_on_default_settings_find_each_other_and_await_approval() -> None:
-    """The shipped profile has to produce something an operator can verify.
+def test_relay_learned_route_is_usable_for_own_mail_without_another_query() -> None:
+    bus = GraphRadioBus({("S6", "OK7PS"), ("OK7PS", "OK2IPW"),
+                         ("OK2IPW", "OK2JLD")})
+    stations = {
+        call: Orchestrator(
+            call, bus.endpoint(call), relay=True,
+            discovery_mode=DISCOVERY_ASSISTED, discovery_forward=True,
+            discovery_auto_use=True,
+        )
+        for call in ("S6", "OK7PS", "OK2IPW", "OK2JLD")
+    }
+    engines = {call: station.discovery for call, station in stations.items()}
+    for engine in engines.values():
+        engine.jitter_min = engine.jitter_max = engine.settle_time = 0
+        engine.query_timeout = 2
+    stations["S6"].discover_route("OK2JLD")
+    _run(bus, engines, until=10)
 
-    Everything here comes from StationConfig defaults: no experiment enabled,
-    no relay, no automatic use. What the operator should see is a query going
-    out, an answer coming back, and a route sitting in the table waiting for
-    them -- not two silent stations and empty tables.
-    """
+    sender = stations["OK7PS"]
+    sender.tick(10)
+    route = sender.discovery.routes.best("OK2JLD", 10)
+    assert route is not None and route.next_hop == "OK2IPW"
+    message = sender.send_message("OK2JLD", "via IPW", msg_id=7201)
+    assert message.state is SessionState.ANNOUNCING
+    assert message.next_hop == "OK2IPW"
+    assert not sender.discovery.pending
+
+
+def test_enabling_automatic_use_resumes_message_already_waiting_for_approval() -> None:
+    bus = GraphRadioBus({("OK7PS", "OK2IPW"), ("OK2IPW", "OK2JLD")})
+    stations = {
+        call: Orchestrator(
+            call, bus.endpoint(call), relay=True, auto_complete=True,
+            discovery_mode=DISCOVERY_ASSISTED, discovery_forward=True,
+        )
+        for call in ("OK7PS", "OK2IPW", "OK2JLD")
+    }
+    for station in stations.values():
+        station.discovery.jitter_min = station.discovery.jitter_max = 0
+        station.discovery.settle_time = 0
+    sender = stations["OK7PS"]
+    message = sender.send_message("OK2JLD", "automatic", msg_id=7202)
+    for step in range(40):
+        for station in stations.values():
+            station.tick(step * 0.25)
+        bus.pump()
+        if message.state is SessionState.WAITING_ROUTE_APPROVAL:
+            break
+    assert message.state is SessionState.WAITING_ROUTE_APPROVAL
+
+    sender.configure_discovery(auto_use=True)
+    assert message.state is SessionState.ANNOUNCING
+    assert message.next_hop == "OK2IPW"
+    for step in range(40, 160):
+        for station in stations.values():
+            station.tick(step * 0.25)
+        bus.pump()
+        if message.state is SessionState.DELIVERED:
+            break
+    assert message.state is SessionState.DELIVERED
+
+
+def test_live_route_arriving_during_query_starts_first_hop_without_rrep() -> None:
+    frames = []
+    bus = GraphRadioBus(
+        {("OK7PS", "OK2IPW"), ("OK2IPW", "OK2JLD")},
+        drop=lambda sender, receiver, frame: frame.type is FrameType.MULTIHOP_RREP,
+        monitor=lambda sender, frame: frames.append((sender, frame)),
+    )
+    stations = {
+        call: Orchestrator(
+            call, bus.endpoint(call), relay=True, auto_complete=True,
+            discovery_mode=DISCOVERY_ASSISTED, discovery_forward=True,
+            discovery_auto_use=True, link_advert_enabled=True,
+        )
+        for call in ("OK7PS", "OK2IPW", "OK2JLD")
+    }
+    for station in stations.values():
+        station.discovery.jitter_min = station.discovery.jitter_max = 0
+    sender = stations["OK7PS"]
+    message = sender.send_message("OK2JLD", "live route", msg_id=7203)
+    assert message.state is SessionState.MULTIHOP_DISCOVERY
+    for step in range(160):
+        for station in stations.values():
+            station.tick(step * 0.25)
+        bus.pump()
+        if message.state is SessionState.DELIVERED:
+            break
+    assert message.state is SessionState.DELIVERED
+    assert message.next_hop == "OK2IPW"
+    assert message.discovery_query_id not in sender.discovery.pending
+    assert any(
+        call == "OK7PS" and frame.type is FrameType.HAVE_MSG
+        and frame.destination == "OK2JLD" and frame.next_hop == "OK2IPW"
+        for call, frame in frames
+    )
+
+
+def test_two_stations_on_default_settings_find_each_other_and_deliver() -> None:
+    """The shipped profile discovers and delivers over a quiet two-node link."""
     config = StationConfig()
     bus = GraphRadioBus({("S6", "N1")})
     stations = {
@@ -829,22 +1003,17 @@ def test_two_stations_on_default_settings_find_each_other_and_await_approval() -
     assert message.state is SessionState.MULTIHOP_DISCOVERY
 
     now = 0.0
-    approved = False
     while now <= 40 and message.state is not SessionState.DELIVERED:
         for station in stations.values():
             station.tick(now)
         bus.pump()
-        if message.state is SessionState.WAITING_ROUTE_APPROVAL and not approved:
-            route = stations["S6"].approve_discovered_route("N1")
-            assert route is not None
-            assert (route.next_hop, route.hops) == ("N1", 1)
-            approved = True
         now += 0.25
 
-    assert approved is True
     assert message.state is SessionState.DELIVERED
-    # N1 answered a query about itself, which the retired monitor position
-    # could not do -- and it heard S6 while doing so.
+    route = stations["S6"].discovery.routes.best("N1", now, approved_only=True)
+    assert route is not None
+    assert (route.next_hop, route.hops) == ("N1", 1)
+    # N1 answered a query about itself and exchanged a live direct observation.
     assert any(event.kind == "heard-rreq" for event in stations["N1"].discovery.events)
     assert stations["N1"].heard.is_heard("S6", now)
 

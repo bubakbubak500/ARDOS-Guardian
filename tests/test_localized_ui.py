@@ -132,6 +132,10 @@ def test_help_is_detailed_searchable_and_bilingual() -> None:
             "Aktualizace" in dialog.topics.item(index).text()
             for index in range(dialog.topics.count())
         )
+        for query in ("linkadvert", "LINK_ADVERT", "MCS", "MSC", "FEC", "LDPC", "SC-FTN", "Auto Tune", "hledani", "LDPC FEC"):
+            dialog.search.setText(query)
+            assert dialog.topics.count() >= 1, query
+            assert dialog.viewer.toPlainText().strip(), query
     finally:
         dialog.close()
         set_language(Language.ENGLISH)

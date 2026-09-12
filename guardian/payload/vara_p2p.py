@@ -58,6 +58,16 @@ _AIRTIME_MARGIN = 3.0
 # VARA keys the transmitter about once a second while it drains its RF queue,
 # so ten quiet seconds mean it has genuinely stopped sending.
 PTT_QUIET_SECONDS = 10.0
+# A failed first idle wait must never hand the shared soundcard back to the
+# control modem.  Recovery is retried in a daemon worker with a short bounded
+# probe; the completion callback remains withheld until a probe succeeds.
+HANDOFF_RETRY_TIMEOUT = 0.5
+HANDOFF_RETRY_INTERVAL = 0.1
+# A backend without an Operations-owned recovery watcher must not leave a
+# daemon thread polling forever while the RF owner is stuck.  The owner hook
+# can choose a longer, lifecycle-aware budget; this fallback stops after a
+# bounded window and deliberately leaves completion/ownership suspended.
+HANDOFF_RECOVERY_MAX_SECONDS = 30.0
 
 # Only the small manifest is needed to identify a transfer.  Reading it by
 # name avoids expanding message bodies and attachments, while these limits
@@ -101,13 +111,31 @@ def _manifest_callsign(value: object) -> str:
 
 
 def transfer_identity_from_bundle(data: bytes) -> TransferIdentity:
-    """Read only a bounded ``manifest.json`` from a Guardian mail bundle.
+    """Read only a bounded ``manifest.json`` from a mail bundle.
 
-    The payload itself may contain large attachments.  This helper never reads
-    ``body.txt`` or any ``att/`` entry, and rejects a duplicate or oversized
-    manifest before parsing it.  Invalid identity fields are omitted instead
-    of being displayed as though the transfer had a trustworthy origin.
+    Both the ordinary ZIP and the G2XZ1 envelope are supported.  The payload
+    itself may contain large attachments.  This helper never reads ``body.txt``
+    or any ``att/`` entry, and rejects a duplicate or oversized manifest before
+    parsing it.  Invalid identity fields are omitted instead of being displayed
+    as though the transfer had a trustworthy origin.
     """
+    # G2XZ1 is an XZ-wrapped stored ZIP.  Ask the compression module for only
+    # its bounded manifest so this context probe never restores JPEG XL
+    # attachments before the mail decoder gets the payload.
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        try:
+            from ..message.aggressive import MAGIC, read_aggressive_manifest
+
+            if bytes(data).startswith(MAGIC):
+                manifest = read_aggressive_manifest(bytes(data))
+                if not isinstance(manifest, dict):
+                    return TransferIdentity()
+                return TransferIdentity(
+                    source=_manifest_callsign(manifest.get("source")),
+                    destination=_manifest_callsign(manifest.get("final_dest")),
+                )
+        except Exception:  # noqa: BLE001 - identity is best-effort
+            return TransferIdentity()
     try:
         with zipfile.ZipFile(io.BytesIO(data), "r") as bundle:
             manifests = [
@@ -173,7 +201,8 @@ class VaraP2PBackend(PayloadBackend):
     name = "vara_p2p"
 
     def __init__(self, vara=None, on_log=None, on_qsy=None, on_receive_qsy=None,
-                 on_unqsy=None, on_acquire=None, on_release=None):
+                 on_unqsy=None, on_acquire=None, on_release=None,
+                 on_handoff_failed=None):
         self.vara = vara
         self.on_log = on_log or (lambda m: None)
         # Optional QSY hooks receive the session message.  Send and receive are
@@ -188,7 +217,57 @@ class VaraP2PBackend(PayloadBackend):
         # control channel so VARA can own the codec; on_release() reclaims it.
         self.on_acquire = on_acquire
         self.on_release = on_release
+        # Optional integration hook.  It receives a zero-argument continuation
+        # and may arrange a safe idle watcher in the owning Operations layer.
+        # The continuation checks idle again, restores QSY/audio ownership, and
+        # only then invokes the payload completion callback.  Without this hook
+        # the backend supplies its own bounded polling worker.
+        self.on_handoff_failed = on_handoff_failed
         self._transfer_lock = threading.Lock()
+        self._handoff_state_lock = threading.RLock()
+        self._handoff_generation = 0
+        self._handoff_stop = threading.Event()
+        self._closed = False
+        self._handoff_ready = threading.Event()
+        self._handoff_ready.set()
+        self._active_message = None
+
+    def cancel(self, msg) -> None:
+        """Cancel this message without aborting another queued transfer."""
+        with self._handoff_state_lock:
+            # Keep cancellation on the message so it survives a queued worker
+            # or a deferred completion; message ids may be reused on a retry.
+            msg._vara_cancelled = True
+            if self._active_message is msg and self.vara is not None:
+                self.on_log(f"VARA P2P: aborting cancelled payload #{msg.msg_id}")
+                self._safe(self.vara.abort)
+
+    @staticmethod
+    def _check_cancelled(msg) -> None:
+        if getattr(msg, "_vara_cancelled", False):
+            raise RuntimeError("payload cancelled")
+
+    @staticmethod
+    def _completion_for(msg, done: DoneCb) -> DoneCb:
+        def complete(ok: bool) -> None:
+            done(bool(ok and not getattr(msg, "_vara_cancelled", False)))
+        return complete
+
+    def shutdown(self) -> None:
+        """Stop deferred handoff recovery before audio/radio reconfiguration.
+
+        A continuation retained by an Operations watcher is generation-bound:
+        after shutdown it cannot restore or release a newly opened control
+        transport.  Pending payload completion is intentionally withheld; the
+        owning session should cancel its control state as part of teardown.
+        """
+        with self._handoff_state_lock:
+            self._closed = True
+            self._handoff_generation += 1
+            self._handoff_stop.set()
+            self._handoff_ready.set()
+
+    close = shutdown
 
     def _publish_transfer_context(self, context: TransferContext) -> None:
         """Publish identity without coupling the payload layer to Qt."""
@@ -258,6 +337,11 @@ class VaraP2PBackend(PayloadBackend):
         threading.Thread(target=self._send, args=(msg, done), daemon=True).start()
 
     def _send(self, msg, done: DoneCb) -> None:
+        done = self._completion_for(msg, done)
+        # A previous transfer may still be waiting for VARA's final RF tail.
+        # Do not start another native transfer or let it contend for PTT.
+        if not self._await_previous_handoff():
+            return
         if self.vara is None or not self.vara.connected:
             with self._transfer_lock:
                 self._clear_transfer_context()
@@ -265,10 +349,19 @@ class VaraP2PBackend(PayloadBackend):
             done(False)
             return
         success = False
+        handoff_deferred = False
         acquired = False
         link_started = False
         with self._transfer_lock:
+            # A worker may have passed the first event wait while the previous
+            # transfer still held this lock, then that transfer deferred its
+            # handoff. Recheck ownership after acquiring the serialization lock.
+            if not self._await_previous_handoff():
+                return
             try:
+                with self._handoff_state_lock:
+                    self._check_cancelled(msg)
+                    self._active_message = msg
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
@@ -284,13 +377,20 @@ class VaraP2PBackend(PayloadBackend):
                 # LISTEN ON, CONNECT, and warns that either LISTEN ON or
                 # LISTEN OFF "will cause a disconnection if it is received in
                 # the middle of a VARA connection".
-                self.vara.connect_to(msg.next_hop)
-                link_started = True
+                with self._handoff_state_lock:
+                    self._check_cancelled(msg)
+                    self.vara.connect_to(msg.next_hop)
+                    link_started = True
                 if not self.vara.wait_link("CONNECTED", CONNECT_TIMEOUT):
                     self.on_log(f"VARA P2P: link to {msg.next_hop} not established")
                     self._abort_link()
                 else:
+                    self.on_log(
+                        f"VARA P2P: link to {msg.next_hop} established; "
+                        f"preparing payload #{msg.msg_id} for the data port"
+                    )
                     self.vara.wait_data_ready()
+                    self._check_cancelled(msg)
                     raw_payload = msg.payload_bytes is None
                     data = (
                         msg.payload_bytes
@@ -308,6 +408,11 @@ class VaraP2PBackend(PayloadBackend):
                     # this locked session, not a previous one.
                     self._publish_transfer_context(context)
                     envelope = encode_envelope(msg.msg_id, data)
+                    self.on_log(
+                        f"VARA P2P: writing payload #{msg.msg_id} "
+                        f"({len(envelope)} wire bytes) to the data port"
+                    )
+                    self._check_cancelled(msg)
                     self.vara.write_data(envelope)
                     queued = self.vara.state.tx_buffer_bytes
                     self.on_log(
@@ -322,6 +427,7 @@ class VaraP2PBackend(PayloadBackend):
                     airtime = airtime_for(len(envelope), bitrate)
                     closing = disconnect_timeout_for(len(envelope), bitrate)
                     result = self.vara.wait_transfer_complete(transfer_timeout)
+                    self._check_cancelled(msg)
                     if result is TransferResult.DRAINED:
                         self.on_log(
                             f"VARA P2P: payload #{msg.msg_id} RF queue drained; "
@@ -329,6 +435,7 @@ class VaraP2PBackend(PayloadBackend):
                         )
                         self.vara.disconnect_link()
                         if self._wait_closed(closing):
+                            self._check_cancelled(msg)
                             self.on_log(
                                 f"VARA P2P: payload #{msg.msg_id} transmitted "
                                 "and VARA link closed"
@@ -349,11 +456,14 @@ class VaraP2PBackend(PayloadBackend):
                             f"budget {closing:.0f}s)"
                         )
                         self.vara.finish_data_write()
+                        self._check_cancelled(msg)
                         self.vara.disconnect_link()
                         if self._wait_closed(closing):
+                            self._check_cancelled(msg)
                             self.on_log(
-                                f"VARA P2P: payload #{msg.msg_id} completed "
-                                "without buffer-drain confirmation"
+                                f"VARA P2P: link for payload #{msg.msg_id} closed "
+                                "without buffer-drain confirmation; RF delivery "
+                                "is unconfirmed until the peer sends RECEIVED"
                             )
                             success = True
                         elif self._transport_lost():
@@ -382,14 +492,39 @@ class VaraP2PBackend(PayloadBackend):
                 if link_started:
                     self._abort_link()
             finally:
-                if self.on_unqsy:
-                    self._safe(self.on_unqsy)
-                if acquired and self.on_release:
-                    self._safe(self.on_release)
+                # A shared soundcard may be returned to the control modem only
+                # after VARA's final RF tail is quiet.  Calling done() before
+                # this point can queue RECEIVED/CANCEL while the radio is still
+                # keyed by VARA.
+                # Keep the shared control modem suspended while VARA still
+                # owns RF.  In particular, do not QSY or restart its audio
+                # path after a bounded idle wait has failed: those callbacks
+                # may key a second transmitter on top of the native tail.
+                handoff_safe = not acquired or self._wait_control_handoff()
+                if not handoff_safe:
+                    # RF quiet delays the callback, not the result of the
+                    # already completed transfer. Preserve received/sent data.
+                    self._handoff_ready.clear()
+                    handoff_deferred = True
+                    self.on_log(
+                        "VARA P2P: retaining control ownership until the "
+                        "native RF path reports idle"
+                    )
+                else:
+                    if self.on_unqsy:
+                        self._safe(self.on_unqsy)
+                    if acquired and self.on_release:
+                        self._safe(self.on_release)
                 # The UI must never carry the previous route into the next
                 # session.  Clear before done(), which may start another
                 # control exchange synchronously.
                 self._clear_transfer_context()
+                with self._handoff_state_lock:
+                    if self._active_message is msg:
+                        self._active_message = None
+        if handoff_deferred:
+            self._defer_handoff(done, success)
+            return
         # done() may immediately send RECEIVED/CANCEL over AFSK, so it must run
         # only after the shared soundcard has been returned to that modem.
         done(success)
@@ -464,6 +599,111 @@ class VaraP2PBackend(PayloadBackend):
             # A VARA stand-in without the PTT-aware signature.
             return self.vara.wait_link("DISCONNECTED", timeout)
 
+    def _is_closed(self) -> bool:
+        with self._handoff_state_lock:
+            return self._closed
+
+    def _await_previous_handoff(self) -> bool:
+        if not self._handoff_ready.is_set():
+            self.on_log(
+                "VARA P2P: waiting for the previous transfer's RF handoff "
+                "before starting the next payload"
+            )
+        self._handoff_ready.wait()
+        return not self._is_closed()
+
+    def _wait_control_handoff(
+        self, timeout: float = DISCONNECT_TIMEOUT, *, log_failure: bool = True
+    ) -> bool:
+        """Wait until VARA has released RF before control audio resumes."""
+        wait = getattr(self.vara, "wait_radio_idle", None)
+        if wait is None:
+            return True
+        try:
+            if wait(timeout):
+                return True
+        except Exception:  # noqa: BLE001 - a failed handoff must be visible
+            pass
+        if log_failure:
+            self.on_log("VARA P2P: radio did not become idle for control handoff")
+        return False
+
+    def _defer_handoff(self, done: DoneCb, success: bool) -> None:
+        """Finish a failed handoff only after a later idle confirmation.
+
+        ``done(False)`` can make the session send CANCEL immediately.  That is
+        still a control transmission, so reporting failure before releasing the
+        shared soundcard would race VARA's tail.  An Operations owner may take
+        over the watcher through ``on_handoff_failed``; the local worker keeps
+        the same safety property when no owner hook is supplied.
+        """
+        completion_lock = threading.Lock()
+        completed = False
+        with self._handoff_state_lock:
+            generation = self._handoff_generation
+
+        def complete(probe_timeout: float = HANDOFF_RETRY_TIMEOUT) -> bool:
+            nonlocal completed
+            with completion_lock:
+                if completed:
+                    return True
+                with self._handoff_state_lock:
+                    if self._closed or generation != self._handoff_generation:
+                        return False
+                if not self._wait_control_handoff(
+                    max(0.0, float(probe_timeout)), log_failure=False
+                ):
+                    return False
+                # Serialize the final generation check and both ownership
+                # callbacks with shutdown/reconfiguration.  A caller cannot
+                # close and replace the audio transport between this check and
+                # the release of the old one.
+                with self._handoff_state_lock:
+                    if self._closed or generation != self._handoff_generation:
+                        return False
+                    if self.on_unqsy:
+                        self._safe(self.on_unqsy)
+                    if self.on_release:
+                        self._safe(self.on_release)
+                    self._handoff_ready.set()
+                    completed = True
+            done(success)
+            return True
+
+        def poll() -> None:
+            deadline = time.monotonic() + HANDOFF_RECOVERY_MAX_SECONDS
+            while not self._handoff_stop.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.on_log(
+                        "VARA P2P: control handoff recovery budget expired; "
+                        "control ownership remains suspended"
+                    )
+                    return
+                if complete(min(HANDOFF_RETRY_TIMEOUT, remaining)):
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.on_log(
+                        "VARA P2P: control handoff recovery budget expired; "
+                        "control ownership remains suspended"
+                    )
+                    return
+                self._handoff_stop.wait(min(HANDOFF_RETRY_INTERVAL, remaining))
+
+        hook = self.on_handoff_failed
+        if hook is not None:
+            try:
+                hook(complete)
+                return
+            except Exception as exc:  # noqa: BLE001 - retain safe fallback
+                self.on_log(f"VARA P2P handoff recovery hook failed: {exc}")
+        threading.Thread(
+            target=poll,
+            name="vara-handoff-recovery",
+            daemon=True,
+        ).start()
+
     def _abort_link(self) -> None:
         """Stop a failed/stale exchange and briefly await RF release.
 
@@ -491,6 +731,12 @@ class VaraP2PBackend(PayloadBackend):
         threading.Thread(target=self._receive, args=(msg, done), daemon=True).start()
 
     def _receive(self, msg, done: DoneCb) -> None:
+        done = self._completion_for(msg, done)
+        # Serialize a new responder behind any transfer whose RF handoff is
+        # still pending.  Starting control or payload work earlier would race
+        # the same shared PTT owner.
+        if not self._await_previous_handoff():
+            return
         if self.vara is None or not self.vara.connected:
             with self._transfer_lock:
                 self._clear_transfer_context()
@@ -498,10 +744,16 @@ class VaraP2PBackend(PayloadBackend):
             done(False)
             return
         success = False
+        handoff_deferred = False
         acquired = False
         read_before = int(getattr(self.vara.state, "data_bytes_read", 0) or 0)
         with self._transfer_lock:
+            if not self._await_previous_handoff():
+                return
             try:
+                with self._handoff_state_lock:
+                    self._check_cancelled(msg)
+                    self._active_message = msg
                 if self.on_acquire:
                     self.on_acquire()
                     acquired = True
@@ -533,6 +785,7 @@ class VaraP2PBackend(PayloadBackend):
                 if not self.vara.wait_link("CONNECTED", CONNECT_TIMEOUT):
                     self.on_log("VARA P2P: no incoming link")
                 else:
+                    self._check_cancelled(msg)
                     self.on_log("VARA P2P: link established, waiting for data header")
                     started = time.monotonic()
                     deadline = started + TRANSFER_TIMEOUT
@@ -541,6 +794,7 @@ class VaraP2PBackend(PayloadBackend):
                         return max(0.01, deadline - time.monotonic())
 
                     head = self.vara.read_exactly(_HDR.size, remaining())
+                    self._check_cancelled(msg)
                     magic, mid, length = _HDR.unpack(head)
                     if magic != _MAGIC:
                         raise ValueError("bad payload magic")
@@ -556,6 +810,7 @@ class VaraP2PBackend(PayloadBackend):
                         deadline, started + transfer_timeout_for(wire_size)
                     )
                     body = self.vara.read_exactly(length, remaining())
+                    self._check_cancelled(msg)
                     crc_given = _CRC.unpack(
                         self.vara.read_exactly(_CRC.size, remaining())
                     )[0]
@@ -583,6 +838,7 @@ class VaraP2PBackend(PayloadBackend):
                     self.on_log(
                         f"VARA P2P: payload #{mid} received OK ({length} bytes)"
                     )
+                    self._check_cancelled(msg)
                     success = True
             except Exception as exc:  # noqa: BLE001
                 read_now = int(
@@ -610,9 +866,28 @@ class VaraP2PBackend(PayloadBackend):
                         self._abort_link()
                 else:
                     self._abort_link()
-                if self.on_unqsy:
-                    self._safe(self.on_unqsy)
-                if acquired and self.on_release:
-                    self._safe(self.on_release)
+                # A failed idle wait leaves native RF ownership in place.  Do
+                # not let the control modem QSY or restart while that owner
+                # is still keyed; recovery is the integration callback's job
+                # once the handoff becomes safe.
+                handoff_safe = not acquired or self._wait_control_handoff()
+                if not handoff_safe:
+                    self._handoff_ready.clear()
+                    handoff_deferred = True
+                    self.on_log(
+                        "VARA P2P: retaining control ownership until the "
+                        "native RF path reports idle"
+                    )
+                else:
+                    if self.on_unqsy:
+                        self._safe(self.on_unqsy)
+                    if acquired and self.on_release:
+                        self._safe(self.on_release)
                 self._clear_transfer_context()
+                with self._handoff_state_lock:
+                    if self._active_message is msg:
+                        self._active_message = None
+        if handoff_deferred:
+            self._defer_handoff(done, success)
+            return
         done(success)

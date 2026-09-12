@@ -26,11 +26,18 @@ _EST_BYTES_PER_SEC = 250.0
 
 @dataclass(frozen=True)
 class BundleEncoding:
-    """The single Guardian BZIP2 result or its standard ZIP fallback."""
+    """A transferable bundle and the decision made while preparing it.
+
+    ``details`` is intentionally optional so callers that only understand the
+    original G1 ``data``/``method``/``baseline_size`` fields remain valid.  The
+    aggressive encoder uses it for operator diagnostics without putting those
+    details into the on-air manifest.
+    """
 
     data: bytes
     method: str
     baseline_size: int
+    details: tuple[str, ...] = ()
 
     @property
     def saved_bytes(self) -> int:
@@ -189,8 +196,66 @@ class MailMessage:
             baseline_size=len(standard),
         )
 
+    def to_aggressive_bundle(self, baseline: bytes | None = None) -> BundleEncoding:
+        """Build the optional G2XZ1 candidate and keep it only when smaller.
+
+        The ordinary DEFLATE bundle is always available as the fallback.  A
+        missing codec, an optimization error, a size-limit rejection, or the
+        frozen worker timeout therefore cannot prevent sending the message.
+        No peer-version or capability decision belongs here: all current
+        stations are expected to understand the selected envelope.
+        """
+        from .aggressive import encode_aggressive_bounded
+
+        standard = baseline if baseline is not None else self.to_bundle()
+        try:
+            candidate = encode_aggressive_bounded(self)
+        except Exception as exc:
+            # Compression is an optional preparation step.  Keep diagnostics
+            # available to the worker/UI while returning a usable G1 bundle.
+            detail = f"aggressive compression skipped: {type(exc).__name__}: {exc}"
+            return BundleEncoding(
+                data=standard,
+                method="standard",
+                baseline_size=len(standard),
+                details=(detail,),
+            )
+        if len(candidate.data) < len(standard):
+            return BundleEncoding(
+                data=candidate.data,
+                method="xz-lzma2",
+                baseline_size=len(standard),
+                details=candidate.details,
+            )
+        return BundleEncoding(
+            data=standard,
+            method="standard",
+            baseline_size=len(standard),
+            details=candidate.details,
+        )
+
     @classmethod
     def from_bundle(cls, data: bytes) -> "MailMessage":
+        from .aggressive import MAGIC, decode_aggressive
+
+        if data.startswith(MAGIC):
+            decoded = decode_aggressive(data)
+            manifest = decoded["manifest"]
+            attachments = [
+                Attachment(name=safe_attachment_name(name), data=payload)
+                for name, payload in decoded["attachments"]
+            ]
+            return cls(
+                msg_id=int(manifest.get("msg_id", 0)),
+                source=manifest.get("source", ""),
+                final_dest=manifest.get("final_dest", ""),
+                subject=manifest.get("subject", ""),
+                body=str(decoded["body"]),
+                attachments=attachments,
+                priority=int(manifest.get("priority", 0)),
+                created=float(manifest.get("created", 0.0)),
+                hops=list(manifest.get("hops", [])),
+            )
         with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
             manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
             body = zf.read("body.txt").decode("utf-8", errors="replace") if "body.txt" in zf.namelist() else ""
