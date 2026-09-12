@@ -40,8 +40,12 @@ from ..protocol import (
     Priority,
     alert_kind,
     crc16,
+    decode_g2_profile_capable,
+    decode_ofdm_capable,
     decode_ptt_delay,
     encode_alert,
+    encode_g2_profile_capable,
+    encode_ofdm_capable,
     encode_ptt_delay,
 )
 from ..routing import (
@@ -61,6 +65,8 @@ DISCOVERY_TIMEOUT = 8.0
 # Timeouts (seconds). Generous, since HF bursts are slow.
 ACK_TIMEOUT = 8.0
 START_TIMEOUT = 12.0
+MAX_G2_PROFILE_OFFERS = 3
+MAX_RECEIPT_QUERIES = 3
 TRANSFER_TIMEOUT = 180.0
 BUSY_BACKOFF = 20.0
 # A relayed message sits in CONFIRMED until an end-to-end DELIVERED receipt
@@ -187,6 +193,46 @@ def session_transfer_timeout_for(msg: "Message") -> float:
     return max(TRANSFER_TIMEOUT, payload_timeout + _SESSION_MARGIN)
 
 
+def session_transfer_hard_timeout_for(msg: "Message") -> float:
+    """Absolute safety cap while useful ARQ progress keeps extending a session."""
+    timeout = session_transfer_timeout_for(msg)
+    return max(timeout * 4.0, timeout + 10.0 * 60.0)
+
+
+_G2_WAVEFORM_CODE = {"sc_ftn": "T"}
+_G2_BANDWIDTH_CODE = {
+    "1K2": "1", "2K7": "2", "4K5": "4", "5K": "5",
+    "10K": "A", "20K": "B",
+}
+_G2_PROFILE_VERSIONS = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_G2_PROFILE_BANDWIDTH_CODES = frozenset(_G2_BANDWIDTH_CODE.values())
+
+
+def _is_sc_ftn_profile_token(value: str) -> bool:
+    """Return whether *value* is one of this port's exact SC-FTN tokens."""
+    return (
+        len(value) == 4
+        and value[0] == "G"
+        and value[1] in _G2_PROFILE_VERSIONS
+        and value[2] == "T"
+        and value[3] in _G2_PROFILE_BANDWIDTH_CODES
+    )
+
+
+def g2_profile_token(waveform: str, bandwidth: str, policy_version: int) -> str:
+    """Compact, control-frame-safe identity for one production G2 PHY policy."""
+    family = _G2_WAVEFORM_CODE.get(str(waveform).strip().lower())
+    width = _G2_BANDWIDTH_CODE.get(str(bandwidth).strip().upper())
+    try:
+        version = int(policy_version)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("unsupported Guardian G2 profile") from exc
+    if family is None or width is None or not 0 <= version <= 35:
+        raise ValueError("unsupported Guardian G2 profile")
+    digit = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"[version]
+    return f"G{digit}{family}{width}"
+
+
 class SessionState(Enum):
     IDLE = "idle"
     # initiator
@@ -195,14 +241,17 @@ class SessionState(Enum):
     WAITING_ROUTE_APPROVAL = "route-approval"  # assisted result awaits operator
     ANNOUNCING = "announcing"      # sent HAVE_MSG, waiting for ACK
     NEGOTIATING_WORKING = "working"  # both peers prove the same opt-in payload channel
+    NEGOTIATING_PROFILE = "g2-profile"  # exact waveform/width/policy agreement
     WAITING_BUSY = "waiting"       # peer was busy, will retry
-    STARTING_VARA = "starting"     # got ACK, starting VARA session
-    TRANSFERRING = "transferring"  # payload in flight over VARA
+    # The names/values predate negotiated payload transports.  Keep them for
+    # compatibility, but they now describe the selected VARA or OFDM phase.
+    STARTING_VARA = "starting"     # got ACK, starting payload session
+    TRANSFERRING = "transferring"  # negotiated payload in flight
     CONFIRMED = "confirmed"        # next hop confirmed RECEIVED
     # responder
     HEARD = "heard"                # heard a HAVE_MSG addressed to me
     ACKED = "acked"                # acked, waiting for START_VARA
-    RECEIVING = "receiving"        # receiving payload over VARA
+    RECEIVING = "receiving"        # receiving negotiated payload
     RECEIVED_OK = "received"       # payload received, sent RECEIVED
     # terminal (both)
     FORWARDED = "forwarded"        # next relay holds it; final receipt absent
@@ -236,6 +285,14 @@ class Message:
     attempts: int = 0
     tried_backup: bool = False
     t_state: float = 0.0           # monotonic time the state was entered
+    # Payload workers only publish monotonic byte counts.  The session thread
+    # observes them in tick(), refreshes its own clock on real progress, and
+    # retains an independent hard cap against an endless marginal link.
+    payload_progress_bytes: int = 0
+    payload_progress_seen: int = 0
+    transfer_started_at: float = 0.0
+    payload_sent_at: float | None = None
+    receipt_queries: int = 0
     error: str = ""
     offers: list = field(default_factory=list)   # ROUTE_OFFER sources during discovery
     # Exact measurements attached to each received offer: S/N, timestamp and
@@ -251,6 +308,11 @@ class Message:
     # Slow-keying PTT tail (ms) negotiated for the VARA payload phase: the
     # larger of what we and the peer asked for in HAVE_MSG/ACK_HAVE.
     ptt_delay_ms: int = 0
+    # Which transport the payload phase agreed on, for this hop only. Both
+    # stations must independently claim the experimental one or it stays VARA;
+    # see the OFDM_PAYLOAD notes in protocol/frames.py.
+    payload_transport: str = "vara_p2p"
+    g2_profile_token: str = ""
     working_frequency_hz: int = 0
     working_mode: str = ""
     working_token: str = ""
@@ -319,6 +381,7 @@ class Orchestrator:
         # budget cannot survive one exchange on HF.
         self.ack_timeout = ACK_TIMEOUT
         self.start_timeout = START_TIMEOUT
+        self.control_exchange_timeout = 0.0
         self.relay = relay
         self.discovery_channel_active = bool(discovery_channel_active)
         self._clock = clock
@@ -332,9 +395,17 @@ class Orchestrator:
         # asked at call time so a mode change needs no rebuild. The owner sets
         # it only when it applies (VARA FM, operator configured a delay).
         self.ptt_delay_request: Callable[[], int] | None = None
-        # Optional final-destination hook. Control ACK frames are already
-        # queued when it fires, allowing the transport to append a Morse ID.
+        # Optional station-layer hook for the final destination. The control
+        # frames are already queued when this fires, so a real audio transport
+        # can append a regulatory/pro-forma Morse identification after them.
         self.on_final_ack_sent: Callable[[Message], None] | None = None
+        # Whether this station is configured for the experimental OFDM payload
+        # transport, asked at call time so a settings change needs no rebuild.
+        # Left None by an owner that has no such transport, which reads as "no".
+        self.ofdm_payload_request: Callable[[], bool] | None = None
+        # Exact local production profile.  Presence also advertises support for
+        # the explicit offer/ack exchange that prevents mismatched G2 playback.
+        self.g2_profile: Callable[[], str] | None = None
         # This station's Maidenhead locator for the beacon, or "" to keep the
         # position off the air. Asked at beacon time so a change in Settings
         # needs no rebuild.
@@ -346,6 +417,9 @@ class Orchestrator:
         self.working_channel_accept: Callable[
             [str, str], tuple[int, str] | None
         ] | None = None
+        # Station-lab frames are directed and isolated from normal message
+        # state. Operations owns their explicit operator-consent workflow.
+        self.on_calibration_frame: Callable[[ControlFrame], None] | None = None
         # Optional persistence bridge: after a restart Operations can recover
         # the reverse hop from the stored mail history and mark it delivered.
         self.delivery_receipt_route: Callable[[int, str], str] | None = None
@@ -357,7 +431,7 @@ class Orchestrator:
         self._alert_queue: list[tuple[float, ControlFrame]] = []
         self._alert_counter = 0
         self.sessions: dict[int, Message] = {}
-        self._now = 0.0  # last tick time, used when reacting to frames
+        self._now = self._clock() if self._clock is not None else 0.0
         self.on_discovery_event: Callable[[DiscoveryEvent], None] | None = None
         self.discovery = DiscoveryEngine(
             self.callsign,
@@ -395,10 +469,22 @@ class Orchestrator:
         """Originate (or relay) a message toward final_dest."""
         final_dest = final_dest.strip().upper()
         own_delay = self._own_ptt_delay()
+        local_profile = self._own_g2_profile()
         msg = Message(
             msg_id=msg_id, source=self.callsign, final_dest=final_dest,
             next_hop="", priority=priority, ttl=ttl,
-            flags=encode_ptt_delay(flags, own_delay),
+            flags=encode_g2_profile_capable(
+                encode_ofdm_capable(
+                    encode_ptt_delay(flags, own_delay),
+                    # This SC-only port never advertises the ambiguous legacy
+                    # one-bit OFDM claim.  A valid local token is advertised
+                    # through the explicit profile bit below; without one,
+                    # this hop remains VARA even if an old callback says
+                    # "OFDM capable".
+                    False,
+                ),
+                local_profile is not None,
+            ),
             body=body, payload_bytes=payload_bytes, direction="out",
         )
         msg.ptt_delay_ms = own_delay
@@ -430,6 +516,24 @@ class Orchestrator:
             return max(0, int(self.ptt_delay_request()))
         except Exception:       # noqa: BLE001 - a config fault must not stop mail
             return 0
+
+    def _own_ofdm_capable(self) -> bool:
+        """Whether this station is configured for the OFDM payload transport."""
+        # SC-FTN is selected only by the explicit profile exchange.  A legacy
+        # one-bit OFDM claim is ambiguous (it may describe an OFDM peer), so a
+        # station without a valid local SC token must stay on VARA.
+        return self._own_g2_profile() is not None
+
+    def _own_g2_profile(self) -> str | None:
+        if self.ofdm_payload_request is None or self.g2_profile is None:
+            return None
+        try:
+            if not bool(self.ofdm_payload_request()):
+                return None
+            token = str(self.g2_profile()).strip().upper()
+            return token if _is_sc_ftn_profile_token(token) else None
+        except Exception:  # noqa: BLE001 - configuration failure means no capability
+            return None
 
     def _resolve_next_hop(
         self,
@@ -569,10 +673,13 @@ class Orchestrator:
             return ""
         return locator[: beacon_locator_room(self.callsign)]
 
-    def cancel(self, msg_id: int) -> None:
+    def cancel(self, msg_id: int, *, notify: bool = True) -> None:
         msg = self.sessions.get(msg_id)
+        if msg and self.payload is not None:
+            self.payload.cancel(msg)
         if msg and not msg.state.terminal:
-            self._send(FrameType.CANCEL, msg)
+            if notify:
+                self._send(FrameType.CANCEL, msg)
             self._enter(msg, SessionState.CANCELLED)
             self._emit(msg, "cancelled by operator")
 
@@ -622,7 +729,7 @@ class Orchestrator:
     def notify_payload_delivered(self, msg_id: int, ok: bool = True) -> None:
         """Called (by VARA layer or sim) when an inbound payload finished."""
         msg = self.sessions.get(msg_id)
-        if not msg or msg.direction != "in":
+        if not msg or msg.direction != "in" or msg.state.terminal:
             return
         if not ok:
             self._send(FrameType.CANCEL, msg)
@@ -654,13 +761,21 @@ class Orchestrator:
             return
         inbound.relayed = True
         own_delay = self._own_ptt_delay()
+        local_profile = self._own_g2_profile()
         relay = Message(
             msg_id=inbound.msg_id, source=self.callsign,
             final_dest=inbound.final_dest, next_hop="",
             priority=inbound.priority, ttl=inbound.ttl - 1,
             # The delay negotiated on the previous hop belongs to that pair of
-            # radios; the next leg starts over from our own request.
-            flags=encode_ptt_delay(inbound.flags, own_delay),
+            # radios, and so does the transport they settled on; the next leg
+            # starts over from our own configuration.
+            flags=encode_g2_profile_capable(
+                encode_ofdm_capable(
+                    encode_ptt_delay(inbound.flags, own_delay),
+                    local_profile is not None,
+                ),
+                local_profile is not None,
+            ),
             body=inbound.body,
             payload_bytes=inbound.payload_bytes, direction="out",
             previous_hop=inbound.source,
@@ -684,6 +799,9 @@ class Orchestrator:
     def _on_send_done(self, msg: Message, ok: bool) -> None:
         """Initiator payload-send result. End-to-end confirm still via RECEIVED."""
         if ok:
+            if msg.state is SessionState.TRANSFERRING:
+                msg.payload_sent_at = self._now
+                msg.receipt_queries = 0
             self._emit(msg, "payload sent — awaiting RECEIVED")
             return
         # Only abort if we're still mid-transfer; a peer RECEIVED may have
@@ -713,6 +831,11 @@ class Orchestrator:
         for msg in list(self.sessions.values()):
             if msg.state.terminal:
                 continue
+            if msg.state in {SessionState.TRANSFERRING, SessionState.RECEIVING}:
+                progress = max(0, int(msg.payload_progress_bytes))
+                if progress > msg.payload_progress_seen:
+                    msg.payload_progress_seen = progress
+                    msg.t_state = now
             elapsed = now - msg.t_state
             if msg.state is SessionState.ANNOUNCING and elapsed > self.ack_timeout:
                 self._announce_timeout(msg)
@@ -723,21 +846,36 @@ class Orchestrator:
                 self._emit(msg, "retrying after busy")
             elif msg.state is SessionState.STARTING_VARA and elapsed > self.start_timeout:
                 self._fail(msg, "VARA did not start in time")
-            elif (
-                msg.state is SessionState.TRANSFERRING
-                and elapsed > session_transfer_timeout_for(msg)
-            ):
-                self._fail(msg, "no RECEIVED before transfer timeout")
-            elif msg.state is SessionState.ACKED and elapsed > self.start_timeout:
-                self._fail(msg, "initiator never sent START_VARA")
             elif msg.state is SessionState.RECEIVING and self.auto_complete:
-                # Simulation: pretend the VARA payload has now arrived.
+                # Simulation: pretend the negotiated payload has now arrived.
                 self.notify_payload_delivered(msg.msg_id, ok=True)
+            elif msg.state in {SessionState.TRANSFERRING, SessionState.RECEIVING}:
+                if msg.direction == "out" and msg.payload_sent_at is not None:
+                    if now - msg.payload_sent_at > max(self.ack_timeout, self.control_exchange_timeout):
+                        if msg.receipt_queries >= MAX_RECEIPT_QUERIES:
+                            self._fail(msg, "payload sent but delivery confirmation did not arrive")
+                        else:
+                            msg.receipt_queries += 1
+                            msg.payload_sent_at = now
+                            self._send(FrameType.HAVE_MSG, msg)
+                            self._emit(msg, "requesting confirmation of the completed payload")
+                    continue
+                hard_elapsed = now - msg.transfer_started_at
+                if hard_elapsed > session_transfer_hard_timeout_for(msg):
+                    self._fail(msg, "payload transfer exceeded the absolute safety limit")
+                elif elapsed > session_transfer_timeout_for(msg):
+                    self._fail(msg, "payload made no progress before transfer timeout")
+            elif msg.state is SessionState.ACKED and elapsed > max(
+                self.start_timeout,
+                (MAX_G2_PROFILE_OFFERS + 1) * self.control_exchange_timeout,
+            ):
+                self._fail(msg, "initiator never sent START_VARA")
             elif msg.state is SessionState.ROUTE_DISCOVERY and elapsed > DISCOVERY_TIMEOUT:
                 self._discovery_timeout(msg)
             elif (
                 msg.state is SessionState.NEGOTIATING_WORKING
-                and elapsed > self.start_timeout / MAX_WORKING_OFFERS
+                and elapsed > max(self.start_timeout / MAX_WORKING_OFFERS,
+                                  self.control_exchange_timeout)
             ):
                 if msg.attempts < MAX_WORKING_OFFERS:
                     msg.attempts += 1
@@ -746,6 +884,26 @@ class Orchestrator:
                     self._emit(msg, "retrying working-channel agreement")
                 else:
                     self._fail(msg, "working-channel agreement timed out")
+            elif (
+                msg.state is SessionState.NEGOTIATING_PROFILE
+                # Each attempt must contain a whole offer/reply exchange.
+                # Dividing the airtime budget keys a retry over the reply.
+                and elapsed > max(
+                    self.start_timeout / (MAX_G2_PROFILE_OFFERS + 1),
+                    self.control_exchange_timeout,
+                )
+            ):
+                if msg.attempts < MAX_G2_PROFILE_OFFERS:
+                    msg.attempts += 1
+                    msg.t_state = now
+                    self._send_g2_profile(FrameType.G2_PROFILE_OFFER, msg)
+                    self._emit(msg, "retrying Guardian G2 profile agreement")
+                else:
+                    # Both peers already advertised the new profile protocol.
+                    # Silently changing transport after that ACK would make the
+                    # responder play G2 while we start VARA, so fail visibly.
+                    self._send(FrameType.CANCEL, msg)
+                    self._fail(msg, "Guardian G2 profile agreement timed out")
             elif msg.state is SessionState.CONFIRMED and elapsed > CONFIRM_TIMEOUT:
                 self._enter(msg, SessionState.FORWARDED)
                 self._emit(
@@ -838,6 +996,15 @@ class Orchestrator:
             return None
 
     def _dispatch(self, frame: ControlFrame) -> None:
+        if frame.type in {
+            FrameType.CAL_OFFER, FrameType.CAL_ACCEPT, FrameType.CAL_BUSY,
+            FrameType.CAL_CANCEL, FrameType.CAL_DONE, FrameType.CAL_PROBE,
+            FrameType.CAL_REPORT,
+        }:
+            if (frame.destination.strip().upper() == self.callsign
+                    and self.on_calibration_frame is not None):
+                self.on_calibration_frame(frame)
+            return
         handler = {
             FrameType.HAVE_MSG: self._rx_have_msg,
             FrameType.ACK_HAVE: self._rx_ack,
@@ -846,6 +1013,8 @@ class Orchestrator:
             FrameType.ROUTE_OFFER: self._rx_route_offer,
             FrameType.WORKING_OFFER: self._rx_working_offer,
             FrameType.WORKING_ACK: self._rx_working_ack,
+            FrameType.G2_PROFILE_OFFER: self._rx_g2_profile_offer,
+            FrameType.G2_PROFILE_ACK: self._rx_g2_profile_ack,
             FrameType.START_VARA: self._rx_start,
             FrameType.RECEIVED: self._rx_received,
             FrameType.DELIVERED: self._rx_delivered,
@@ -854,6 +1023,24 @@ class Orchestrator:
         }.get(frame.type)
         if handler:
             handler(frame)
+
+    def send_calibration_frame(
+        self, kind: FrameType, peer: str, session_id: int, token: str = "",
+    ) -> ControlFrame:
+        """Queue one direct station-lab frame without creating a mail session."""
+        if kind not in {
+            FrameType.CAL_OFFER, FrameType.CAL_ACCEPT, FrameType.CAL_BUSY,
+            FrameType.CAL_CANCEL, FrameType.CAL_DONE, FrameType.CAL_PROBE,
+            FrameType.CAL_REPORT,
+        }:
+            raise ValueError("not a calibration frame type")
+        frame = ControlFrame(
+            type=kind, source=self.callsign,
+            destination=peer.strip().upper(), next_hop=str(token),
+            message_id=int(session_id) & 0xFFFFFFFF, ttl=1,
+        )
+        self.transport.send(frame)
+        return frame
 
     # ------------------------------------------------------------------ #
     #  Alerts (net-wide broadcast, flooded)                               #
@@ -997,6 +1184,17 @@ class Orchestrator:
         if not addressed:
             return  # someone else's announcement; just ignore (could log "heard")
         existing = self.sessions.get(f.message_id)
+        if (existing and existing.direction == "in"
+                and existing.source == f.source and existing.final_dest == f.destination
+                and existing.state in {SessionState.RECEIVED_OK, SessionState.DELIVERED}):
+            # A sender that finished DATA but lost the receipts asks again with
+            # the original announcement. Preserve the completed session and
+            # storage; only repeat confirmation, never request the payload again.
+            self._send(FrameType.RECEIVED, existing)
+            if existing.state is SessionState.DELIVERED:
+                self._send_delivery_receipt(existing, existing.source)
+            self._emit(existing, f"re-confirmed completed payload to {f.source}")
+            return
         if existing and not existing.state.terminal:
             # A repeated announcement means the initiator did not hear our
             # answer. Staying silent used to strand both sides: they burn
@@ -1010,13 +1208,29 @@ class Orchestrator:
         # two requests, and our ACK carries the result back so both stations
         # key with the same hold-off.
         negotiated = max(decode_ptt_delay(f.flags), self._own_ptt_delay())
+        # Transport negotiation is an AND, not a max: the experimental modem is
+        # used only if this station is configured for it *and* the peer said it is
+        # too. Either side alone leaves the pair on VARA, so a station can never
+        # be played OFDM while it is listening for VARA.
+        local_profile = self._own_g2_profile()
+        agreed_ofdm = (
+            decode_g2_profile_capable(f.flags)
+            and self._own_ofdm_capable()
+            and local_profile is not None
+        )
         msg = Message(
             msg_id=f.message_id, source=f.source, final_dest=f.destination,
             next_hop=self.callsign, priority=f.priority, ttl=f.ttl,
-            flags=encode_ptt_delay(f.flags, negotiated),
+            flags=encode_g2_profile_capable(
+                encode_ofdm_capable(
+                    encode_ptt_delay(f.flags, negotiated), agreed_ofdm
+                ),
+                agreed_ofdm,
+            ),
             direction="in",
         )
         msg.ptt_delay_ms = negotiated
+        msg.payload_transport = "ofdm_vhf" if agreed_ofdm else "vara_p2p"
         self.sessions[f.message_id] = msg
         self._enter(msg, SessionState.HEARD)
         if self.busy:
@@ -1033,6 +1247,22 @@ class Orchestrator:
             # The responder answered with the negotiated hold-off (the larger
             # of the two requests); adopt it for our own keying too.
             msg.ptt_delay_ms = max(msg.ptt_delay_ms, decode_ptt_delay(f.flags))
+            # The responder only echoes the OFDM bit back if it is configured
+            # that way itself, so seeing it here means both sides agreed. Our own
+            # configuration is checked again rather than assumed from the
+            # announcement: settings can have changed since it went out.
+            agreed_ofdm = (
+                decode_ofdm_capable(f.flags)
+                and decode_g2_profile_capable(f.flags)
+                and self._own_g2_profile() is not None
+            )
+            msg.payload_transport = "ofdm_vhf" if agreed_ofdm else "vara_p2p"
+            if not agreed_ofdm and self._own_ofdm_capable():
+                self._emit(
+                    msg,
+                    f"{f.source} is not configured for Guardian OFDM VHF — "
+                    "falling back to VARA for this transfer",
+                )
             channel = None
             if self.working_channel_offer is not None:
                 try:
@@ -1058,17 +1288,49 @@ class Orchestrator:
                     f"{channel[1]}",
                 )
                 return
-            self._start_vara(msg, f.source)
+            self._negotiate_g2_profile_or_start(msg, f.source)
 
-    def _start_vara(self, msg: Message, peer: str) -> None:
+    @staticmethod
+    def _payload_label(msg: Message) -> str:
+        """Operator-facing name of the transport negotiated for this hop."""
+        return "OFDM VHF" if msg.payload_transport == "ofdm_vhf" else "VARA"
+
+    def _start_payload(self, msg: Message, peer: str) -> None:
         self._enter(msg, SessionState.STARTING_VARA)
         self._send(FrameType.START_VARA, msg)
-        self._emit(msg, f"{peer} ready — starting VARA")
+        self._emit(msg, f"{peer} ready — starting {self._payload_label(msg)}")
         self._enter(msg, SessionState.TRANSFERRING)
         if self.begin_transfer:
             self.begin_transfer(msg)
         if self.payload is not None:
             self.payload.start_send(msg, lambda ok, m=msg: self._on_send_done(m, ok))
+
+    def _negotiate_g2_profile_or_start(self, msg: Message, peer: str) -> None:
+        if msg.payload_transport != "ofdm_vhf":
+            self._start_payload(msg, peer)
+            return
+        token = self._own_g2_profile()
+        if token is None:
+            msg.payload_transport = "vara_p2p"
+            self._start_payload(msg, peer)
+            return
+        msg.g2_profile_token = token
+        msg.attempts = 1
+        self._enter(msg, SessionState.NEGOTIATING_PROFILE)
+        self._send_g2_profile(FrameType.G2_PROFILE_OFFER, msg)
+        self._emit(msg, f"proposing Guardian G2 profile {token}")
+
+    def _send_g2_profile(self, kind: FrameType, msg: Message) -> None:
+        self.transport.send(ControlFrame(
+            type=kind,
+            source=self.callsign,
+            destination=msg.g2_profile_token or "=",
+            next_hop=msg.next_hop if kind is FrameType.G2_PROFILE_OFFER else msg.source,
+            message_id=msg.msg_id,
+            priority=msg.priority,
+            ttl=msg.ttl,
+            flags=msg.flags,
+        ))
 
     def _send_working(self, kind: FrameType, msg: Message) -> None:
         self.transport.send(
@@ -1146,7 +1408,36 @@ class Orchestrator:
             )
         elif f.destination != msg.working_token:
             return
-        self._start_vara(msg, f.source)
+        self._negotiate_g2_profile_or_start(msg, f.source)
+
+    def _rx_g2_profile_offer(self, f: ControlFrame) -> None:
+        msg = self._mine(f, "in")
+        if not (
+            msg and msg.state is SessionState.ACKED
+            and f.source == msg.source and f.next_hop == self.callsign
+        ):
+            return
+        local = self._own_g2_profile()
+        if msg.payload_transport == "ofdm_vhf" and local == f.destination:
+            msg.g2_profile_token = local or ""
+        else:
+            msg.payload_transport = "vara_p2p"
+            msg.g2_profile_token = "="
+        msg.t_state = self._now
+        self._send_g2_profile(FrameType.G2_PROFILE_ACK, msg)
+
+    def _rx_g2_profile_ack(self, f: ControlFrame) -> None:
+        msg = self._mine(f, "out")
+        if not (
+            msg and msg.state is SessionState.NEGOTIATING_PROFILE
+            and f.source == msg.next_hop and f.next_hop == self.callsign
+        ):
+            return
+        if f.destination != msg.g2_profile_token:
+            msg.payload_transport = "vara_p2p"
+            msg.g2_profile_token = ""
+            self._emit(msg, "Guardian G2 profile differs; falling back to VARA")
+        self._start_payload(msg, f.source)
 
     def _rx_busy(self, f: ControlFrame) -> None:
         msg = self._mine(f, "out")
@@ -1158,7 +1449,7 @@ class Orchestrator:
         msg = self._mine(f, "in")
         if msg and msg.state is SessionState.ACKED:
             self._enter(msg, SessionState.RECEIVING)
-            self._emit(msg, "receiving payload over VARA")
+            self._emit(msg, f"receiving payload over {self._payload_label(msg)}")
             if self.payload is not None:
                 self.payload.start_receive(
                     msg, lambda ok, m=msg: self.notify_payload_delivered(m.msg_id, ok))
@@ -1231,6 +1522,8 @@ class Orchestrator:
     def _rx_cancel(self, f: ControlFrame) -> None:
         msg = self.sessions.get(f.message_id)
         if msg and not msg.state.terminal:
+            if self.payload is not None:
+                self.payload.cancel(msg)
             self._enter(msg, SessionState.CANCELLED)
             self._emit(msg, f"cancelled by {f.source}")
 
@@ -1281,8 +1574,14 @@ class Orchestrator:
         return None
 
     def _enter(self, msg: Message, state: SessionState) -> None:
+        if self._clock is not None:
+            self._now = self._clock()
         msg.state = state
         msg.t_state = self._now
+        if state in {SessionState.TRANSFERRING, SessionState.RECEIVING}:
+            msg.payload_progress_bytes = 0
+            msg.payload_progress_seen = 0
+            msg.transfer_started_at = self._now
 
     def _fail(self, msg: Message, reason: str) -> None:
         msg.error = reason

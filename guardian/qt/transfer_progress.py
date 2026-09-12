@@ -1,10 +1,10 @@
-"""A segmented meter for the VARA payload currently on the air.
+"""A segmented meter for the negotiated payload currently on the air.
 
 VARA reports two numbers Guardian already carries in its snapshot: how many
 bytes were handed to the modem for this transfer, and how many are still
-sitting in its RF queue. The difference is what has actually been transmitted,
-which is the only honest progress an HF/VHF link can offer -- there is no
-per-byte acknowledgement to count.
+sitting in its RF queue. SC-FTN reports acknowledged bytes and live ARQ
+measurements through the same small state object. Route identity remains common
+to both transports.
 
 The meter is deliberately segmented rather than a smooth bar. On a 566 bps
 unregistered link a 256-byte envelope takes the better part of a minute, and a
@@ -36,7 +36,23 @@ class TransferState:
     active: bool = False
     sent_bytes: int = 0
     total_bytes: int = 0
+    transport: str = "vara"
     direction: str = "send"
+    profile: str = ""
+    mcs: int | None = None
+    fec: str = ""
+    burst_bytes: int = 0
+    arq_block_bytes: int = 0
+    retries: int = 0
+    retransmitted_bytes: int = 0
+    snr_db: float | None = None
+    evm_rms: float | None = None
+    channel_goodput_bps: float | None = None
+    phy_payload_bps: float | None = None
+    keyed_duty_cycle: float | None = None
+    ptt_cycles: int = 0
+    last_burst_blocks: int = 0
+    last_first_pass_ok: int = 0
     goodput_bps: float | None = None
     # `source` is the original station when known.  For an inbound relayed
     # payload it stays empty until the bundle manifest has been read; `via`
@@ -52,7 +68,7 @@ class TransferState:
         return max(0.0, min(1.0, self.sent_bytes / self.total_bytes))
 
 
-def transfer_state(snapshot, payload_active: bool) -> TransferState:
+def transfer_state(snapshot, payload_active: bool, sc_status=None) -> TransferState:
     """Read a transfer state out of an application snapshot.
 
     ``data_bytes_written`` is reset by prepare_data_transfer(), so it is the
@@ -61,9 +77,79 @@ def transfer_state(snapshot, payload_active: bool) -> TransferState:
     "queued, nothing confirmed on the air yet", so it reports zero sent rather
     than guessing.
     """
-    vara = snapshot.vara
     if not payload_active:
         return TransferState()
+    vara = snapshot.vara
+    # Operations exposes the active SC-FTN status through the negotiated
+    # payload contract. The caller passes ``None`` for VARA, so an idle SC
+    # backend can never hide a live VARA transfer.
+    if sc_status is not None:
+        state = str(getattr(sc_status, "state", "idle") or "idle").lower()
+        if state != "idle":
+            total = int(getattr(sc_status, "total_bytes", 0) or 0)
+            tx_bytes = int(getattr(sc_status, "tx_bytes", 0) or 0)
+            rx_bytes = int(getattr(sc_status, "rx_bytes", 0) or 0)
+            moved = max(tx_bytes, rx_bytes)
+            direction = str(getattr(sc_status, "direction", "") or "")
+            if direction not in {"send", "receive"}:
+                direction = "receive" if rx_bytes > tx_bytes else "send"
+            airtime = float(
+                getattr(sc_status, "data_airtime_seconds", 0.0) or 0.0
+            )
+            return TransferState(
+                active=True,
+                sent_bytes=max(0, min(total, moved)),
+                total_bytes=total,
+                transport="sc_ftn",
+                direction=direction,
+                profile=str(getattr(sc_status, "profile", "") or ""),
+                mcs=(
+                    int(getattr(sc_status, "mcs"))
+                    if getattr(sc_status, "mcs", None) is not None
+                    else None
+                ),
+                fec=str(getattr(sc_status, "fec", "") or ""),
+                burst_bytes=int(getattr(sc_status, "burst_bytes", 0) or 0),
+                arq_block_bytes=int(
+                    getattr(sc_status, "arq_block_bytes", 0) or 0
+                ),
+                retries=int(getattr(sc_status, "retries", 0) or 0),
+                retransmitted_bytes=int(
+                    getattr(sc_status, "retransmitted_bytes", 0) or 0
+                ),
+                snr_db=getattr(sc_status, "snr_db", None),
+                evm_rms=getattr(sc_status, "evm_rms", None),
+                goodput_bps=(
+                    getattr(sc_status, "goodput_bps", None)
+                    if getattr(sc_status, "goodput_bps", None) is not None
+                    else getattr(sc_status, "est_bitrate_bps", None)
+                ),
+                channel_goodput_bps=getattr(
+                    sc_status, "est_bitrate_bps", None
+                ),
+                phy_payload_bps=(
+                    moved * 8.0 / airtime if moved and airtime > 0.0 else None
+                ),
+                keyed_duty_cycle=getattr(
+                    sc_status, "keyed_duty_cycle", None
+                ),
+                ptt_cycles=int(getattr(sc_status, "ptt_cycles", 0) or 0),
+                last_burst_blocks=int(
+                    getattr(sc_status, "last_burst_blocks", 0) or 0
+                ),
+                last_first_pass_ok=int(
+                    getattr(sc_status, "last_first_pass_ok", 0) or 0
+                ),
+                source=str(
+                    getattr(sc_status, "transfer_source", "") or ""
+                ).strip(),
+                destination=str(
+                    getattr(sc_status, "transfer_destination", "") or ""
+                ).strip(),
+                via=str(
+                    getattr(sc_status, "transfer_via", "") or ""
+                ).strip(),
+            )
     direction = str(getattr(vara, "transfer_direction", "") or "")
     if direction == "receive":
         total = int(getattr(vara, "rx_transfer_total", 0) or 0)
@@ -72,6 +158,7 @@ def transfer_state(snapshot, payload_active: bool) -> TransferState:
             active=True,
             sent_bytes=max(0, min(total, received)),
             total_bytes=total,
+            transport="vara",
             direction="receive",
             goodput_bps=getattr(vara, "tx_bitrate_bps", None),
             source=str(getattr(vara, "transfer_source", "") or "").strip(),
@@ -89,6 +176,7 @@ def transfer_state(snapshot, payload_active: bool) -> TransferState:
         active=True,
         sent_bytes=sent,
         total_bytes=total,
+        transport="vara",
         direction="send",
         goodput_bps=getattr(vara, "tx_bitrate_bps", None),
         source=str(getattr(vara, "transfer_source", "") or "").strip(),
@@ -210,12 +298,13 @@ class TransferPanel(QWidget):
             self.bar.set_fraction(0.0)
             self.detail.clear()
             return
+        transport = "SC-FTN" if state.transport == "sc_ftn" else "VARA"
         self.title.setText(
             tr(
                 "transfer.title_receive"
                 if state.direction == "receive"
                 else "transfer.title_send",
-                transport="VARA",
+                transport=transport,
             )
         )
         self.bar.set_fraction(state.fraction)
@@ -244,4 +333,44 @@ class TransferPanel(QWidget):
             )
             if line
         ]
+        if state.transport == "sc_ftn":
+            details: list[str] = []
+            if state.profile:
+                details.append(state.profile)
+            if state.mcs is not None:
+                details.append(f"MCS{state.mcs}")
+            if state.fec:
+                details.append(f"FEC {state.fec}")
+            if state.burst_bytes:
+                details.append(f"burst {state.burst_bytes} B")
+            if state.arq_block_bytes:
+                details.append(f"ARQ {state.arq_block_bytes} B")
+            if state.last_burst_blocks:
+                details.append(
+                    f"first pass {state.last_first_pass_ok}/{state.last_burst_blocks}"
+                )
+            details.append(
+                f"{state.retries} retries / {state.retransmitted_bytes} B"
+            )
+            if details:
+                lines.append(" · ".join(details))
+            quality: list[str] = []
+            if state.snr_db is not None:
+                quality.append(f"SNR {float(state.snr_db):.1f} dB")
+            if state.evm_rms is not None:
+                quality.append(f"EVM {float(state.evm_rms) * 100:.1f}%")
+            if state.channel_goodput_bps is not None:
+                quality.append(
+                    f"channel {state.channel_goodput_bps:.0f} bit/s"
+                )
+            if state.phy_payload_bps is not None:
+                quality.append(f"PHY {state.phy_payload_bps:.0f} bit/s")
+            if state.keyed_duty_cycle is not None:
+                quality.append(
+                    f"TX duty {state.keyed_duty_cycle * 100:.0f}%"
+                )
+            if state.ptt_cycles:
+                quality.append(f"PTT {state.ptt_cycles}")
+            if quality:
+                lines.append(" · ".join(quality))
         self.detail.setText("\n".join(lines))

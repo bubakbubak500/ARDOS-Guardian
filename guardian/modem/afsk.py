@@ -27,6 +27,8 @@ LEGACY_SYNC = bytes((0x2D, 0xD4))
 FEC_SYNC = bytes((0x69, 0x96, 0xC3, 0x3C))
 SYNC = LEGACY_SYNC  # compatibility for callers importing the old name
 FEC_REPETITIONS = 3
+# Short acquisition for ordinary links. Lost cold-start frames are retried by
+# the session instead of charging every successful exchange an 853 ms leader.
 PREAMBLE = b"\x55" * 24
 POSTAMBLE_BITS = 32  # keep the radio modulator settled through the USB/PTT tail
 ACQUISITION_PREAMBLE_BITS = 32
@@ -60,11 +62,13 @@ class AFSKModem:
         self.space = space
         self.baud = baud
         self.sps = self.fs / self.baud  # samples per symbol (may be fractional)
+        self.received_preamble_bytes: dict[bytes, float] = {}
+        self._candidate_preambles: dict[tuple[float, float, bytes], float] = {}
 
-    def airtime(self, payload_bytes: int) -> float:
+    def airtime(self, payload_bytes: int, *, preamble_bytes: int | None = None) -> float:
         """Seconds on air for a frame of this payload size."""
         frame_bytes = (
-            len(PREAMBLE)
+            (len(PREAMBLE) if preamble_bytes is None else preamble_bytes)
             + len(FEC_SYNC)
             + (1 + payload_bytes) * FEC_REPETITIONS
         )
@@ -73,11 +77,18 @@ class AFSKModem:
     # ------------------------------------------------------------------ #
     #  Transmit                                                           #
     # ------------------------------------------------------------------ #
-    def modulate(self, payload: bytes, amplitude: float = 0.4) -> np.ndarray:
+    def retry_airtime(self, payload_bytes: int) -> float:
+        return self.airtime(payload_bytes, preamble_bytes=128)
+
+    def modulate_retry(self, payload: bytes) -> np.ndarray:
+        return self.modulate(payload, preamble_bytes=128)
+
+    def modulate(self, payload: bytes, amplitude: float = 0.4, *,
+                 preamble_bytes: int | None = None) -> np.ndarray:
         if len(payload) > 255:
             raise ValueError("control payload must be <= 255 bytes")
         frame = (
-            PREAMBLE
+            (PREAMBLE if preamble_bytes is None else b"\x55" * preamble_bytes)
             + FEC_SYNC
             + bytes((len(payload),)) * FEC_REPETITIONS
             + payload * FEC_REPETITIONS
@@ -163,6 +174,10 @@ class AFSKModem:
                 )
             selected.append(chosen)
         selected.sort(key=lambda item: item[1])
+        self.received_preamble_bytes = {
+            payload: self._candidate_preambles.get((score, position, payload), 24.0)
+            for score, position, payload in selected
+        }
         return [payload for _score, _position, payload in selected]
 
     def demodulate(
@@ -179,6 +194,8 @@ class AFSKModem:
         preamble immediately before the sync word. Candidates representing the
         same on-air burst are ranked by confidence and collapsed to one.
         """
+        self.received_preamble_bytes = {}
+        self._candidate_preambles = {}
         soft = self._bit_stream(samples)
         if len(soft) < self.sps * (
             ACQUISITION_PREAMBLE_BITS + len(LEGACY_SYNC) * 8 + 8
@@ -235,9 +252,17 @@ class AFSKModem:
                         end = start + acquisition.size + needed
                         score = float(np.mean(np.abs(confidence[start:end])))
                         score -= 0.1 * acquisition_errors
-                        candidates.append(
-                            (score, float(centers[start]), payload)
-                        )
+                        candidate = (score, float(centers[start]), payload)
+                        candidates.append(candidate)
+                        # Observe the leader actually received; a 2.4.7 peer
+                        # still has its longer keyed tail. Do not assume its
+                        # release timing from this station's software version.
+                        beginning = int(start)
+                        while (beginning > 0 and start - beginning < 2048
+                               and bits[beginning - 1] != bits[beginning]):
+                            beginning -= 1
+                        self._candidate_preambles[candidate] = (
+                            start - beginning + ACQUISITION_PREAMBLE_BITS) / 8.0
 
         # Adjacent clock/phase hypotheses describe the same physical burst.
         # A radio path can give a slightly mistimed hypothesis more energy than

@@ -8,6 +8,7 @@ from .snapshots import (
     NetworkSnapshot,
     RadioSnapshot,
     SnapshotStore,
+    StationLabSnapshot,
     VaraSnapshot,
 )
 from .workers import TaskResult, WorkerPool
@@ -23,6 +24,7 @@ __all__ = [
     "NetworkSnapshot",
     "RadioSnapshot",
     "SnapshotStore",
+    "StationLabSnapshot",
     "TaskResult",
     "VaraSnapshot",
     "WorkerPool",

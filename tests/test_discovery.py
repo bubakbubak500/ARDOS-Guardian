@@ -795,14 +795,8 @@ def test_auto_use_never_activates_routes_while_discovery_is_off() -> None:
     assert route.approved is False
 
 
-def test_two_stations_on_default_settings_find_each_other_and_await_approval() -> None:
-    """The shipped profile has to produce something an operator can verify.
-
-    Everything here comes from StationConfig defaults: no experiment enabled,
-    no relay, no automatic use. What the operator should see is a query going
-    out, an answer coming back, and a route sitting in the table waiting for
-    them -- not two silent stations and empty tables.
-    """
+def test_two_stations_on_default_settings_find_each_other_and_deliver() -> None:
+    """The shipped profile discovers and delivers over a quiet two-node link."""
     config = StationConfig()
     bus = GraphRadioBus({("S6", "N1")})
     stations = {
@@ -829,22 +823,17 @@ def test_two_stations_on_default_settings_find_each_other_and_await_approval() -
     assert message.state is SessionState.MULTIHOP_DISCOVERY
 
     now = 0.0
-    approved = False
     while now <= 40 and message.state is not SessionState.DELIVERED:
         for station in stations.values():
             station.tick(now)
         bus.pump()
-        if message.state is SessionState.WAITING_ROUTE_APPROVAL and not approved:
-            route = stations["S6"].approve_discovered_route("N1")
-            assert route is not None
-            assert (route.next_hop, route.hops) == ("N1", 1)
-            approved = True
         now += 0.25
 
-    assert approved is True
     assert message.state is SessionState.DELIVERED
-    # N1 answered a query about itself, which the retired monitor position
-    # could not do -- and it heard S6 while doing so.
+    route = stations["S6"].discovery.routes.best("N1", now, approved_only=True)
+    assert route is not None
+    assert (route.next_hop, route.hops) == ("N1", 1)
+    # N1 answered a query about itself and exchanged a live direct observation.
     assert any(event.kind == "heard-rreq" for event in stations["N1"].discovery.events)
     assert stations["N1"].heard.is_heard("S6", now)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import os
 
 from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtGui import QFont
@@ -21,7 +22,9 @@ def main() -> None:
     application.setOrganizationName("ARDOS")
     application.setOrganizationDomain("ardos.radio")
     application.setFont(QFont("Segoe UI", 9))
-    settings = QSettings()
+    preview = os.environ.get("GUARDIAN_STARTUP_PREVIEW") == "1"
+    settings = (QSettings(os.environ["GUARDIAN_PREVIEW_SETTINGS"], QSettings.Format.IniFormat)
+                if preview else QSettings())
     set_language(str(settings.value("ui/language", "en")))
     runtime = ShellRuntime()
 
@@ -29,6 +32,15 @@ def main() -> None:
     window.ui_performance_probe = start_probe_from_environment(window)
     application.aboutToQuit.connect(runtime.close)
     window.show()
-    QTimer.singleShot(0, window.show_spectrum_if_applicable)
-    QTimer.singleShot(0, window.show_readiness_if_needed)
+    def finish_startup():
+        QTimer.singleShot(0, window.show_spectrum_if_applicable)
+        QTimer.singleShot(0, window.show_readiness_if_needed)
+
+    if preview:
+        from .startup_animation import StartupAnimation
+        window.startup_animation = StartupAnimation(window)
+        window.startup_animation.finished.connect(finish_startup)
+        window.startup_animation.show()
+    else:
+        finish_startup()
     application.exec()

@@ -63,6 +63,7 @@ class VaraState:
     data_local_endpoint: str | None = None
     data_peer_endpoint: str | None = None
     ptt: bool = False
+    busy: bool = False
     ptt_keyings: int = 0
 
 
@@ -84,6 +85,7 @@ class VaraClient:
         self._last_data_write = 0.0
         self._link_connected_at = 0.0
         self._last_ptt_activity = 0.0
+        self._ptt_callback_active = False
         self._last_command = ""
 
         self.state = VaraState()
@@ -469,6 +471,36 @@ class VaraClient:
             return float("inf")
         return time.monotonic() - self._last_ptt_activity
 
+    def wait_radio_idle(
+        self, timeout: float = 30.0, *, quiet_seconds: float = 0.15
+    ) -> bool:
+        """Wait for VARA's RF tail to finish before control audio resumes.
+
+        VARA can report ``DISCONNECTED`` before the peer's final RF burst has
+        cleared the radio. Require a continuous quiet interval and keep BUSY
+        and host-PTT callback transitions from racing the control modem.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        quiet_since = None
+        while not self._stop.is_set() and not self.state.transport_lost:
+            now = time.monotonic()
+            if (
+                self.state.link_state == "DISCONNECTED"
+                and not self.state.ptt
+                and not self.state.busy
+                and not self._ptt_callback_active
+            ):
+                if quiet_since is None:
+                    quiet_since = now
+                if now - quiet_since >= max(0.0, float(quiet_seconds)):
+                    return True
+            else:
+                quiet_since = None
+            if now >= deadline:
+                return False
+            self._stop.wait(min(0.025, max(0.0, deadline - now)))
+        return False
+
     def wait_link(
         self,
         target: str,
@@ -560,6 +592,8 @@ class VaraClient:
             self.state.link_state = "DISCONNECTED"
         elif upper.startswith("PENDING") or upper.startswith("CONNECTING"):
             self.state.link_state = "CONNECTING"
+        elif upper in {"BUSY ON", "BUSY OFF"}:
+            self.state.busy = upper == "BUSY ON"
         elif upper.startswith("BUFFER"):
             for token in upper.replace("=", " ").replace(":", " ").split()[1:]:
                 try:
@@ -591,6 +625,7 @@ class VaraClient:
                         pass
                     break
         elif upper == "PTT ON" or upper == "PTT OFF":
+            self._ptt_callback_active = True
             self.state.ptt = upper == "PTT ON"
             self._last_ptt_activity = time.monotonic()
             if self.state.ptt:
@@ -602,6 +637,7 @@ class VaraClient:
                     self.on_ptt(upper == "PTT ON")
                 except Exception:
                     pass
+            self._ptt_callback_active = False
         if self.on_notification is not None:
             try:
                 self.on_notification(text)

@@ -39,6 +39,11 @@ _PSEUDO_DEVICE_PREFIXES = (
     "primary sound driver",
 )
 
+#: What every audio path here runs at. It was a bare default on
+#: AudioControlTransport until a second caller needed the same figure; a named
+#: constant is better than two copies that can drift apart.
+DEFAULT_SAMPLE_RATE = 48000
+
 PTT_LEAD_SECONDS = 0.15
 PTT_TAIL_SECONDS = 0.25
 # Silence appended after every transmitted frame. Stopping the output stream
@@ -49,6 +54,113 @@ PTT_TAIL_SECONDS = 0.25
 # 32 ms/symbol rate damaged only the final byte -- both days fit one cause.)
 # With the guard, what gets discarded is silence instead of the CRC.
 TX_GUARD_SECONDS = 0.4
+
+
+def transmit_waveform(sd, samples, *, device, sample_rate: int,
+                      ptt: Callable[[bool], None],
+                      lead_seconds: float = PTT_LEAD_SECONDS,
+                      tail_seconds: float = PTT_TAIL_SECONDS,
+                      guard_seconds: float = TX_GUARD_SECONDS,
+                      write_chunk_frames: int = 0,
+                      before_play=None, after_release=None) -> float:
+    """Key the radio, play a waveform, unkey. Returns the seconds it aired.
+
+    The single place this discipline is written down. Three callers need it -- the
+    control transport below, the OFDM payload pipe, and the test burst the Modem
+    test workspace transmits -- and "the transmitter is always released" is not a
+    property to maintain in three copies, because the copy that gets it wrong
+    leaves a station keyed on a channel other people are using.
+
+    The order matters and each part of it was paid for:
+
+    * **Lead-in after keying.** A waveform that starts before the carrier does is
+      a burst the far end cannot synchronise to.
+    * **Drain before unkeying.** Blocking writes may leave samples queued in
+      the host. Stream.stop() waits for their playback while PTT remains ON;
+      the configured radio tail follows that completion.
+    * **Open the output stream before PTT.** A transient Windows/WASAPI open
+      failure must not spend even a short carrier-only key-up discovering that
+      no waveform can be sent. Opening is retried briefly while the radio is
+      still in receive.
+    * **The tail sleep and the unkey in `finally`.** PortAudio returning means it
+      has finished filling the endpoint, not that the radio has finished sending;
+      and if playback raised, dropping PTT still has to happen.
+
+    `before_play` and `after_release` are for a caller with buffers to clear on
+    either side of its own transmission.
+    """
+    rate = int(sample_rate)
+    guard = np.zeros(int(max(0.0, guard_seconds) * rate))
+    waveform = np.concatenate([np.asarray(samples, dtype=np.float64), guard])
+    chunk_frames = max(0, int(write_chunk_frames))
+    stream = _open_output_stream(
+        sd, device=device, sample_rate=rate,
+        blocksize=chunk_frames,
+    )
+    try:
+        if before_play is not None:
+            before_play()
+        ptt(True)
+        time.sleep(max(0.0, lead_seconds))
+        playback = waveform.astype(np.float32)
+        if stream is None:
+            # Compatibility path for small test doubles and older backends.
+            sd.play(playback, samplerate=rate, device=device)
+            sd.wait()
+        else:
+            framed = playback.reshape(-1, 1)
+            step = chunk_frames or len(framed)
+            for offset in range(0, len(framed), step):
+                underflowed = stream.write(framed[offset:offset + step])
+                if underflowed:
+                    raise RuntimeError("audio output underflow during transmit")
+    finally:
+        try:
+            # Blocking writes only queue the final USB buffers. Drain while
+            # keyed, then apply the radio's tail; silence is not a drain timer.
+            if stream is not None:
+                stream.stop(ignore_errors=False)
+        finally:
+            try:
+                time.sleep(max(0.0, tail_seconds))
+                ptt(False)
+            finally:
+                try:
+                    if after_release is not None:
+                        after_release()
+                finally:
+                    if stream is not None:
+                        stream.close()
+    return len(waveform) / rate
+
+
+def _open_output_stream(sd, *, device, sample_rate: int, blocksize: int = 0):
+    """Open blocking playback before PTT, retrying transient host failures."""
+    factory = getattr(sd, "OutputStream", None)
+    if factory is None:
+        return None
+    for attempt in range(3):
+        stream = None
+        try:
+            stream = factory(
+                samplerate=sample_rate,
+                channels=1,
+                device=device,
+                dtype="float32",
+                blocksize=max(0, int(blocksize)),
+            )
+            stream.start()
+            return stream
+        except Exception:
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            if attempt == 2:
+                raise
+            time.sleep(0.10)
+    return None
 
 
 def is_real_audio_device_name(name: str) -> bool:
@@ -358,6 +470,36 @@ def resolve_device(name: str, kind: str = "input"):
     return name
 
 
+def audio_device_host_api(value, kind: str = "input") -> str:
+    """Return the PortAudio host API used by one resolved endpoint.
+
+    A saved Windows friendly name is not a complete audio-path identity: the
+    same text is commonly exposed by MME, DirectSound, WASAPI and WDM-KS.  The
+    APIs can have different gain and timing behaviour, so AutoTune records must
+    not be reused after the same name resolves through a different API.  Keep
+    the result stable and human-readable; ``unresolved`` deliberately prevents
+    us from pretending that an API was measured when PortAudio cannot identify
+    it.
+    """
+    if value in (None, ""):
+        return "none"
+    try:
+        sd = _import_sounddevice()
+        index = value if isinstance(value, int) else resolve_device(value, kind)
+        if not isinstance(index, int):
+            return "unresolved"
+        device = sd.query_devices(index)
+        api_index = int(device.get("hostapi", -1))
+        host_apis = list(sd.query_hostapis())
+        if 0 <= api_index < len(host_apis):
+            name = str(host_apis[api_index].get("name") or "").strip()
+            if name:
+                return name
+        return f"hostapi-{api_index}" if api_index >= 0 else "unresolved"
+    except Exception:  # noqa: BLE001 - identity metadata must not break audio
+        return "unresolved"
+
+
 _GENERIC_DEVICE_WORDS = {
     "analog",
     "audio",
@@ -386,6 +528,24 @@ def _device_identity_words(value: str) -> set[str]:
         for word in _normalized_device_name(value).split()
         if word not in _GENERIC_DEVICE_WORDS and not word.isdigit()
     }
+
+
+def audio_device_pair_identity(value: str) -> str | None:
+    """Return a direction-neutral identity for one Windows audio endpoint.
+
+    PortAudio enumerates capture and playback endpoints independently.  Their
+    numeric indexes can therefore swap independently after a USB reconnect,
+    even though Windows still exposes the matching endpoint instance in names
+    such as ``Microphone (3 - USB Audio CODEC)`` and ``Speakers (3 - ...)``.
+    Prefer that instance marker when present; otherwise retain the distinctive
+    non-direction words as a conservative diagnostic identity.
+    """
+    text = str(value or "")
+    instance = re.search(r"\(\s*(\d+)\s*-", text)
+    if instance is not None:
+        return f"windows-endpoint:{instance.group(1)}"
+    words = sorted(_device_identity_words(text))
+    return " ".join(words) if words else None
 
 
 def match_device_index(
@@ -491,13 +651,32 @@ class AudioControlTransport(ControlTransport):
         self,
         modem: AFSKModem | None = None,
         ptt: Callable[[bool], None] | None = None,
-        sample_rate: int = 48000,
+        sample_rate: int = DEFAULT_SAMPLE_RATE,
         input_device=None,
         output_device=None,
         diagnostic_audio_path: Path | str | None = None,
         on_log: Callable[[str], None] | None = None,
+        tx_lead_seconds: float | None = None,
+        tx_tail_seconds: float | None = None,
     ):
         self.modem = modem or AFSKModem(sample_rate=sample_rate)
+        # AFSK uses short local edges; slow control modems retain their existing
+        # settings. Output is drained before unkeying by transmit_waveform.
+        # A real AFSK modem advertises the extended-acquisition retry hook.
+        # Keep duck-typed legacy modem fakes on the historical slow edges;
+        # they may only expose ``name`` for logging and do not implement the
+        # short-control timing contract.
+        short_control = (
+            getattr(self.modem, "name", "") == "afsk1200"
+            and callable(getattr(self.modem, "modulate_retry", None))
+        )
+        self.tx_lead_seconds = 0.06 if short_control else PTT_LEAD_SECONDS
+        self.tx_tail_seconds = 0.06 if short_control else PTT_TAIL_SECONDS
+        self.tx_guard_seconds = 0.06 if short_control else TX_GUARD_SECONDS
+        if short_control and tx_lead_seconds is not None:
+            self.tx_lead_seconds = max(0.0, float(tx_lead_seconds))
+        if short_control and tx_tail_seconds is not None:
+            self.tx_tail_seconds = max(0.0, float(tx_tail_seconds))
         self.fs = sample_rate
         self.ptt = ptt or (lambda on: None)
         self.input_device = input_device
@@ -507,6 +686,9 @@ class AudioControlTransport(ControlTransport):
         )
         self.on_log = on_log or (lambda m: None)
         self.on_frame = None
+        #: Optional sink handed every received block, for recording the audio to
+        #: a file. Set by `Operations.start_recording`; None the rest of the time.
+        self.on_audio = None
 
         self._sd = None
         self._stream = None
@@ -517,7 +699,10 @@ class AudioControlTransport(ControlTransport):
         self._tx_lock = threading.Lock()
         self._tx_condition = threading.Condition()
         self._pending_tx = 0
+        self._tx_failed = False
         self._post_tx_pending = 0
+        self._peer_ready_at = 0.0
+        self._sent_control_frames: dict[bytes, float] = {}
         # The rolling window must hold one whole frame however slow the modem
         # is. A fixed 4 s was ample for AFSK's 1.2 s frames but silently swallowed
         # MFSK-16 once its geometry was corrected: a 6.9 s frame never fitted, so
@@ -534,18 +719,27 @@ class AudioControlTransport(ControlTransport):
         self.last_frame_snr: float | None = None
         self._running = False
         self._rx_thread: threading.Thread | None = None
+        self._rx_stop = threading.Event()
         # Live RX metering (linear RMS in 0..1).
         self._level = 0.0          # smoothed current level
         self._floor = 0.0          # slow-tracking idle noise floor
         self._floor_seconds = 0.0  # audio heard since the floor started tracking
         self._peak = 0.0
         self._max_peak = 0.0
+        self.input_status_events = 0
+        self.last_input_status = ""
         self._last_diagnostic_audio = 0.0
         self.rejected_control_candidates = 0
         self.last_rejected_control: dict | None = None
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
+        if self._running:
+            return
+        # A resumed control channel must not replay a pre-payload request.
+        self._rx_buf.clear()
+        self._rx_frames.clear()
+        self._rx_stop = threading.Event()
         sd = _import_sounddevice()  # lazy; raises if PortAudio missing
         self._sd = sd
         if not isinstance(self.input_device, int):
@@ -590,7 +784,9 @@ class AudioControlTransport(ControlTransport):
         self.actual_output_device_index = self.output_device
         self.actual_input_device_name = str(input_info["name"])
         self.actual_output_device_name = str(output_info["name"])
-        self._rx_thread = threading.Thread(target=self._rx_loop, name="afsk-rx", daemon=True)
+        self._rx_thread = threading.Thread(target=self._rx_loop,
+                                           args=(self._rx_stop,),
+                                           name="afsk-rx", daemon=True)
         self._rx_thread.start()
         self.on_log(
             f"Audio RX opened: {self.actual_input_device_name} "
@@ -604,6 +800,7 @@ class AudioControlTransport(ControlTransport):
 
     def stop(self) -> None:
         self._running = False
+        self._rx_stop.set()
         if self._stream is not None:
             try:
                 self._stream.stop()
@@ -611,6 +808,10 @@ class AudioControlTransport(ControlTransport):
             except Exception:
                 pass
             self._stream = None
+        if self._rx_thread is not None and self._rx_thread is not threading.current_thread():
+            self._rx_thread.join(timeout=2.0)
+        self._rx_buf.clear()
+        self._rx_frames.clear()
 
     # ------------------------------------------------------------------ #
     #  Transmit                                                           #
@@ -618,6 +819,8 @@ class AudioControlTransport(ControlTransport):
     def send(self, frame: ControlFrame) -> None:
         # TX off the caller's thread so the UI/orchestrator never blocks on PTT.
         with self._tx_condition:
+            if not self._pending_tx:
+                self._tx_failed = False
             self._pending_tx += 1
         threading.Thread(
             target=self._tx_pending,
@@ -629,13 +832,23 @@ class AudioControlTransport(ControlTransport):
     def _tx_pending(self, frame: ControlFrame) -> None:
         try:
             self._tx(frame)
+        except Exception as exc:
+            with self._tx_condition:
+                self._tx_failed = True
+            self.on_log(f"Audio TX failed: {exc}")
         finally:
             with self._tx_condition:
                 self._pending_tx -= 1
                 self._tx_condition.notify_all()
 
     def send_morse_after_pending(self, text: str, *, wpm: float = 40.0) -> bool:
-        """Queue a CW identifier after all control frames already in flight."""
+        """Queue a CW identifier after all control frames already in flight.
+
+        The final RECEIVED/DELIVERED frames are asynchronous. Counting this as
+        a post-TX item lets it wait for those frames without making
+        ``wait_tx_idle`` return early, and the shared TX lock keeps one radio
+        carrier active at a time.
+        """
         clean = normalise_morse_text(text)
         if not clean:
             return False
@@ -688,41 +901,67 @@ class AudioControlTransport(ControlTransport):
                 if remaining <= 0:
                     return False
                 self._tx_condition.wait(remaining)
-        return True
+            return not self._tx_failed
 
     def _tx(self, frame: ControlFrame) -> None:
         if self._sd is None:
             self.on_log("Audio TX skipped — control channel not started")
             return
-        samples = self.modem.modulate(frame.encode())
-        guard = np.zeros(int(TX_GUARD_SECONDS * self.fs), dtype=samples.dtype)
-        samples = np.concatenate([samples, guard])
         with self._tx_lock:
-            try:
+            # A CRC-complete frame can be decoded while the far transmitter
+            # still plays its guard and tail. Wait before keying a reply so the
+            # peer can actually receive its preamble, including on fast hosts.
+            remaining = self._peer_ready_at - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            payload = frame.encode()
+            now = time.monotonic()
+            self._sent_control_frames = {
+                key: sent for key, sent in self._sent_control_frames.items()
+                if now - sent < 120.0
+            }
+            retry = payload in self._sent_control_frames
+            self._sent_control_frames[payload] = now
+            retry_modulator = getattr(self.modem, "modulate_retry", None)
+            if retry and retry_modulator is not None:
+                samples = retry_modulator(payload)
+                self.on_log("AFSK retry: extended acquisition for this repeated frame")
+            else:
+                samples = self.modem.modulate(payload)
+            transmit_waveform(
+                self._sd, samples,
+                device=self.output_device,
+                sample_rate=self.fs,
+                ptt=self.ptt,
+                lead_seconds=self.tx_lead_seconds,
+                tail_seconds=self.tx_tail_seconds,
+                guard_seconds=self.tx_guard_seconds,
                 # Never splice samples from before and after our own half-duplex
                 # transmission into one artificial receive window.
-                self._rx_buf.clear()
-                self.ptt(True)
-                # brief lead-in so the rig is keyed before tones start
-                time.sleep(PTT_LEAD_SECONDS)
-                self._sd.play(samples, samplerate=self.fs, device=self.output_device)
-                self._sd.wait()
-            finally:
-                # PortAudio has finished filling the USB endpoint here, but a
-                # USB radio can still have audio buffered internally. Keep PTT
-                # asserted long enough for the final CRC and postamble to air.
-                time.sleep(PTT_TAIL_SECONDS)
-                self.ptt(False)
-                self._rx_buf.clear()
+                before_play=self._rx_buf.clear,
+                after_release=self._rx_buf.clear,
+            )
         self.on_log(f"TX {frame.summary()}")
 
     # ------------------------------------------------------------------ #
     #  Receive                                                            #
     # ------------------------------------------------------------------ #
     def _rx_callback(self, indata, frames, time_info, status):  # PortAudio thread
+        if status:
+            self.input_status_events += 1
+            self.last_input_status = str(status)
         if self._tx_lock.locked():
             return  # half-duplex: ignore our own transmission
         block = indata[:, 0]
+        if self.on_audio is not None:
+            # A recorder taps the stream here rather than opening a second handle
+            # on the same device, so a capture is exactly the audio the modem is
+            # working from. Wrapped because this runs on the PortAudio thread: an
+            # exception escaping it would take the whole receive path down.
+            try:
+                self.on_audio(block)
+            except Exception:  # noqa: BLE001 - a sink must never stop reception
+                pass
         self._rx_buf.extend(block.copy())
         # Update level meters: smoothed RMS, peak, and a slow noise floor.
         rms = float(np.sqrt(np.mean(block.astype(np.float64) ** 2))) if len(block) else 0.0
@@ -774,9 +1013,8 @@ class AudioControlTransport(ControlTransport):
             return 0.0
         return round(min(self.to_db(signal) - self.to_db(floor), SNR_MAX_DB), 1)
 
-    def _rx_loop(self) -> None:
-        while self._running:
-            time.sleep(self.poll_interval)
+    def _rx_loop(self, stopped: threading.Event) -> None:
+        while not stopped.wait(self.poll_interval):
             if len(self._rx_buf) < self.fs * 0.4:
                 continue
             window = np.fromiter(self._rx_buf, dtype=np.float32)
@@ -785,6 +1023,8 @@ class AudioControlTransport(ControlTransport):
                 window,
                 validator=self._is_valid_control_payload,
             ):
+                if stopped.is_set():
+                    return
                 self._process_candidate(payload, snr, window)
 
     def _process_candidate(
@@ -827,10 +1067,13 @@ class AudioControlTransport(ControlTransport):
 
     def _handle_payload(self, payload: bytes, snr: float | None = None) -> bool:
         now = time.monotonic()
-        # Drop duplicates seen recently (overlapping demod windows / repeats).
-        self._recent = {k: t for k, t in self._recent.items() if now - t < 8.0}
+        # Suppress the same capture across overlapping windows. Expire from
+        # its first decode: refreshing on each poll can also suppress a real
+        # protocol retry after a lost response, indefinitely on short retries.
+        lifetime = self.rx_window + self.poll_interval
+        self._recent = {k: t for k, t in self._recent.items()
+                        if now - t < lifetime}
         if payload in self._recent:
-            self._recent[payload] = now
             return self._is_valid_control_payload(payload)
         self._recent[payload] = now
         try:
@@ -838,6 +1081,13 @@ class AudioControlTransport(ControlTransport):
         except FrameError as exc:
             self.on_log(f"RX bad frame: {exc}")
             return False
+        peer_quiet = self.tx_guard_seconds + self.tx_tail_seconds
+        preambles = getattr(self.modem, "received_preamble_bytes", {})
+        if preambles.get(payload, 0.0) > 32:
+            # A received long leader identifies the older control timing.
+            # Short-leader peers pay only the short edge budget.
+            peer_quiet = max(peer_quiet, TX_GUARD_SECONDS + PTT_TAIL_SECONDS)
+        self._peer_ready_at = max(self._peer_ready_at, now + peer_quiet)
         self.on_log(
             f"RX {frame.summary()}"
             + (f"  S/N ~{snr:.1f} dB" if snr is not None else "")

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 
 from .base import RadioDriver, RadioState
 
@@ -114,9 +115,46 @@ class HamlibRadio(RadioDriver):
 
     def set_ptt(self, on: bool) -> None:
         with self._lock:
-            lines = self._command(f"T {1 if on else 0}")
-            if not self._ok(lines):
-                raise IOError(f"PTT command failed: {self._explain(lines)}")
+            lines: list[str] = []
+            for attempt in range(3):
+                lines = self._command(f"T {1 if on else 0}")
+                if self._ok(lines):
+                    return
+                # IC-705/rigctld can transiently reject a valid PTT edge while
+                # the preceding CAT state transition is still settling. The
+                # exact same edge succeeds tens of milliseconds later. Repeating
+                # ON is idempotent; repeating OFF is both idempotent and safer
+                # than abandoning the radio in an uncertain keyed state.
+                if self._rprt_code(lines) != -9 or attempt == 2:
+                    break
+                time.sleep(0.10 * (attempt + 1))
+            raise IOError(f"PTT command failed: {self._explain(lines)}")
+
+    @staticmethod
+    def _rprt_code(lines: list[str]) -> int | None:
+        for line in lines:
+            if line.startswith("RPRT"):
+                try:
+                    return int(line.split()[1])
+                except (IndexError, ValueError):
+                    return None
+        return None
+
+    def get_ptt(self) -> bool:
+        """Read the radio's actual keyed state with one bounded CAT command."""
+        with self._lock:
+            lines = self._command("t")
+        if lines and lines[0].strip() in ("0", "1"):
+            return lines[0].strip() == "1"
+        raise IOError(f"PTT read-back failed: {self._explain(lines)}")
+
+    def get_signal(self) -> int:
+        """Read one instantaneous rigctld STRENGTH sample."""
+        with self._lock:
+            lines = self._command("l STRENGTH")
+        if lines and _is_int(lines[0]):
+            return int(lines[0].strip())
+        raise IOError(f"S-meter read failed: {self._explain(lines)}")
 
     def set_frequency(self, hz: int) -> None:
         with self._lock:

@@ -2072,15 +2072,15 @@ def test_guardian_keys_for_vara_out_of_the_box(tmp_path) -> None:
         workers.close(wait=True)
 
 
-def test_a_profile_that_already_chose_its_own_keying_is_left_alone(
+def test_old_profile_uses_guardian_keying_under_fixed_policy(
     tmp_path,
 ) -> None:
-    # A station may be keying through VARA deliberately; taking that over
-    # behind the operator's back could double-key the radio.
+    # Keying belongs to Guardian in the shipped station policy, including
+    # profiles saved before the user-facing toggle was removed.
     path = tmp_path / "config.json"
     path.write_text('{"callsign": "OK7PS", "vara_host_ptt": false}', encoding="utf-8")
 
-    assert StationConfig.load(path).vara_host_ptt is False
+    assert StationConfig.load(path).vara_host_ptt is True
 
 
 def test_a_station_that_cannot_key_for_vara_is_warned_before_the_handoff(

@@ -79,6 +79,20 @@ class FrameType(IntEnum):
     # Experimental, bounded advertisement of one directly-heard neighbour.
     # Older releases reject the unknown type, creating a safe discovery gap.
     LINK_ADVERT = 16
+    # Guardian Pair AutoTune is a separate, opt-in station-lab session. It
+    # never overloads the proven mail-transfer frame meanings; older builds
+    # reject these values and consequently never key for calibration.
+    CAL_OFFER = 17
+    CAL_ACCEPT = 18
+    CAL_BUSY = 19
+    CAL_CANCEL = 20
+    CAL_DONE = 21
+    CAL_PROBE = 22
+    CAL_REPORT = 23
+    # Exact Guardian modem-profile agreement. Older builds ignore these
+    # unknown types; mixed-version peers select VARA before this exchange.
+    G2_PROFILE_OFFER = 24
+    G2_PROFILE_ACK = 25
 
     @property
     def label(self) -> str:
@@ -97,6 +111,10 @@ class Flags(IntFlag):
     ENCRYPTED = 0x01
     COMPRESSED = 0x02
     ACK_REQUIRED = 0x04
+    # Bit 6 is the legacy one-bit Guardian modem offer used through 2.4.2.
+    OFDM_PAYLOAD = 0x40
+    # Bit 7 is the explicit profile-agreement capability marker.
+    G2_PROFILE = 0x80
 
 
 # Bits 3-5 of the flags byte: a slow-keying request for the VARA FM payload
@@ -125,6 +143,31 @@ def encode_ptt_delay(flags: Flags | int, delay_ms: int) -> Flags:
 def decode_ptt_delay(flags: Flags | int) -> int:
     """The slow-keying request carried in `flags`, in milliseconds."""
     return ((int(flags) >> _PTT_DELAY_SHIFT) & _PTT_DELAY_BITS) * PTT_DELAY_STEP_MS
+
+
+OFDM_PAYLOAD_BIT = Flags.OFDM_PAYLOAD
+
+
+def encode_ofdm_capable(flags: Flags | int, capable: bool) -> Flags:
+    """Set or clear the legacy Guardian modem capability bit."""
+    cleared = int(flags) & ~int(Flags.OFDM_PAYLOAD)
+    return Flags(cleared | (int(Flags.OFDM_PAYLOAD) if capable else 0))
+
+
+def decode_ofdm_capable(flags: Flags | int) -> bool:
+    """Whether ``flags`` carries the legacy Guardian modem capability bit."""
+    return bool(int(flags) & int(Flags.OFDM_PAYLOAD))
+
+
+def encode_g2_profile_capable(flags: Flags | int, capable: bool) -> Flags:
+    """Set or clear support for explicit modem-profile negotiation."""
+    cleared = int(flags) & ~int(Flags.G2_PROFILE)
+    return Flags(cleared | (int(Flags.G2_PROFILE) if capable else 0))
+
+
+def decode_g2_profile_capable(flags: Flags | int) -> bool:
+    """Whether ``flags`` carries the explicit profile capability marker."""
+    return bool(int(flags) & int(Flags.G2_PROFILE))
 
 
 def crc16(data: bytes) -> int:

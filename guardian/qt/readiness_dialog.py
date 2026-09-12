@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PySide6.QtCore import QSettings, QStandardPaths, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
@@ -17,10 +19,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..config import config_dir
+from ..config import SC_FTN_WAVEFORM, config_dir
 from ..i18n import dual, tr
 from ..install import DependencyKind, vara_installer
+from ..ofdm.automatic import automatic_g2_policy
 from ..services import TaskResult
+from ..waveforms.config import profile_for
 from .runtime import ShellRuntime
 
 
@@ -214,19 +218,88 @@ class ReadinessDialog(QDialog):
         self.grid.setColumnStretch(2, 1)
 
         cfg = self.runtime.config
+        by_kind = {item.kind: item for item in statuses}
+        if cfg.payload_backend == "ofdm_vhf":
+            try:
+                policy = automatic_g2_policy(
+                    SC_FTN_WAVEFORM,
+                    cfg.g2_bandwidth,
+                    radio_backend=cfg.radio_backend,
+                    radio_model=cfg.radio,
+                )
+                profile = profile_for(SC_FTN_WAVEFORM, policy.bandwidth)
+                geometry_overrides = {
+                    name: value
+                    for name, value in (
+                        ("center_hz", policy.center_hz),
+                        ("nyquist_symbol_rate", policy.nyquist_symbol_rate),
+                        ("symbol_rate", policy.symbol_rate),
+                    )
+                    if value is not None
+                }
+                profile = replace(
+                    profile,
+                    bootstrap_modulation=policy.bootstrap_modulation,
+                    data_acquisition_lead_seconds=policy.acquisition_lead_seconds,
+                    reference_metric_blocks=policy.reference_metric_blocks,
+                    **geometry_overrides,
+                )
+                geometry = (
+                    f"{profile.name}, {profile.occupied_bandwidth:.0f} Hz, "
+                    f"symbol {profile.symbol_rate:.1f} sym/s"
+                )
+                policy_ok = True
+            except ValueError as exc:
+                geometry = str(exc)
+                policy_ok = False
+            hamlib_ok = (
+                cfg.radio_backend != "hamlib"
+                or bool(by_kind.get(DependencyKind.HAMLIB) and
+                        by_kind[DependencyKind.HAMLIB].available)
+            )
+            station_ready = bool(
+                cfg.callsign
+                and cfg.callsign != "NOCALL"
+                and cfg.radio_backend != "none"
+                and hamlib_ok
+                and str(cfg.audio_input).strip()
+                and str(cfg.audio_output).strip()
+                and policy_ok
+            )
+            self.summary.setProperty(
+                "statusRole", "success" if station_ready else "warning"
+            )
+            self.summary.setText(
+                ("● " if station_ready else "◆ ")
+                + dual(
+                    f"SC-FTN AUTO: {geometry}. Audio RX/TX and the selected "
+                    "radio path are configured."
+                    if station_ready
+                    else f"SC-FTN requires a callsign, radio path, audio RX/TX, "
+                    f"and a valid AUTO profile ({geometry}).",
+                    f"SC-FTN AUTO: {geometry}. Audio RX/TX a zvolená rádiová "
+                    "cesta jsou nastavené."
+                    if station_ready
+                    else f"SC-FTN vyžaduje volací značku, rádiovou cestu, audio "
+                    f"RX/TX a platný profil AUTO ({geometry}).",
+                )
+            )
+            return
+
         selected = (
             DependencyKind.VARA_HF
             if cfg.vara_mode.upper() == "HF"
             else DependencyKind.VARA_FM
         )
-        by_kind = {item.kind: item for item in statuses}
+        selected_status = by_kind.get(selected)
         station_ready = (
             cfg.callsign != "NOCALL"
             and (
                 cfg.radio_backend != "hamlib"
-                or by_kind[DependencyKind.HAMLIB].available
+                or bool(by_kind.get(DependencyKind.HAMLIB) and
+                        by_kind[DependencyKind.HAMLIB].available)
             )
-            and by_kind[selected].available
+            and bool(selected_status and selected_status.available)
         )
         self.summary.setProperty(
             "statusRole", "success" if station_ready else "warning"

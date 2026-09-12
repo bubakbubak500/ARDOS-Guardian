@@ -37,6 +37,8 @@ try {
     $env:TEMP = $buildTemp
     $env:TMP = $buildTemp
 
+    & (Join-Path $root "tools\fetch_jpegxl.ps1")
+
     if (-not $SkipTests) {
         Write-Host "Running characterization tests..." -ForegroundColor Cyan
         # A fixed pytest directory can be left owned by another Windows build
