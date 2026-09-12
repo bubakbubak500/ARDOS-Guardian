@@ -795,6 +795,104 @@ def test_auto_use_never_activates_routes_while_discovery_is_off() -> None:
     assert route.approved is False
 
 
+def test_relay_learned_route_is_usable_for_own_mail_without_another_query() -> None:
+    bus = GraphRadioBus({("S6", "OK7PS"), ("OK7PS", "OK2IPW"),
+                         ("OK2IPW", "OK2JLD")})
+    stations = {
+        call: Orchestrator(
+            call, bus.endpoint(call), relay=True,
+            discovery_mode=DISCOVERY_ASSISTED, discovery_forward=True,
+            discovery_auto_use=True,
+        )
+        for call in ("S6", "OK7PS", "OK2IPW", "OK2JLD")
+    }
+    engines = {call: station.discovery for call, station in stations.items()}
+    for engine in engines.values():
+        engine.jitter_min = engine.jitter_max = engine.settle_time = 0
+        engine.query_timeout = 2
+    stations["S6"].discover_route("OK2JLD")
+    _run(bus, engines, until=10)
+
+    sender = stations["OK7PS"]
+    sender.tick(10)
+    route = sender.discovery.routes.best("OK2JLD", 10)
+    assert route is not None and route.next_hop == "OK2IPW"
+    message = sender.send_message("OK2JLD", "via IPW", msg_id=7201)
+    assert message.state is SessionState.ANNOUNCING
+    assert message.next_hop == "OK2IPW"
+    assert not sender.discovery.pending
+
+
+def test_enabling_automatic_use_resumes_message_already_waiting_for_approval() -> None:
+    bus = GraphRadioBus({("OK7PS", "OK2IPW"), ("OK2IPW", "OK2JLD")})
+    stations = {
+        call: Orchestrator(
+            call, bus.endpoint(call), relay=True, auto_complete=True,
+            discovery_mode=DISCOVERY_ASSISTED, discovery_forward=True,
+        )
+        for call in ("OK7PS", "OK2IPW", "OK2JLD")
+    }
+    for station in stations.values():
+        station.discovery.jitter_min = station.discovery.jitter_max = 0
+        station.discovery.settle_time = 0
+    sender = stations["OK7PS"]
+    message = sender.send_message("OK2JLD", "automatic", msg_id=7202)
+    for step in range(40):
+        for station in stations.values():
+            station.tick(step * 0.25)
+        bus.pump()
+        if message.state is SessionState.WAITING_ROUTE_APPROVAL:
+            break
+    assert message.state is SessionState.WAITING_ROUTE_APPROVAL
+
+    sender.configure_discovery(auto_use=True)
+    assert message.state is SessionState.ANNOUNCING
+    assert message.next_hop == "OK2IPW"
+    for step in range(40, 160):
+        for station in stations.values():
+            station.tick(step * 0.25)
+        bus.pump()
+        if message.state is SessionState.DELIVERED:
+            break
+    assert message.state is SessionState.DELIVERED
+
+
+def test_live_route_arriving_during_query_starts_first_hop_without_rrep() -> None:
+    frames = []
+    bus = GraphRadioBus(
+        {("OK7PS", "OK2IPW"), ("OK2IPW", "OK2JLD")},
+        drop=lambda sender, receiver, frame: frame.type is FrameType.MULTIHOP_RREP,
+        monitor=lambda sender, frame: frames.append((sender, frame)),
+    )
+    stations = {
+        call: Orchestrator(
+            call, bus.endpoint(call), relay=True, auto_complete=True,
+            discovery_mode=DISCOVERY_ASSISTED, discovery_forward=True,
+            discovery_auto_use=True, link_advert_enabled=True,
+        )
+        for call in ("OK7PS", "OK2IPW", "OK2JLD")
+    }
+    for station in stations.values():
+        station.discovery.jitter_min = station.discovery.jitter_max = 0
+    sender = stations["OK7PS"]
+    message = sender.send_message("OK2JLD", "live route", msg_id=7203)
+    assert message.state is SessionState.MULTIHOP_DISCOVERY
+    for step in range(160):
+        for station in stations.values():
+            station.tick(step * 0.25)
+        bus.pump()
+        if message.state is SessionState.DELIVERED:
+            break
+    assert message.state is SessionState.DELIVERED
+    assert message.next_hop == "OK2IPW"
+    assert message.msg_id not in sender.discovery.pending
+    assert any(
+        call == "OK7PS" and frame.type is FrameType.HAVE_MSG
+        and frame.destination == "OK2JLD" and frame.next_hop == "OK2IPW"
+        for call, frame in frames
+    )
+
+
 def test_two_stations_on_default_settings_find_each_other_and_deliver() -> None:
     """The shipped profile discovers and delivers over a quiet two-node link."""
     config = StationConfig()

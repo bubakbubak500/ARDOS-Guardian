@@ -960,6 +960,10 @@ class DiscoveryEngine:
             frame.message_id,
             self._now,
         )
+        # A relay has received the same proven return path as the origin.
+        # Apply automatic-use policy here too, so its own mail can use this
+        # route instead of starting another query for an unapproved entry.
+        self._sync_auto_approvals()
         self._event("relay-rrep", frame.source, breadcrumb.destination, f"to {breadcrumb.previous_hop}")
         if not (self.can_transmit and self.forward and self.relay_enabled) or frame.ttl <= 1:
             return

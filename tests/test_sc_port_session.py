@@ -205,6 +205,33 @@ def test_afsk_uses_short_first_acquisition_and_extended_retry() -> None:
     assert len(retry) - len(first) == (128 - 24) * 8 * int(modem.fs / modem.baud)
 
 
+@pytest.mark.parametrize("kind", [FrameType.BEACON, FrameType.HAVE_MSG])
+def test_periodic_beacon_keeps_short_preamble_but_message_retry_extends_it(
+    monkeypatch, kind,
+) -> None:
+    modem = AFSKModem()
+    logs = []
+    transport = AudioControlTransport(modem=modem, on_log=logs.append)
+    transport._sd = object()  # Capture audio; never open or key a real radio.
+    lengths = []
+    monkeypatch.setattr(
+        "guardian.modem.audio.transmit_waveform",
+        lambda _sd, samples, **kwargs: lengths.append(len(samples)),
+    )
+    clock = [1000.0]
+    monkeypatch.setattr("guardian.modem.audio.time.monotonic", lambda: clock[0])
+    frame = ControlFrame(kind, source="OK7PS", destination="OK2IPW")
+    for elapsed in (0, 60, 120):
+        clock[0] = 1000.0 + elapsed
+        transport._tx(frame)
+    normal = len(modem.modulate(frame.encode()))
+    repeated = normal if kind is FrameType.BEACON else len(modem.modulate_retry(frame.encode()))
+    assert lengths == [normal, repeated, repeated]
+    assert sum("extended acquisition" in log for log in logs) == (
+        0 if kind is FrameType.BEACON else 2
+    )
+
+
 def test_afsk_audio_uses_short_edges_but_detected_legacy_leader_gets_long_quiet() -> None:
     modem = AFSKModem()
     transport = AudioControlTransport(modem=modem)

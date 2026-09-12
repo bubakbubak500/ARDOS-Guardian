@@ -27,7 +27,7 @@ import wave
 
 import numpy as np
 
-from ..protocol import MAX_CONTROL_FRAME_BYTES, ControlFrame, FrameError
+from ..protocol import MAX_CONTROL_FRAME_BYTES, ControlFrame, FrameError, FrameType
 from ..session.transport import ControlTransport
 from .afsk import AFSKModem
 from .morse import modulate_morse, normalise_morse_text
@@ -920,8 +920,12 @@ class AudioControlTransport(ControlTransport):
                 key: sent for key, sent in self._sent_control_frames.items()
                 if now - sent < 120.0
             }
-            retry = payload in self._sent_control_frames
-            self._sent_control_frames[payload] = now
+            # Beacons repeat by design and have no acknowledgement/retry
+            # exchange. An unchanged position must not turn every periodic
+            # beacon into an extended-acquisition retransmission.
+            retry = frame.type is not FrameType.BEACON and payload in self._sent_control_frames
+            if frame.type is not FrameType.BEACON:
+                self._sent_control_frames[payload] = now
             retry_modulator = getattr(self.modem, "modulate_retry", None)
             if retry and retry_modulator is not None:
                 samples = retry_modulator(payload)

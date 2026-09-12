@@ -575,6 +575,26 @@ class Orchestrator:
         """Apply operator discovery settings without rebuilding the radio."""
         settings.setdefault("relay_enabled", self.relay)
         self.discovery.configure(callsign=self.callsign, **settings)
+        self._resume_automatic_routes()
+
+    def _resume_automatic_routes(self) -> None:
+        """Wake queued mail when automatic policy has made a route usable."""
+        if not self.discovery.automatic_use_active:
+            return
+        for msg in list(self.sessions.values()):
+            if msg.direction != "out" or msg.state not in {
+                SessionState.MULTIHOP_DISCOVERY, SessionState.WAITING_ROUTE_APPROVAL,
+            }:
+                continue
+            hop, how = self._resolve_next_hop(msg.final_dest)
+            if not hop:
+                continue
+            # LINK_ADVERT or another query can supply a route while this
+            # message waits. Its old query must not keep flooding or fail it.
+            self.discovery.pending.pop(msg.msg_id, None)
+            msg.next_hop = hop
+            self._begin_announce(msg)
+            self._emit(msg, f"automatically using available route via {hop} ({how})")
 
     def discover_route(self, destination: str) -> PendingQuery | None:
         """Operator-requested assisted discovery, independent of a message."""
@@ -813,6 +833,7 @@ class Orchestrator:
     def tick(self, now: float) -> None:
         """Drive timeouts/retransmits. Call periodically."""
         self._now = now
+        self._resume_automatic_routes()
         self.discovery.tick(now)
         if self.discovery_channel_active:
             self.discovery.advertise_neighbors(
