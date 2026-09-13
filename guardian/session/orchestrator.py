@@ -424,6 +424,8 @@ class Orchestrator:
         # Station-lab frames are directed and isolated from normal message
         # state. Operations owns their explicit operator-consent workflow.
         self.on_calibration_frame: Callable[[ControlFrame], None] | None = None
+        self.on_warships_frame = None
+        self.on_direct_beacon = None
         # Optional persistence bridge: after a restart Operations can recover
         # the reverse hop from the stored mail history and mark it delivered.
         self.delivery_receipt_route: Callable[[int, str], str] | None = None
@@ -1038,6 +1040,13 @@ class Orchestrator:
     #  Frame handling                                                     #
     # ------------------------------------------------------------------ #
     def _on_frame(self, frame: ControlFrame) -> None:
+        # WS metadata is never a next-hop address or discovery evidence.
+        if frame.type is FrameType.WARSHIPS:
+            if frame.destination == self.callsign and self.on_warships_frame:
+                self.on_warships_frame(frame)
+            return
+        if frame.type is FrameType.BEACON and frame.source != self.callsign and self.on_direct_beacon:
+            self.on_direct_beacon(frame, self._current_frequency())
         # Every frame we hear means its sender is reachable right now.
         if frame.source and frame.source != self.callsign:
             # Only a beacon's address field is a locator. Every other type

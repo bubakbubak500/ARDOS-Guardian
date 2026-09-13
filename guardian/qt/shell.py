@@ -176,6 +176,8 @@ class GuardianMainWindow(QMainWindow):
         self._build_menu()
         self._build_shell()
         self._build_notifications()
+        from .warships_window import WarshipsAccess
+        self.warships_access = WarshipsAccess(self)
         self._restore_geometry()
         # A geometry saved before a monitor change or DPI change may be larger
         # than today's logical work area.  Fit it once after restoration; later
@@ -1383,6 +1385,7 @@ class GuardianMainWindow(QMainWindow):
             self.restoreGeometry(geometry)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.warships_access.shutdown()
         self.refresh_timer.stop()
         self.protocol_timer.stop()
         self.settings.setValue("ui/main_geometry", self.saveGeometry())

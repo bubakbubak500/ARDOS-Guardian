@@ -93,6 +93,7 @@ class FrameType(IntEnum):
     # unknown types; mixed-version peers select VARA before this exchange.
     G2_PROFILE_OFFER = 24
     G2_PROFILE_ACK = 25
+    WARSHIPS = 26
 
     @property
     def label(self) -> str:

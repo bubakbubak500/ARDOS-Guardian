@@ -1191,8 +1191,8 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
     "about.title": ("About Guardian", "O aplikaci Guardian"),
     "about.body": (
         "<b>{app} {version}</b><br>Emergency communication system for HF/VHF"
-        "<br>OK7PS / OK2IPW / OK6LZ / OK2MTV",
+        "<br>OK7PS / OK2IPW / OK6LZ / OK2MTV / OK2JLD",
         "<b>{app} {version}</b><br>Systém pro nouzovou komunikaci na HF/VHF"
-        "<br>OK7PS / OK2IPW / OK6LZ / OK2MTV",
+        "<br>OK7PS / OK2IPW / OK6LZ / OK2MTV / OK2JLD",
     ),
 }

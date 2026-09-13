@@ -91,7 +91,12 @@ class ShellRuntime:
         self.workers.drain()
 
     def tick(self) -> None:
+        if not hasattr(self, "warships"):
+            from ..warships.service import WarshipsService
+            self.warships = WarshipsService(self.operations)
+        self.warships.bind()
         self.operations.tick()
+        self.warships.tick()
 
     def request_dependency_refresh(self) -> bool:
         config = self.config

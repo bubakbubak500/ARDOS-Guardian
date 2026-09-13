@@ -387,7 +387,7 @@ Once the required software and map data are present, the core messaging system o
 
 # Current status
 
-Guardian **1.1.8** improves small-screen layouts and startup centering, prefers known live routes before discovery, randomizes beacon timing, and adds mail forwarding, Delete-key support, current mailbox counters and touchpad map zoom. The VARA progress-watchdog fixes from 1.1.7 remain included. See [release notes](docs/RELEASE_NOTES_1.1.8.md) for the changes and verification limits. The 1.1.6 control-channel scheduling correction, automatic MCS/FEC/LDPC and ARQ adaptation, paired Auto Tune, and aggressive XZ compression with lossless image repacking remain available. Windows builds fetch SHA-256-verified libjxl tools through `tools/fetch_jpegxl.ps1` and include their licenses; `tools/test_frozen.ps1` checks the packaged Qt and image-compression paths.
+Guardian **1.1.9** adds removal of the entire network-builder topology, restores the G1 icon in the application and installer, and adds OK2JLD to About. See [release notes](docs/RELEASE_NOTES_1.1.9.md).
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |

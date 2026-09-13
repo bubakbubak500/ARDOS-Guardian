@@ -77,7 +77,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\dist\Guardian\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\guardian\assets\guardian.ico"; DestDir: "{app}"; DestName: "Guardian.ico"; Flags: ignoreversion
+Source: "..\guardian\assets\guardian.ico"; DestDir: "{app}"; DestName: "Guardian-G1.ico"; Flags: ignoreversion
 
 [Dirs]
 ; The operator owns this directory. Setup creates it but never supplies map
@@ -85,9 +85,9 @@ Source: "..\guardian\assets\guardian.ico"; DestDir: "{app}"; DestName: "Guardian
 Name: "{app}\maps"
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\Guardian.ico"; AppUserModelID: "OK7PS.ARDOSGuardian"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\Guardian-G1.ico"; AppUserModelID: "OK7PS.ARDOSGuardian"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\Guardian.ico"; AppUserModelID: "OK7PS.ARDOSGuardian"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\Guardian-G1.ico"; AppUserModelID: "OK7PS.ARDOSGuardian"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

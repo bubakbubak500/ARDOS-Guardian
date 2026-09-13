@@ -970,12 +970,17 @@ class AudioControlTransport(ControlTransport):
     # ------------------------------------------------------------------ #
     #  Transmit                                                           #
     # ------------------------------------------------------------------ #
-    def send(self, frame: ControlFrame) -> None:
+    def send(self, frame: ControlFrame, *, on_complete=None, allowed=None) -> None:
         # TX off the caller's thread so the UI/orchestrator never blocks on PTT.
         with self._tx_condition:
             if self._stopped:
+                if on_complete:
+                    on_complete(False)
                 return
             if self._tx_suspended:
+                if on_complete:
+                    on_complete(False)
+                    return
                 item = ("frame", frame)
                 if item not in self._deferred_tx:
                     self._deferred_tx.append(item)
@@ -988,15 +993,17 @@ class AudioControlTransport(ControlTransport):
             self._pending_frames[token] = frame
         threading.Thread(
             target=self._tx_pending,
-            args=(frame, token),
+            args=(frame, token, on_complete, allowed),
             name="afsk-tx",
             daemon=True,
         ).start()
 
-    def _tx_pending(self, frame: ControlFrame, token: int) -> None:
+    def _tx_pending(self, frame: ControlFrame, token: int, on_complete=None, allowed=None) -> None:
+        success = False
         try:
             self._tx_context.token = token
-            self._tx(frame)
+            self._tx_context.allowed = allowed
+            success = self._tx(frame) is not False
         except _ControlTxCancelled:
             pass
         except Exception as exc:
@@ -1010,6 +1017,9 @@ class AudioControlTransport(ControlTransport):
                 self._pending_tx -= 1
                 self._tx_condition.notify_all()
             del self._tx_context.token
+            del self._tx_context.allowed
+            if on_complete:
+                on_complete(success)
 
     def send_morse_after_pending(self, text: str, *, wpm: float = 40.0) -> bool:
         """Queue a CW identifier after all control frames already in flight.
@@ -1094,10 +1104,10 @@ class AudioControlTransport(ControlTransport):
     def _tx(self, frame: ControlFrame) -> None:
         if self._sd is None:
             self.on_log("Audio TX skipped — control channel not started")
-            return
+            return False
         with self._tx_lock:
             if self._stopped:
-                return
+                return False
             payload = frame.encode()
             now = time.monotonic()
             self._sent_control_frames = {
@@ -1131,6 +1141,7 @@ class AudioControlTransport(ControlTransport):
                 after_release=self._release_control_channel,
             )
         self.on_log(f"TX {frame.summary()}")
+        return True
 
     def channel_busy(self) -> bool:
         """Recognised control activity, including acquisition before decode.
@@ -1152,6 +1163,9 @@ class AudioControlTransport(ControlTransport):
         # the already-decoded first frame's release time.
         with self._tx_condition:
             while True:
+                allowed = getattr(self._tx_context, "allowed", None)
+                if allowed is not None and not allowed():
+                    raise _ControlTxCancelled()
                 if self._control_tx_cancelled():
                     raise _ControlTxCancelled()
                 remaining = max(self._peer_ready_at, self._acquisition_ready_at) - time.monotonic()

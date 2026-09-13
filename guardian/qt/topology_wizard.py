@@ -120,14 +120,26 @@ class TopologyEditor(QWidget):
         add.clicked.connect(self._save_link)
         remove = QPushButton(dual("Remove selected", "Odstranit vybranou"))
         remove.clicked.connect(self._remove_selected)
+        clear = QPushButton(dual("Remove topology", "Odebrat topologii"))
+        clear.clicked.connect(self._clear_topology)
         import_button = QPushButton(dual("Import topology CSV…", "Importovat topologii CSV…"))
         import_button.clicked.connect(self.import_csv)
         actions.addWidget(add)
         actions.addWidget(remove)
+        actions.addWidget(clear)
         actions.addStretch()
         actions.addWidget(import_button)
         layout.addLayout(actions)
         self.refresh()
+
+    def _clear_topology(self) -> None:
+        if QMessageBox.question(self, dual("Remove topology", "Odebrat topologii"),
+                dual("Remove every link from this topology?", "Odebrat všechny spoje této topologie?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            self.topology.clear()
+            self.refresh()
+            self.topology_changed.emit()
 
     def _selected_link(self) -> Link | None:
         row = self.table.currentRow()
@@ -299,7 +311,8 @@ class _EditorPage(QWizardPage):
         layout.addWidget(self.editor_scroll)
 
     def isComplete(self) -> bool:
-        return bool(self.editor.topology.links)
+        # Empty is a valid edit: it removes a previously configured topology.
+        return True
 
 
 class _PreviewPage(QWizardPage):

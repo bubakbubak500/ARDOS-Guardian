@@ -309,8 +309,11 @@ class NetworkWorkspace(QWidget):
         recompute.clicked.connect(self._apply_topology)
         export = QPushButton(tr("network.topology_export"))
         export.clicked.connect(self._export_topology)
+        self.remove_topology = QPushButton(dual("Remove topology", "Odebrat topologii"))
+        self.remove_topology.clicked.connect(self._remove_topology)
         actions.addWidget(wizard)
         actions.addWidget(recompute)
+        actions.addWidget(self.remove_topology)
         actions.addStretch()
         actions.addWidget(export)
         layout.addLayout(actions)
@@ -638,6 +641,19 @@ class NetworkWorkspace(QWidget):
         if wizard.exec() != QDialog.DialogCode.Accepted:
             return
         self.runtime.topology = Topology(wizard.topology.links)
+        self.runtime.topology.save()
+        self._apply_topology()
+
+    def _remove_topology(self) -> None:
+        if QMessageBox.question(
+            self, dual("Remove topology", "Odebrat topologii"),
+            dual("Remove all topology links and the routes generated from them? Manual routes will be kept.",
+                 "Odebrat všechny spoje topologie a z nich vytvořené trasy? Ruční trasy zůstanou zachovány."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.runtime.topology.clear()
         self.runtime.topology.save()
         self._apply_topology()
 

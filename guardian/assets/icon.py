@@ -8,6 +8,7 @@ the 16px tray size and the 256px taskbar size.
 from __future__ import annotations
 
 from pathlib import Path
+from io import BytesIO
 
 from PIL import Image, ImageDraw
 
@@ -62,18 +63,21 @@ def build_image(size: int = 256) -> Image.Image:
 
 
 def ensure_ico(path: Path) -> Path:
-    """Write a multi-resolution .ico to `path` (idempotent)."""
+    """Ensure the file contains this product's icon, replacing stale artwork."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        base = build_image(256)
-        base.save(path, format="ICO",
-                  sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    output = BytesIO()
+    build_image(256).save(output, format="ICO",
+                         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    data = output.getvalue()
+    if not path.exists() or path.read_bytes() != data:
+        path.write_bytes(data)
     return path
 
 
 def get_ico_path() -> Path:
     """Path to the cached .ico, generating it on first use."""
-    return ensure_ico(config_dir() / "guardian.ico")
+    # Separate cache identity also avoids Windows reusing the former G2 icon.
+    return ensure_ico(config_dir() / "guardian-g1.ico")
 
 
 def get_tray_image() -> Image.Image:
