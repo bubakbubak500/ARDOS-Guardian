@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from ..station_lab import CalibrationState, QUICK_TUNE_LEVELS, QUICK_TUNE_REPEATS
 from ..i18n import dual
+from .window_geometry import fit_dialog_to_screen
 
 
 _STATE_LABELS = {
@@ -59,7 +60,6 @@ class StationLabReportDialog(QDialog):
         json_path = str(getattr(status, "report_json", "") or "")
         csv_path = str(getattr(status, "report_csv", "") or "")
         self.setWindowTitle(dual("SC-FTN AutoTune report", "Report AutoTune SC-FTN"))
-        self.setMinimumSize(860, 460)
         outer = QVBoxLayout(self)
 
         if report is None:
@@ -116,6 +116,11 @@ class StationLabReportDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+        fit_dialog_to_screen(
+            self,
+            preferred_size=(860, 460),
+            minimum_size=(560, 340),
+        )
 
     @staticmethod
     def _number(value, suffix: str) -> str:

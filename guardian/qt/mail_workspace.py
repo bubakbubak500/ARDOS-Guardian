@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QAbstractItemView,
@@ -45,6 +45,7 @@ from ..protocol import Priority
 from .alerts import AlertDialog
 from .inputs import RowTable, UppercaseLineEdit
 from .runtime import ShellRuntime
+from .window_geometry import fit_dialog_to_screen
 
 
 class _MailDateItem(QTableWidgetItem):
@@ -74,6 +75,7 @@ class ComposeDialog(QDialog):
         parent=None,
         *,
         reply_to: MailMessage | None = None,
+        forward_from: MailMessage | None = None,
         destination: str = "",
     ) -> None:
         super().__init__(parent)
@@ -81,7 +83,6 @@ class ComposeDialog(QDialog):
         self.attachments: list[Attachment] = []
         self.field_widgets: dict[str, QLineEdit | QPlainTextEdit] = {}
         self.setWindowTitle(tr("compose.title"))
-        self.setMinimumSize(720, 640)
 
         outer = QVBoxLayout(self)
         header = QFormLayout()
@@ -167,6 +168,22 @@ class ComposeDialog(QDialog):
                     quoted=quoted,
                 )
             )
+        if forward_from is not None:
+            self.destination.clear()
+            self.subject.setText(f"Fwd: {forward_from.subject}")
+            self.body.setPlainText(tr(
+                "compose.forward_quote", source=forward_from.source,
+                destination=forward_from.final_dest, subject=forward_from.subject,
+                body=forward_from.body,
+            ))
+            self.attachments = [Attachment(item.name, item.data) for item in forward_from.attachments]
+            self.priority.setCurrentIndex(max(0, self.priority.findData(forward_from.priority)))
+            self._update_attachment_summary()
+        fit_dialog_to_screen(
+            self,
+            preferred_size=(720, 640),
+            minimum_size=(540, 380),
+        )
 
     def _clear_form(self) -> None:
         while self.form_layout.count():
@@ -222,6 +239,9 @@ class ComposeDialog(QDialog):
                 self.attachments.append(Attachment(path.name, path.read_bytes()))
             except OSError as exc:
                 QMessageBox.warning(self, tr("compose.attach_error"), str(exc))
+        self._update_attachment_summary()
+
+    def _update_attachment_summary(self) -> None:
         total = sum(item.size for item in self.attachments)
         warning = tr("compose.large_rf") if total > 50_000 else ""
         self.attachment_summary.setText(
@@ -307,7 +327,6 @@ class MessageDialog(QDialog):
     def __init__(self, message: MailMessage, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(message.subject or tr("mail.no_subject"))
-        self.setMinimumSize(720, 640)
 
         outer = QVBoxLayout(self)
         header = QFormLayout()
@@ -343,6 +362,11 @@ class MessageDialog(QDialog):
         )
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+        fit_dialog_to_screen(
+            self,
+            preferred_size=(720, 640),
+            minimum_size=(540, 380),
+        )
 
 
 class MailWorkspace(QWidget):
@@ -420,6 +444,10 @@ class MailWorkspace(QWidget):
         self.messages.setSortingEnabled(True)
         self.messages.itemSelectionChanged.connect(self._open_selected)
         self.messages.doubleClicked.connect(self.open_in_window)
+        self.delete_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.messages)
+        self.delete_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.delete_shortcut.setAutoRepeat(False)
+        self.delete_shortcut.activated.connect(self.delete_selected)
         content.addWidget(self.messages)
 
         reader = QWidget()
@@ -453,12 +481,15 @@ class MailWorkspace(QWidget):
         actions = QHBoxLayout()
         self.reply_button = QPushButton()
         self.reply_button.clicked.connect(self.reply)
+        self.forward_button = QPushButton()
+        self.forward_button.clicked.connect(self.forward_selected)
         self.send_button = QPushButton()
         self.send_button.setObjectName("primaryAction")
         self.send_button.clicked.connect(self.send_selected)
         self.delete_button = QPushButton()
         self.delete_button.clicked.connect(self.delete_selected)
         actions.addWidget(self.reply_button)
+        actions.addWidget(self.forward_button)
         actions.addWidget(self.send_button)
         actions.addStretch()
         actions.addWidget(self.delete_button)
@@ -483,6 +514,7 @@ class MailWorkspace(QWidget):
         self.save_attachment_button.setText(tr("mail.attachment_save"))
         self.save_all_button.setText(tr("mail.attachment_save_all"))
         self.reply_button.setText(tr("mail.reply"))
+        self.forward_button.setText(tr("mail.forward"))
         self.send_button.setText(tr("mail.send_queued"))
         self.delete_button.setText(tr("mail.delete"))
         self._reader_signature = None
@@ -553,6 +585,7 @@ class MailWorkspace(QWidget):
             self.messages.blockSignals(False)
         self.reader.clear()
         self.reply_button.setEnabled(False)
+        self.forward_button.setEnabled(False)
         self.send_button.setEnabled(False)
         self.delete_button.setEnabled(False)
         self._show_attachments(None)
@@ -845,6 +878,7 @@ class MailWorkspace(QWidget):
                 tr("mail.multiple_selected", count=len(self.selected_ids))
             )
             self.reply_button.setEnabled(False)
+            self.forward_button.setEnabled(False)
             self.send_button.setEnabled(False)
             self.delete_button.setEnabled(True)
             self._show_attachments(None)
@@ -868,6 +902,7 @@ class MailWorkspace(QWidget):
             self._reader_signature = ("missing", self.selected_id, language().value)
             self.reader.setPlainText(tr("mail.not_found"))
             self.reply_button.setEnabled(False)
+            self.forward_button.setEnabled(False)
             self.send_button.setEnabled(False)
             self.delete_button.setEnabled(True)
             self._show_attachments(None)
@@ -891,6 +926,7 @@ class MailWorkspace(QWidget):
             )
         )
         self.reply_button.setEnabled(message.folder == Folder.INBOX)
+        self.forward_button.setEnabled(True)
         self.send_button.setEnabled(
             message.folder in (Folder.OUTBOX, Folder.TRANSIT)
         )
@@ -906,8 +942,8 @@ class MailWorkspace(QWidget):
             return
         MessageDialog(message, self).exec()
 
-    def compose(self, *, reply_to: MailMessage | None = None) -> None:
-        dialog = ComposeDialog(self.runtime, self, reply_to=reply_to)
+    def compose(self, *, reply_to: MailMessage | None = None, forward_from: MailMessage | None = None) -> None:
+        dialog = ComposeDialog(self.runtime, self, reply_to=reply_to, forward_from=forward_from)
         dialog.queued.connect(lambda _message_id: self.refresh())
         dialog.exec()
 
@@ -920,6 +956,13 @@ class MailWorkspace(QWidget):
         message = self.runtime.mailstore.get(self.selected_id)
         if message is not None:
             self.compose(reply_to=message)
+
+    def forward_selected(self) -> None:
+        if self.selected_id is None or len(self.selected_ids) != 1:
+            return
+        message = self.runtime.mailstore.get(self.selected_id)
+        if message is not None:
+            self.compose(forward_from=message)
 
     def delete_selected(self) -> None:
         message_ids = tuple(sorted(self.selected_ids))

@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QFontDatabase, QIcon
+from PySide6.QtCore import QSettings, QSize, Qt, QTimer
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QFontDatabase,
+    QIcon,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QFileDialog,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
@@ -55,6 +63,7 @@ from .station_lab_workspace import StationLabWorkspace
 from .theme import ThemeController, ThemePreference
 from .transfer_progress import TransferPanel, transfer_state
 from .update_dialog import UpdateDialog
+from .window_geometry import fit_window_to_screen
 
 
 PAYLOAD_LABELS = {
@@ -98,7 +107,47 @@ class StatusIndicator(QLabel):
         _repolish(self)
 
 
+class WorkspaceStack(QStackedWidget):
+    """Only the visible workspace determines how much content must scroll."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.layout().setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self.currentChanged.connect(lambda _index: self.updateGeometry())
+
+    def minimumSizeHint(self):
+        current = self.currentWidget()
+        return current.minimumSizeHint() if current is not None else QSize(0, 0)
+
+    def sizeHint(self):
+        current = self.currentWidget()
+        return current.sizeHint() if current is not None else QSize(0, 0)
+
+    def hasHeightForWidth(self):
+        current = self.currentWidget()
+        return current is not None and current.hasHeightForWidth()
+
+    def heightForWidth(self, width):
+        current = self.currentWidget()
+        return current.heightForWidth(width) if current is not None else -1
+
+
+class ShellContent(QWidget):
+    def heightForWidth(self, width):
+        # QScrollArea otherwise treats the layout's preferred height as a
+        # minimum, adding a scrollbar even when every control already fits.
+        layout = self.layout()
+        return layout.minimumHeightForWidth(width) if layout is not None else -1
+
+
 class GuardianMainWindow(QMainWindow):
+    # This is deliberately below the smallest desktop we support in the
+    # responsive layout.  The network pages and settings dialogs own their
+    # vertical scrolling; the shell viewport is a fallback for a very short
+    # desktop or expanded status/alert panels.
+    MINIMUM_SIZE = QSize(720, 440)
+    COMPACT_WIDTH = 1_050
+
     def __init__(
         self,
         runtime: ShellRuntime,
@@ -121,13 +170,24 @@ class GuardianMainWindow(QMainWindow):
 
         self.setWindowTitle(f"{__app_name__} — ARDOS  v{__version__}")
         self.setWindowIcon(QIcon(str(get_ico_path())))
-        self.setMinimumSize(1180, 720)
+        self.setMinimumSize(self.MINIMUM_SIZE)
         self.resize(1366, 768)
 
         self._build_menu()
         self._build_shell()
         self._build_notifications()
         self._restore_geometry()
+        # A geometry saved before a monitor change or DPI change may be larger
+        # than today's logical work area.  Fit it once after restoration; later
+        # manual resizes are respected.
+        fit_window_to_screen(
+            self,
+            preferred_size=self.size(),
+            minimum_size=self.MINIMUM_SIZE,
+            margin=8,
+            center=False,
+        )
+        self._update_responsive_layout(self.width())
         self._refresh()
 
         self.refresh_timer = QTimer(self)
@@ -249,21 +309,30 @@ class GuardianMainWindow(QMainWindow):
         help_menu.addAction(about)
 
     def _build_shell(self) -> None:
-        root = QWidget()
+        root = ShellContent()
         root.setObjectName("AppShell")
         outer = QVBoxLayout(root)
         outer.setContentsMargins(12, 8, 12, 8)
         outer.setSpacing(6)
-        self.setCentralWidget(root)
+        outer.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self.shell_scroll = QScrollArea()
+        self.shell_scroll.setObjectName("ShellContentScroll")
+        self.shell_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.shell_scroll.setWidgetResizable(True)
+        self.shell_scroll.setWidget(root)
+        self.setCentralWidget(self.shell_scroll)
 
-        outer.addWidget(self._build_operational_header())
+        self.operational_header = self._build_operational_header()
+        outer.addWidget(self.operational_header)
         self.alert_banner = AlertBanner()
         outer.addWidget(self.alert_banner)
-        outer.addWidget(self._build_metric_strip())
+        self.metric_strip = self._build_metric_strip()
+        outer.addWidget(self.metric_strip)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setMinimumHeight(260)
         splitter.setChildrenCollapsible(False)
-        self.workspace_stack = QStackedWidget()
+        self.workspace_stack = WorkspaceStack()
         self.workspace_names = {
             "home": self._build_workspace(),
             "mail": MailWorkspace(self.runtime),
@@ -275,21 +344,93 @@ class GuardianMainWindow(QMainWindow):
         for workspace in self.workspace_names.values():
             self.workspace_stack.addWidget(workspace)
         splitter.addWidget(self.workspace_stack)
-        splitter.addWidget(self._build_activity())
+        self.activity_panel = self._build_activity()
+        splitter.addWidget(self.activity_panel)
         splitter.setStretchFactor(0, 65)
         splitter.setStretchFactor(1, 35)
         splitter.setSizes([760, 420])
+        self.shell_splitter = splitter
         outer.addWidget(splitter, 1)
-        outer.addWidget(self._build_status_strip())
+        self.status_strip = self._build_status_strip()
+        outer.addWidget(self.status_strip)
 
         self.statusBar().showMessage(
             tr("shell.ready")
         )
 
+    def _update_responsive_layout(self, width: int | None = None) -> None:
+        """Switch the shell's secondary panes before they become unusable.
+
+        The normal desktop keeps the activity feed beside the workspace. At a
+        narrow logical width it is available through an explicit toggle. Keep
+        the header side by side to conserve height; the shell scroll viewport
+        handles unusually long content without compressing its controls.
+        """
+
+        if not hasattr(self, "shell_splitter"):
+            return
+        width = self.width() if width is None else int(width)
+        compact = width < self.COMPACT_WIDTH
+        if compact == getattr(self, "_compact_layout", None):
+            if compact:
+                self._resize_compact_splitter()
+            return
+        self._compact_layout = compact
+
+        self.shell_splitter.setOrientation(
+            Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
+        )
+        if compact:
+            self._header_operation.setMinimumWidth(0)
+            self._metric_layout.setSpacing(8)
+            self.activity_toggle.setVisible(True)
+            self.activity_toggle.setChecked(False)
+            self.activity_panel.setVisible(False)
+            self._resize_compact_splitter()
+        else:
+            self.shell_splitter.setSizes([760, 420])
+            self._header_operation.setMinimumWidth(285)
+            self._metric_layout.setSpacing(20)
+            self.activity_toggle.setVisible(False)
+            self.activity_toggle.setChecked(False)
+            self.activity_panel.setVisible(True)
+
+    def _resize_compact_splitter(self) -> None:
+        """Give the active workspace all compact height unless requested."""
+
+        if not getattr(self, "_compact_layout", False):
+            return
+        height = self.shell_splitter.height()
+        if height <= 0:
+            QTimer.singleShot(0, self._resize_compact_splitter)
+            return
+        if self.activity_panel.isVisible():
+            first = max(180, int(height * 0.68))
+            second = max(120, height - first)
+            self.shell_splitter.setSizes([first, second])
+        else:
+            self.shell_splitter.setSizes([height, 0])
+
+    def _toggle_activity_panel(self, checked: bool) -> None:
+        """Expose the activity feed on compact screens without stealing space."""
+
+        if not getattr(self, "_compact_layout", False):
+            return
+        self.activity_panel.setVisible(bool(checked))
+        if checked:
+            available = max(320, self.shell_splitter.height())
+            self.shell_splitter.setSizes(
+                [max(220, int(available * 0.68)), max(120, int(available * 0.32))]
+            )
+        else:
+            self.shell_splitter.setSizes([max(220, self.shell_splitter.height()), 0])
+
     def _build_operational_header(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("OperationalHeader")
         layout = QHBoxLayout(panel)
+        self._header_layout = layout
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(16)
 
@@ -343,6 +484,7 @@ class GuardianMainWindow(QMainWindow):
 
         operation = QWidget()
         operation.setMinimumWidth(285)
+        self._header_operation = operation
         operation_layout = QVBoxLayout(operation)
         operation_layout.setContentsMargins(0, 0, 0, 0)
         operation_layout.setSpacing(4)
@@ -375,6 +517,7 @@ class GuardianMainWindow(QMainWindow):
         panel = QFrame()
         panel.setObjectName("MetricStrip")
         layout = QHBoxLayout(panel)
+        self._metric_layout = layout
         layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(20)
         self.metrics = {
@@ -475,6 +618,12 @@ class GuardianMainWindow(QMainWindow):
             )
             layout.addWidget(indicator)
         layout.addStretch()
+        self.activity_toggle = QPushButton(tr("activity.title"))
+        self.activity_toggle.setCheckable(True)
+        self.activity_toggle.setChecked(False)
+        self.activity_toggle.clicked.connect(self._toggle_activity_panel)
+        self.activity_toggle.setVisible(False)
+        layout.addWidget(self.activity_toggle)
         return panel
 
     def _build_notifications(self) -> None:
@@ -550,6 +699,9 @@ class GuardianMainWindow(QMainWindow):
         self.runtime.tick()
 
     def _refresh(self) -> None:
+        # Folder labels read the store directly. Refresh that same mailbox
+        # state before rendering the header, including changes made by RX/TX.
+        self.runtime.refresh()
         snapshot = self.runtime.snapshots.read()
         self._apply_snapshot(snapshot)
         self._poll_station_lab_offer()
@@ -1085,7 +1237,9 @@ class GuardianMainWindow(QMainWindow):
         if previous is not None:
             previous.deleteLater()
         self._build_menu()
+        self._compact_layout = None
         self._build_shell()
+        self._update_responsive_layout(self.width())
         if log_filter is not None:
             log_workspace = self.workspace_names["log"]
             index = log_workspace.level.findData(log_filter[0])
@@ -1218,6 +1372,10 @@ class GuardianMainWindow(QMainWindow):
         self.runtime.events.publish(
             tr("network.export_done", path=path), source="network"
         )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_responsive_layout(event.size().width())
 
     def _restore_geometry(self) -> None:
         geometry = self.settings.value("ui/main_geometry")

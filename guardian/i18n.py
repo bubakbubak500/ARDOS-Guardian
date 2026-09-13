@@ -282,6 +282,13 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "Vybráno zpráv: {count}",
     ),
     "mail.reply": ("Reply", "Odpovědět"),
+    "mail.forward": ("Forward", "Přeposlat"),
+    "compose.forward_quote": (
+        "\n\n--- Forwarded message ---\nFrom: {source}\nTo: {destination}\nSubject: {subject}\n\n{body}",
+        "\n\n--- Přeposlaná zpráva ---\nOd: {source}\nKomu: {destination}\nPředmět: {subject}\n\n{body}",
+    ),
+    "map.zoom_in": ("Zoom in", "Přiblížit"),
+    "map.zoom_out": ("Zoom out", "Oddálit"),
     "mail.send_queued": ("Send queued message", "Odeslat zprávu z fronty"),
     "mail.delete": ("Delete", "Odstranit"),
     "mail.delete_confirm": (

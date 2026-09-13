@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..i18n import dual, tr
+from .window_geometry import fit_dialog_to_screen
 
 
 @dataclass(frozen=True, slots=True)
@@ -905,8 +906,14 @@ def help_topics() -> list[HelpTopic]:
             the production policy, automatic discovery use may immediately
             pass a message over a usable result. <b>LINK_ADVERT</b> is periodic
             neighbour evidence: it builds or refreshes a directed live graph
-            before a message needs a route. It does not replace the on-demand
-            query, and an advert observation is not a delivery receipt.
+            before a message needs a route. A fresh reciprocal path is used
+            immediately: HAVE_MSG/ACK_HAVE checks the next hop without an RREQ
+            or end-to-end route confirmation. The default evidence lifetime is
+            30 minutes. Failed attempts lower a live route's ranking without
+            disabling it or extending its expiry; known alternative hops are
+            tried before recovery discovery. RREQ remains available for an
+            unknown route, exhausted known hops, or the Find route action.
+            An advert observation is not a delivery receipt.
             <b>Topology</b> imported or built in the wizard is a separate,
             configured graph; it is not experimental and is not overwritten by
             live observations.</p>
@@ -951,8 +958,14 @@ def help_topics() -> list[HelpTopic]:
             produkční politice může automatické použití discovery ihned předat
             zprávu po použitelné cestě. <b>LINK_ADVERT</b> je pravidelný důkaz
             sousedství: staví nebo obnovuje živý směrovaný graf dříve, než je
-            trasa potřeba. Nenahrazuje dotaz na vyžádání a pozorování advertu
-            není potvrzení doručení. <b>Topologie</b> importovaná nebo sestavená
+            trasa potřeba. Čerstvá oboustranně doložená cesta se použije ihned:
+            HAVE_MSG/ACK_HAVE ověří další stanici bez RREQ a bez čekání na
+            potvrzení celé trasy. Výchozí platnost pozorování je 30 minut.
+            Neúspěch zhorší hodnocení živé trasy, ale nevypne ji ani neprodlouží
+            její platnost. Nejdříve se zkusí známé alternativní sousedy; RREQ
+            zbývá pro neznámou trasu, vyčerpané známé možnosti nebo tlačítko
+            Najít trasu. Pozorování advertu není potvrzení doručení.
+            <b>Topologie</b> importovaná nebo sestavená
             v průvodci je jiný, nastavený graf; není experimentální a živá
             pozorování jej nepřepisují.</p>
             <p>Mechanismy sdílejí bezpečnostní limity. TTL, seznamy povolených a
@@ -1857,7 +1870,6 @@ class HelpDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("help.title"))
-        self.setMinimumSize(980, 680)
         outer = QVBoxLayout(self)
         self.search = QLineEdit()
         self.search.setPlaceholderText(tr("help.search"))
@@ -1865,7 +1877,9 @@ class HelpDialog(QDialog):
         outer.addWidget(self.search)
         body = QHBoxLayout()
         self.topics = QListWidget()
-        self.topics.setMinimumWidth(280)
+        # The topic list has its own vertical scroll bar; reserving 280 px
+        # left too little room for the article at narrow/high-DPI sizes.
+        self.topics.setMinimumWidth(160)
         self.viewer = QTextBrowser()
         self.viewer.setOpenExternalLinks(True)
         body.addWidget(self.topics)
@@ -1880,6 +1894,11 @@ class HelpDialog(QDialog):
         self._all_topics = help_topics()
         self.topics.currentItemChanged.connect(self._show_topic)
         self._filter("")
+        fit_dialog_to_screen(
+            self,
+            preferred_size=(980, 680),
+            minimum_size=(600, 400),
+        )
 
     def _filter(self, query: str) -> None:
         def searchable(value: str) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import random
 import subprocess
 import threading
 import time
@@ -245,6 +246,9 @@ class Operations:
         self._qsy_previous_mode: str = ""
         self._last_beacon = 0.0
         self._last_beacon_request: float | None = None
+        self._beacon_random = random.Random()
+        self._next_beacon_at: float | None = None
+        self._beacon_schedule_interval: float | None = None
         self._last_auto_deliver = 0.0
         self._auto_delivery_attempted: dict[int, float] = {}
         self._vara_process: subprocess.Popen | None = None
@@ -3933,6 +3937,12 @@ class Operations:
                 "Beacon not queued: a control burst is still on the air.",
                 "Maják nezařazen: řídicí rámec se stále vysílá.",
             )
+        channel_busy = getattr(self.audio_transport, "channel_busy", None)
+        if callable(channel_busy) and channel_busy():
+            return dual(
+                "Beacon not queued: receiving control traffic; waiting for a quiet channel.",
+                "Maják nezařazen: příjem řídicího provozu; čeká se na volný kanál.",
+            )
         if manual:
             now = time.monotonic() if now is None else now
             last = self._last_beacon_request
@@ -3990,6 +4000,7 @@ class Operations:
             # loop, and a manual request must hold off the next auto tick.
             self._last_beacon = now
             self._last_beacon_request = now
+            self._schedule_next_beacon(now)
             try:
                 self.net.beacon()
             except Exception as exc:  # noqa: BLE001 - operation must stay alive
@@ -4018,11 +4029,31 @@ class Operations:
     def _tick_beacon(self, now: float) -> None:
         """Announce presence so peers can hear this station and route to it."""
         if not self.config.beacon_enabled:
+            self._next_beacon_at = None
+            self._beacon_schedule_interval = None
             return
         interval = max(self._BEACON_MIN_GAP, float(self.config.beacon_interval))
-        if now - self._last_beacon < interval:
+        if self._next_beacon_at is None or interval != self._beacon_schedule_interval:
+            if self._last_beacon_request is not None or self._last_beacon > 0:
+                self._schedule_next_beacon(self._last_beacon)
+            else:
+                self._next_beacon_at = now + self._beacon_random.uniform(0.0, 5.0)
+                self._beacon_schedule_interval = interval
+        if now < self._next_beacon_at:
             return
-        self._queue_beacon(now, manual=False)
+        if not self._queue_beacon(now, manual=False):
+            # Keep one outstanding beacon, not a backlog. Random retry avoids
+            # synchronising overdue stations at the end of the same burst.
+            self._next_beacon_at = max(
+                self._next_beacon_at, now + self._beacon_random.uniform(1.0, 5.0),
+            )
+
+    def _schedule_next_beacon(self, now: float) -> None:
+        interval = max(self._BEACON_MIN_GAP, float(self.config.beacon_interval))
+        self._beacon_schedule_interval = interval
+        self._next_beacon_at = now + max(
+            self._BEACON_MIN_GAP, interval + self._beacon_random.uniform(-5.0, 5.0),
+        )
 
     def _tick_auto_deliver(self, now: float) -> None:
         # Keep the mailbox selection and the send_queued transition together

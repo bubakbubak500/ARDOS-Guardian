@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -26,6 +27,7 @@ from ..ofdm.automatic import automatic_g2_policy
 from ..services import TaskResult
 from ..waveforms.config import profile_for
 from .runtime import ShellRuntime
+from .window_geometry import fit_dialog_to_screen
 
 
 class ReadinessDialog(QDialog):
@@ -39,7 +41,6 @@ class ReadinessDialog(QDialog):
         self.runtime = runtime
         self.settings = settings
         self.setWindowTitle(tr("readiness.title"))
-        self.setMinimumSize(780, 360)
 
         outer = QVBoxLayout(self)
         outer.setSpacing(6)
@@ -66,11 +67,24 @@ class ReadinessDialog(QDialog):
         self.grid.setContentsMargins(0, 6, 0, 6)
         self.grid.setHorizontalSpacing(12)
         self.grid.setVerticalSpacing(6)
-        outer.addWidget(self.grid_host)
-
         self.summary = QLabel()
         self.summary.setWordWrap(True)
-        outer.addWidget(self.summary)
+
+        # Keep the scan result scrollable while the Scan and Close controls
+        # stay in the dialog footer.  Dependency guidance can become several
+        # wrapped lines on a narrow or highly scaled desktop.
+        content_host = QWidget()
+        content_layout = QVBoxLayout(content_host)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.addWidget(self.grid_host)
+        content_layout.addWidget(self.summary)
+        content_layout.addStretch(1)
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setObjectName("ReadinessContentScroll")
+        self.content_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setWidget(content_host)
+        outer.addWidget(self.content_scroll, 1)
         actions = QHBoxLayout()
         self.rescan = QPushButton(dual("Scan again", "Zkontrolovat znovu"))
         self.rescan.clicked.connect(self._rescan)
@@ -85,6 +99,12 @@ class ReadinessDialog(QDialog):
         )
         buttons.rejected.connect(self._finish)
         outer.addWidget(buttons)
+
+        fit_dialog_to_screen(
+            self,
+            preferred_size=(780, 360),
+            minimum_size=(560, 300),
+        )
 
         self.timer = QTimer(self)
         self.timer.setInterval(100)

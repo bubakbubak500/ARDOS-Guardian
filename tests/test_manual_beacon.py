@@ -133,7 +133,7 @@ def test_manual_beacon_refuses_competing_work(tmp_path, monkeypatch, block, expe
         workers.close(wait=True)
 
 
-def test_auto_beacon_uses_the_same_gate_and_keeps_existing_interval(tmp_path) -> None:
+def test_auto_beacon_uses_the_same_gate_and_keeps_existing_interval(tmp_path, monkeypatch) -> None:
     operations, workers = _operations(
         tmp_path,
         beacon_enabled=True,
@@ -141,12 +141,85 @@ def test_auto_beacon_uses_the_same_gate_and_keeps_existing_interval(tmp_path) ->
     )
     operations.audio_transport = SimpleNamespace()
     sent = _sent(operations)
+    monkeypatch.setattr(operations._beacon_random, "uniform", lambda low, high: 0.0)
     try:
         operations._tick_beacon(1_000.0)
         assert len(sent) == 1
         operations._tick_beacon(1_030.0)
         assert len(sent) == 1
         operations._tick_beacon(1_061.0)
+        assert len(sent) == 2
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+@pytest.mark.parametrize("offset", [-5.0, 5.0])
+def test_beacon_jitter_is_sampled_once_per_interval(tmp_path, monkeypatch, offset):
+    operations, workers = _operations(tmp_path, beacon_enabled=True, beacon_interval=60.0)
+    operations.audio_transport = SimpleNamespace()
+    sent = _sent(operations)
+    draws = []
+    def uniform(low, high):
+        draws.append((low, high))
+        return 0.0 if low == 0 else offset
+    monkeypatch.setattr(operations._beacon_random, "uniform", uniform)
+    try:
+        operations._tick_beacon(1000)
+        assert len(sent) == 1
+        due = 1060 + offset
+        assert operations._next_beacon_at == due
+        for now in (1001, 1020, due - 0.01):
+            operations._tick_beacon(now)
+        assert len(sent) == 1 and len(draws) == 2
+        operations._tick_beacon(due)
+        assert len(sent) == 2 and len(draws) == 3
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_busy_channel_defers_one_beacon_with_random_retry(tmp_path, monkeypatch):
+    operations, workers = _operations(tmp_path, beacon_enabled=True, beacon_interval=60.0)
+    busy = [True]
+    operations.audio_transport = SimpleNamespace(channel_busy=lambda: busy[0])
+    sent = _sent(operations)
+    monkeypatch.setattr(operations._beacon_random, "uniform", lambda low, high: 3.0 if low == 1 else 0.0)
+    try:
+        operations._tick_beacon(1000)
+        assert sent == [] and operations._next_beacon_at == 1003
+        operations._tick_beacon(1002)
+        assert sent == []
+        operations._tick_beacon(1200)  # Several nominal intervals elapsed.
+        assert sent == [] and operations._next_beacon_at == 1203
+        busy[0] = False
+        operations._tick_beacon(1202)
+        assert sent == []
+        operations._tick_beacon(1203)
+        assert len(sent) == 1 and operations._next_beacon_at == 1263
+        operations._tick_beacon(1204)
+        assert len(sent) == 1
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_beacon_startup_spread_and_minimum_gap(tmp_path, monkeypatch):
+    operations, workers = _operations(tmp_path, beacon_enabled=True, beacon_interval=15.0)
+    operations.audio_transport = SimpleNamespace()
+    sent = _sent(operations)
+    monkeypatch.setattr(operations._beacon_random, "uniform", lambda low, high: 5.0 if low == 0 else -5.0)
+    try:
+        operations._tick_beacon(1000)
+        assert sent == [] and operations._next_beacon_at == 1005
+        operations._tick_beacon(1005)
+        assert len(sent) == 1 and operations._next_beacon_at == 1020
+        operations._tick_beacon(1019)
+        assert len(sent) == 1
+        operations._tick_beacon(1020)
         assert len(sent) == 2
     finally:
         operations.audio_transport = None

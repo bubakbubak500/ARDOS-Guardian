@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QScrollArea,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -43,6 +45,7 @@ from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.usb_serial import list_serial_ports, port_device
 from .theme import ThemePreference
 from .inputs import UppercaseLineEdit, callsign_list
+from .window_geometry import fit_dialog_to_screen
 
 _CALLSIGN = re.compile(r"^[A-Z0-9/]{3,16}$")
 
@@ -140,7 +143,10 @@ class SettingsDialog(QDialog):
         # dialog looks the same wherever it is opened.
         self.operations = operations
         self.setWindowTitle(tr("settings.title"))
-        self.setMinimumSize(960, 650)
+        # The previous fixed floor put the Save/Cancel row below the work area
+        # on a 1366x768 monitor at 125% scaling.  Each tab owns its vertical
+        # scroll area and this readable floor is capped to the actual monitor.
+        self._tab_scrolls: list[QScrollArea] = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)
@@ -185,9 +191,18 @@ class SettingsDialog(QDialog):
             self.apply
         )
         outer.addWidget(self.buttons)
+        fit_dialog_to_screen(
+            self,
+            preferred_size=(960, 650),
+            minimum_size=(680, 420),
+        )
 
     def _page(self, title: str, description: str) -> QFormLayout:
         page = QWidget()
+        page.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Preferred,
+        )
         layout = QFormLayout(page)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setHorizontalSpacing(16)
@@ -199,7 +214,16 @@ class SettingsDialog(QDialog):
         label.setObjectName("Metadata")
         label.setWordWrap(True)
         layout.addRow(label)
-        self.tabs.addTab(page, title)
+        scroll = QScrollArea()
+        scroll.setObjectName("SettingsPageScroll")
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll.setWidget(page)
+        self._tab_scrolls.append(scroll)
+        self.tabs.addTab(scroll, title)
         return layout
 
     def _build_identity(self) -> None:

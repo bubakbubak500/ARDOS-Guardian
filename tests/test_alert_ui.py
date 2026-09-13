@@ -36,7 +36,7 @@ def test_banner_sits_between_the_station_context_and_the_counters(tmp_path) -> N
     settings = QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)
     window = GuardianMainWindow(ShellRuntime(), settings)
     try:
-        layout = window.centralWidget().layout()
+        layout = window.shell_scroll.widget().layout()
         order = [
             layout.itemAt(index).widget().objectName()
             for index in range(layout.count())

@@ -322,7 +322,7 @@ def test_beacon_and_auto_delivery_stay_silent_without_a_control_channel(
         workers.close(wait=True)
 
 
-def test_the_beacon_switch_actually_beacons_on_its_interval(tmp_path) -> None:
+def test_the_beacon_switch_actually_beacons_on_its_interval(tmp_path, monkeypatch) -> None:
     # beacon_enabled was a dead checkbox until 0.6.27: send_beacon() existed
     # but nothing ever called it.
     operations, workers, _ = _operations(
@@ -330,6 +330,7 @@ def test_the_beacon_switch_actually_beacons_on_its_interval(tmp_path) -> None:
     )
     sent = _spy_transmissions(operations)
     operations.audio_transport = SimpleNamespace(pump=lambda: 0)
+    monkeypatch.setattr(operations._beacon_random, "uniform", lambda low, high: 0.0)
     try:
         operations._tick_beacon(1_000.0)
         assert len(sent) == 1

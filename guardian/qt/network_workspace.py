@@ -10,11 +10,15 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QTableWidgetItem,
@@ -58,6 +62,12 @@ class _RouteRow:
 
 
 class NetworkWorkspace(QWidget):
+    # A table needs a little vertical breathing room even when the surrounding
+    # shell is only a few hundred logical pixels high.  The page scroll area
+    # then keeps the editor and actions reachable below it.
+    TABLE_MIN_HEIGHT = 160
+    DISCOVERY_TABLE_MIN_HEIGHT = 180
+
     def __init__(self, runtime: ShellRuntime, parent=None) -> None:
         super().__init__(parent)
         self.runtime = runtime
@@ -76,13 +86,56 @@ class NetworkWorkspace(QWidget):
         # Planned network first, then what is actually on the air, followed by
         # discovery and live topology. Nothing here nests a second row of tabs
         # inside a tab.
-        self.tabs.addTab(self._routes_page(), tr("network.routes"))
-        self.tabs.addTab(self._heard_page(), tr("network.heard"))
-        self.tabs.addTab(self._topology_page(), tr("network.topology"))
-        self.tabs.addTab(self._discovery_page(), tr("network.discovery"))
-        self.tabs.addTab(self._live_topology_page(), tr("network.live_topology"))
+        self.tabs.addTab(
+            self._scrollable_page(self._routes_page()),
+            tr("network.routes"),
+        )
+        self.tabs.addTab(
+            self._scrollable_page(self._heard_page()),
+            tr("network.heard"),
+        )
+        self.tabs.addTab(
+            self._scrollable_page(self._topology_page()),
+            tr("network.topology"),
+        )
+        self.tabs.addTab(
+            self._scrollable_page(self._discovery_page()),
+            tr("network.discovery"),
+        )
+        self.tabs.addTab(
+            self._scrollable_page(self._live_topology_page()),
+            tr("network.live_topology"),
+        )
         outer.addWidget(self.tabs, 1)
         self.refresh()
+
+    @staticmethod
+    def _scrollable_page(page: QWidget) -> QScrollArea:
+        """Give each network tab an independent vertical viewport.
+
+        QTableWidget already provides horizontal and row scrolling.  Keeping
+        the page itself scrollable means the editor, status text, and buttons
+        remain available when a display's logical height is smaller than the
+        comfortable desktop layout.
+        """
+
+        # Let wrapped labels and translated actions contribute their real
+        # minimum, rather than squeezing a tall page into a fixed estimate.
+        page.layout().setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        page.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        scroll = QScrollArea()
+        scroll.setObjectName("NetworkPageScroll")
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(page)
+        return scroll
 
     def _routes_page(self) -> QWidget:
         page = QWidget()
@@ -102,6 +155,7 @@ class NetworkWorkspace(QWidget):
             ]
         )
         self.routes_table.itemSelectionChanged.connect(self._load_selected_route)
+        self.routes_table.setMinimumHeight(self.TABLE_MIN_HEIGHT)
         header = self.routes_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -174,6 +228,7 @@ class NetworkWorkspace(QWidget):
         detail.setObjectName("Metadata")
         layout.addWidget(detail)
         self.heard_table = RowTable(0, 8)
+        self.heard_table.setMinimumHeight(self.TABLE_MIN_HEIGHT)
         self.heard_table.setHorizontalHeaderLabels(
             [
                 tr("network.callsign"),
@@ -224,6 +279,7 @@ class NetworkWorkspace(QWidget):
         self.topology_summary.setWordWrap(True)
         layout.addWidget(self.topology_summary)
         self.topology_table = RowTable(0, 7)
+        self.topology_table.setMinimumHeight(self.TABLE_MIN_HEIGHT)
         self.topology_table.setHorizontalHeaderLabels(
             [
                 tr("network.station_a"),
@@ -300,6 +356,7 @@ class NetworkWorkspace(QWidget):
         layout.addWidget(self.discovery_status)
 
         self.discovery_routes = RowTable(0, 9)
+        self.discovery_routes.setMinimumHeight(self.DISCOVERY_TABLE_MIN_HEIGHT)
         self.discovery_routes.setHorizontalHeaderLabels(
             [
                 tr("network.destination"),
@@ -333,6 +390,7 @@ class NetworkWorkspace(QWidget):
         layout.addLayout(route_actions)
 
         self.discovery_pending = RowTable(0, 5)
+        self.discovery_pending.setMinimumHeight(72)
         self.discovery_pending.setMaximumHeight(110)
         self.discovery_pending.setHorizontalHeaderLabels(
             [
@@ -385,6 +443,7 @@ class NetworkWorkspace(QWidget):
         )
         live_layout.addLayout(live_form)
         self.live_links = RowTable(0, 7)
+        self.live_links.setMinimumHeight(self.TABLE_MIN_HEIGHT)
         self.live_links.setHorizontalHeaderLabels(
             [
                 tr("network.link_owner"),

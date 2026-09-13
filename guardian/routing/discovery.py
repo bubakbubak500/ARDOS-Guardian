@@ -194,6 +194,8 @@ class DynamicRouteStore:
                 learned.expires_at = min(learned.expires_at, float(evidence_expires))
             current = self._routes.get(key)
             if current is not None and preserve_approval:
+                current.failures = previous.failures
+                current.last_success = previous.last_success
                 if previous.approved and not previous.auto_approved:
                     current.approved = True
                     current.auto_approved = False
@@ -212,6 +214,7 @@ class DynamicRouteStore:
         now: float,
         *,
         approved_only: bool = False,
+        exclude_hops: frozenset[str] | set[str] = frozenset(),
     ) -> DynamicRoute | None:
         dest = destination.strip().upper()
         candidates = [
@@ -219,6 +222,7 @@ class DynamicRouteStore:
             for route in self._routes.values()
             if route.destination == dest
             and route.active(now)
+            and route.next_hop not in exclude_hops
             and (route.approved or not approved_only)
         ]
         return min(
@@ -269,8 +273,11 @@ class DynamicRouteStore:
             if route.destination != destination or route.next_hop != next_hop:
                 continue
             route.failures += 1
-            route.approved = False
-            route.auto_approved = False
+            # A failed handshake is poorer evidence, not operator rejection
+            # or expiration of an independently advertised live path.
+            if route.source != "link-advert":
+                route.approved = False
+                route.auto_approved = False
 
 
 @dataclass
@@ -353,13 +360,16 @@ class LiveTopologyStore:
         queue: list[tuple[int, int, str, str, int, int, float]] = [
             (0, 0, origin, "", 0, 0, float("inf"))
         ]
-        best: dict[str, tuple[int, int, str, int, int, float]] = {}
+        # Keep the best path through EACH first hop. A single shortest path
+        # hides usable alternatives when that neighbour temporarily fails.
+        best: dict[tuple[str, str], tuple[int, int, str, int, int, float]] = {}
         while queue:
             queue.sort(reverse=True)
             metric, hops, node, first_hop, penalty, advert_id, expiry = queue.pop()
-            if node in best and best[node][0] <= metric:
+            key = (node, first_hop)
+            if key in best and best[key][0] <= metric:
                 continue
-            best[node] = (metric, hops, first_hop, penalty, advert_id, expiry)
+            best[key] = (metric, hops, first_hop, penalty, advert_id, expiry)
             for neighbor, edge_cost, edge_id, edge_expiry in graph.get(node, []):
                 if neighbor == origin:
                     continue
@@ -378,7 +388,7 @@ class LiveTopologyStore:
                 )
         return [
             (destination, data[2], data[1], data[3], data[4], data[5])
-            for destination, data in best.items()
+            for (destination, _first_hop), data in best.items()
             if destination != origin and data[2]
         ]
 
@@ -591,7 +601,9 @@ class DiscoveryEngine:
     def _sync_auto_approvals(self) -> None:
         active = self.automatic_use_active
         for route in self.routes.routes(self._now, include_expired=True):
-            if active and route.active(self._now) and not route.failures:
+            if active and route.active(self._now) and (
+                route.source == "link-advert" or not route.failures
+            ):
                 if not route.approved:
                     route.approved = True
                     route.auto_approved = True

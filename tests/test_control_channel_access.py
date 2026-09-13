@@ -12,6 +12,24 @@ from guardian.modem.audio import AudioControlTransport, _AfskAcquisition
 from guardian.protocol import ControlFrame, FrameType
 
 
+def test_channel_busy_reports_acquisition_and_peer_quiet_time(monkeypatch):
+    transport = AudioControlTransport()
+    monkeypatch.setattr("guardian.modem.audio.time.monotonic", lambda: 100.0)
+    assert not transport.channel_busy()
+    transport._acquisition_ready_at = 101.0
+    assert transport.channel_busy()
+    transport._acquisition_ready_at = 99.0
+    transport._peer_ready_at = 101.0
+    assert transport.channel_busy()
+    transport._peer_ready_at = 100.0
+    assert not transport.channel_busy()
+    transport._tx_suspended = True
+    assert transport.channel_busy()
+    transport._tx_suspended = False
+    transport._transmitting.set()
+    assert transport.channel_busy()
+
+
 @pytest.mark.parametrize("gain", [0.0001, 0.2, 1.0])
 @pytest.mark.parametrize("clock_error", [-0.01, 0.0, 0.01])
 def test_acquisition_uses_modulation_not_absolute_audio_level(gain, clock_error):

@@ -17,7 +17,7 @@ import math
 from pathlib import Path
 import time
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -42,10 +42,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
     QLineEdit,
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -72,6 +74,7 @@ from .map_tiles import (
     tiles_for_bounds,
 )
 from .map_tools import destination_point, locator_cells
+from .window_geometry import fit_dialog_to_screen
 from ..radio.icom_gps import same_serial_port
 from ..radio.usb_serial import list_serial_ports, port_device
 from ..routing import (
@@ -112,8 +115,13 @@ class MapCanvas(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(480, 360)
+        # The map is useful in a compact splitter as well as a full dialog.
+        # Keep a small readable canvas floor; the top-level window decides how
+        # much of the available work area it can use.
+        self.setMinimumSize(260, 180)
         self.setMouseTracking(True)
+        self.grabGesture(Qt.GestureType.PinchGesture)
+        self._pinch_total = 1.0
         self.center = (49.8, 15.5)          # lat, lon
         self.degrees_across = DEFAULT_DEGREES_ACROSS
         self.picking = False
@@ -557,9 +565,52 @@ class MapCanvas(QWidget):
         return nearest
 
     def wheelEvent(self, event) -> None:
-        step = 0.8 if event.angleDelta().y() > 0 else 1.25
+        delta = event.angleDelta().y()
+        steps = delta / 120.0 if delta else event.pixelDelta().y() / 120.0
+        if not steps:
+            event.ignore()
+            return
+        self.zoom_by(1.25 ** max(-20.0, min(20.0, steps)), event.position())
+        event.accept()
+
+    def event(self, event) -> bool:
+        if event.type() == QEvent.Type.NativeGesture:
+            if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                self.zoom_by(1.0 + event.value(), event.position())
+                event.accept()
+                return True
+        elif event.type() == QEvent.Type.Gesture:
+            pinch = event.gesture(Qt.GestureType.PinchGesture)
+            if pinch is not None:
+                if pinch.state() == Qt.GestureState.GestureStarted:
+                    self._pinch_total = 1.0
+                total = pinch.totalScaleFactor()
+                if total > 0:
+                    anchor = self.mapFromGlobal(pinch.hotSpot()) if pinch.hasHotSpot() else None
+                    self.zoom_by(total / self._pinch_total, anchor)
+                    self._pinch_total = total
+                if pinch.state() in (Qt.GestureState.GestureFinished, Qt.GestureState.GestureCanceled):
+                    self._pinch_total = 1.0
+                event.accept(pinch)
+                return True
+        return super().event(event)
+
+    def zoom_by(self, factor: float, anchor: QPointF | None = None) -> None:
+        """Zoom around a gesture/cursor position, with common bounds."""
+        if not math.isfinite(factor) or factor <= 0:
+            return
+        point = QPointF(anchor) if anchor is not None else QPointF(self.width() / 2, self.height() / 2)
+        before = self.pixels_per_world()
+        dx, dy = point.x() - self.width() / 2, point.y() - self.height() / 2
+        world_x = self.world_x(self.center[1]) + dx / before
+        world_y = self.world_y(self.center[0]) + dy / before
         self.degrees_across = min(
-            MAX_DEGREES_ACROSS, max(MIN_DEGREES_ACROSS, self.degrees_across * step)
+            MAX_DEGREES_ACROSS, max(MIN_DEGREES_ACROSS, self.degrees_across / factor)
+        )
+        after = self.pixels_per_world()
+        self.center = (
+            self.latitude_at(min(1.0, max(0.0, world_y - dy / after))),
+            (self.longitude_at(world_x - dx / after) + 180.0) % 360.0 - 180.0,
         )
         self.update()
 
@@ -1147,13 +1198,21 @@ class MapWindow(QDialog):
         self._detected_grid = ""
         self._prefetch_dialog: QProgressDialog | None = None
         self.setWindowTitle(tr("map.title"))
-        self.setMinimumSize(760, 560)
         # A dialog gets no maximise box by default, and the map is the one view
         # an operator genuinely wants full-screen.
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
 
-        outer = QVBoxLayout(self)
+        dialog_layout = QVBoxLayout(self)
+        content = QWidget()
+        outer = QVBoxLayout(content)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(6)
+        outer.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setWidget(content)
+        dialog_layout.addWidget(self.content_scroll, 1)
         intro = QLabel(tr("map.intro"))
         intro.setObjectName("Metadata")
         intro.setWordWrap(True)
@@ -1409,13 +1468,29 @@ class MapWindow(QDialog):
         self.attribution.setObjectName("Metadata")
         self.attribution.setWordWrap(True)
         footer.addWidget(self.attribution, 1)
+        self.zoom_in_button = QPushButton("+")
+        self.zoom_out_button = QPushButton("−")
+        for button, factor, key in (
+            (self.zoom_in_button, 1.25, "map.zoom_in"),
+            (self.zoom_out_button, 0.8, "map.zoom_out"),
+        ):
+            button.setFixedWidth(34)
+            button.setToolTip(tr(key))
+            button.setAccessibleName(tr(key))
+            button.clicked.connect(lambda checked=False, factor=factor: self.canvas.zoom_by(factor))
+            footer.addWidget(button)
         footer.addWidget(buttons)
-        outer.addLayout(footer)
+        dialog_layout.addLayout(footer)
 
         self._framed = False
         self._background_toggled(self.background.isChecked())
         self.refresh()
         self._centre()
+        fit_dialog_to_screen(
+            self,
+            preferred_size=(760, 560),
+            minimum_size=(640, 440),
+        )
 
     # --- data ------------------------------------------------------------ #
     def stations(self) -> list[tuple[str, str, float]]:
@@ -2289,6 +2364,12 @@ class MapWindow(QDialog):
         # computed from the window's shape -- framing it in __init__ used the
         # size hint and then never corrected itself.
         super().showEvent(event)
+        fit_dialog_to_screen(
+            self,
+            preferred_size=self.size(),
+            minimum_size=(640, 440),
+            center=False,
+        )
         self._refresh_local_source()
         if not self._framed:
             self._framed = True

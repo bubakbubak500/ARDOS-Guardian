@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 from ..i18n import dual
 from ..routing import Link, Topology, read_topology_csv
 from .inputs import FrequencySpinBox, RowTable, UppercaseLineEdit
+from .window_geometry import fit_dialog_to_screen
 
 
 TOPOLOGY_FILTER = "Guardian topology CSV (*.csv);;CSV (*.csv);;*"
@@ -289,7 +291,12 @@ class _EditorPage(QWizardPage):
         layout = QVBoxLayout(self)
         self.editor = TopologyEditor(topology)
         self.editor.topology_changed.connect(self.completeChanged.emit)
-        layout.addWidget(self.editor)
+        self.editor_scroll = QScrollArea()
+        self.editor_scroll.setObjectName("TopologyEditorScroll")
+        self.editor_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.editor_scroll.setWidgetResizable(True)
+        self.editor_scroll.setWidget(self.editor)
+        layout.addWidget(self.editor_scroll)
 
     def isComplete(self) -> bool:
         return bool(self.editor.topology.links)
@@ -301,9 +308,15 @@ class _PreviewPage(QWizardPage):
         self.owner = wizard
         self.setTitle(dual("Generated local routes", "Odvozené místní trasy"))
         layout = QVBoxLayout(self)
+        self.preview_scroll = QScrollArea()
+        self.preview_scroll.setObjectName("TopologyPreviewScroll")
+        self.preview_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.preview_scroll.setWidgetResizable(True)
+        preview_host = QWidget()
+        preview_layout = QVBoxLayout(preview_host)
         self.summary = QLabel()
         self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
+        preview_layout.addWidget(self.summary)
         self.routes = RowTable(0, 5)
         self.routes.setHorizontalHeaderLabels(
             [
@@ -317,11 +330,13 @@ class _PreviewPage(QWizardPage):
         self.routes.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
-        layout.addWidget(self.routes, 1)
+        preview_layout.addWidget(self.routes, 1)
         self.warnings = QLabel()
         self.warnings.setWordWrap(True)
         self.warnings.setObjectName("Metadata")
-        layout.addWidget(self.warnings)
+        preview_layout.addWidget(self.warnings)
+        self.preview_scroll.setWidget(preview_host)
+        layout.addWidget(self.preview_scroll)
 
     def initializePage(self) -> None:
         topology = self.owner.topology
@@ -365,7 +380,6 @@ class TopologyWizard(QWizard):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(dual("Guardian network builder", "Sestavovač sítě Guardian"))
-        self.setMinimumSize(980, 720)
         self.heard_callsigns = heard_callsigns or set()
         self.identity_page = _IdentityPage(callsign, self)
         self.editor_page = _EditorPage(topology, self)
@@ -373,6 +387,11 @@ class TopologyWizard(QWizard):
         self.addPage(self.identity_page)
         self.addPage(self.editor_page)
         self.addPage(self.preview_page)
+        fit_dialog_to_screen(
+            self,
+            preferred_size=(980, 720),
+            minimum_size=(620, 440),
+        )
 
     @property
     def callsign(self) -> str:
@@ -381,3 +400,16 @@ class TopologyWizard(QWizard):
     @property
     def topology(self) -> Topology:
         return self.editor_page.editor.topology
+
+    def showEvent(self, event) -> None:
+        # QWizard recomputes its page stack after the native window is shown;
+        # that pass can restore a page's comfortable size.  Re-fit once the
+        # stack has its real frame so the Back/Next/Finish row remains inside
+        # the available work area on a scaled desktop.
+        super().showEvent(event)
+        fit_dialog_to_screen(
+            self,
+            preferred_size=self.size(),
+            minimum_size=(620, 440),
+            center=False,
+        )

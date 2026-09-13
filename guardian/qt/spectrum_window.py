@@ -25,6 +25,7 @@ from ..assets import get_ico_path
 from ..i18n import dual
 from ..modem.audio import resolve_device
 from .theme import DARK_TOKENS, ThemeTokens
+from .window_geometry import fit_window_to_screen
 
 
 def spectrum_db(
@@ -229,7 +230,7 @@ class ValueCard(QFrame):
 class WaterfallScope(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setMinimumSize(680, 400)
+        self.setMinimumSize(280, 180)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.max_frequency = 6_000.0
         self._db = np.full(512, -100.0, dtype=np.float32)
@@ -367,10 +368,18 @@ class SpectrumWindow(QMainWindow):
         from PySide6.QtGui import QIcon
 
         self.setWindowIcon(QIcon(str(get_ico_path())))
-        self.setMinimumSize(720, 500)
+        # The scope can render at a compact size; the top-level fit keeps the
+        # title bar and footer on-screen when display scaling reduces the work
+        # area.
         self.resize(980, 640)
         self._build_ui()
         self._restore_geometry()
+        fit_window_to_screen(
+            self,
+            preferred_size=self.size(),
+            minimum_size=(520, 320),
+            center=False,
+        )
 
         self.timer = QTimer(self)
         self.timer.setInterval(160)
@@ -475,6 +484,12 @@ class SpectrumWindow(QMainWindow):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        fit_window_to_screen(
+            self,
+            preferred_size=self.size(),
+            minimum_size=(520, 320),
+            center=False,
+        )
         self.timer.start()
         if self.auto_start_audio:
             current_device = self.runtime.config.audio_input

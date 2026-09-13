@@ -285,6 +285,7 @@ class Message:
     state: SessionState = SessionState.IDLE
     attempts: int = 0
     tried_backup: bool = False
+    failed_hops: set[str] = field(default_factory=set)
     t_state: float = 0.0           # monotonic time the state was entered
     # Payload workers only publish monotonic byte counts.  The session thread
     # observes them in tick(), refreshes its own clock on real progress, and
@@ -544,33 +545,39 @@ class Orchestrator:
         explicit: str | None = None,
         *,
         for_relay: bool = False,
+        exclude_hops: frozenset[str] | set[str] = frozenset(),
     ) -> tuple[str | None, str]:
         """Pick a next hop without letting volatile evidence replace a lock."""
         hop = (explicit or "").strip().upper()
-        if hop:
+        if hop and hop not in exclude_hops:
             return hop, "manual"
         if self.routes is not None:
             route = self.routes.lookup(final_dest)
             if route is not None and route.source == "manual":
-                if route.preferred:
+                if route.preferred and route.preferred not in exclude_hops:
                     return route.preferred, "manual route"
-                return final_dest, "manual direct route"
-        if self.heard.is_heard(final_dest, self._now):
+                if not route.preferred and final_dest not in exclude_hops:
+                    return final_dest, "manual direct route"
+        if final_dest not in exclude_hops and self.heard.is_heard(final_dest, self._now):
             return final_dest, "heard"
         dynamic = self.discovery.routes.best(
             final_dest,
             self._now,
             approved_only=not for_relay,
+            exclude_hops=exclude_hops,
         )
         if dynamic is not None:
+            if dynamic.source == "link-advert":
+                return dynamic.next_hop, "live topology"
             return dynamic.next_hop, "assisted discovery" if dynamic.approved else "relay discovery"
         if self.routes is not None:
             route = self.routes.lookup(final_dest)
             if route is not None:
-                if route.preferred:
+                if route.preferred and route.preferred not in exclude_hops:
                     return route.preferred, "topology"
-                return final_dest, "topology direct"
-        if final_dest in self.learned_paths:
+                if not route.preferred and final_dest not in exclude_hops:
+                    return final_dest, "topology direct"
+        if final_dest in self.learned_paths and self.learned_paths[final_dest] not in exclude_hops:
             return self.learned_paths[final_dest], "learned"
         return None, "none"
 
@@ -589,12 +596,18 @@ class Orchestrator:
                 SessionState.MULTIHOP_DISCOVERY, SessionState.WAITING_ROUTE_APPROVAL,
             }:
                 continue
-            hop, how = self._resolve_next_hop(msg.final_dest)
+            hop, how = self._resolve_next_hop(
+                msg.final_dest, for_relay=bool(msg.previous_hop),
+                exclude_hops=msg.failed_hops | {msg.previous_hop},
+            )
             if not hop:
                 continue
             # LINK_ADVERT or another query can supply a route while this
             # message waits. Its old query must not keep flooding or fail it.
             self.discovery.pending.pop(msg.discovery_query_id, None)
+            discard = getattr(self.transport, "discard_deferred_message", None)
+            if callable(discard):
+                discard(msg.msg_id, discovery_query_id=msg.discovery_query_id)
             msg.next_hop = hop
             self._begin_announce(msg)
             self._emit(msg, f"automatically using available route via {hop} ({how})")
@@ -822,7 +835,9 @@ class Orchestrator:
         )
         relay.ptt_delay_ms = own_delay
         self.sessions[inbound.msg_id] = relay  # the outbound leg takes over
-        hop, how = self._resolve_next_hop(relay.final_dest, for_relay=True)
+        hop, how = self._resolve_next_hop(
+            relay.final_dest, for_relay=True, exclude_hops={relay.previous_hop},
+        )
         if hop:
             relay.next_hop = hop
             self._begin_announce(relay)
@@ -850,7 +865,7 @@ class Orchestrator:
         # already advanced us to CONFIRMED/DELIVERED.
         if msg.state is SessionState.TRANSFERRING:
             self._send(FrameType.CANCEL, msg)
-            self._fail(msg, "payload send failed")
+            self._fail(msg, "payload send failed", route_failure=True)
 
     def tick(self, now: float, *, control_available: bool = True) -> None:
         """Drive timeouts/retransmits. Call periodically."""
@@ -901,7 +916,7 @@ class Orchestrator:
                 self._send(FrameType.HAVE_MSG, msg)
                 self._emit(msg, "retrying after busy")
             elif msg.state is SessionState.STARTING_VARA and elapsed > self.start_timeout:
-                self._fail(msg, "VARA did not start in time")
+                self._fail(msg, "VARA did not start in time", route_failure=True)
             elif msg.state is SessionState.RECEIVING and self.auto_complete:
                 # Simulation: pretend the negotiated payload has now arrived.
                 self.notify_payload_delivered(msg.msg_id, ok=True)
@@ -912,7 +927,7 @@ class Orchestrator:
                         continue
                     if now - msg.payload_sent_at > max(self.ack_timeout, self.control_exchange_timeout):
                         if msg.receipt_queries >= MAX_RECEIPT_QUERIES:
-                            self._fail(msg, "payload sent but delivery confirmation did not arrive")
+                            self._fail(msg, "payload sent but delivery confirmation did not arrive", route_failure=True)
                         else:
                             msg.receipt_queries += 1
                             msg.payload_sent_at = now
@@ -923,7 +938,7 @@ class Orchestrator:
                 if hard_elapsed > session_transfer_hard_timeout_for(msg):
                     self._fail(msg, "payload transfer exceeded the absolute safety limit")
                 elif elapsed > session_transfer_timeout_for(msg):
-                    self._fail(msg, "payload made no progress before transfer timeout")
+                    self._fail(msg, "payload made no progress before transfer timeout", route_failure=True)
             elif msg.state is SessionState.ACKED and elapsed > max(
                 self.start_timeout,
                 (MAX_G2_PROFILE_OFFERS + 1) * self.control_exchange_timeout,
@@ -1243,6 +1258,23 @@ class Orchestrator:
         if not addressed:
             return  # someone else's announcement; just ignore (could log "heard")
         existing = self.sessions.get(f.message_id)
+        if (existing and existing.direction == "out"
+                and existing.previous_hop == f.source
+                and existing.final_dest == f.destination):
+            # The outbound relay leg replaces the inbound session only after
+            # the complete payload was received. Preserve that receipt even
+            # while the next leg is running (or has failed). Re-announcing
+            # upstream must not restart reception or interrupt the relay.
+            self.transport.send(ControlFrame(
+                type=FrameType.RECEIVED, source=self.callsign,
+                destination=existing.final_dest, next_hop=f.source,
+                message_id=existing.msg_id, priority=existing.priority,
+                ttl=existing.ttl, flags=existing.flags,
+            ))
+            if existing.state is SessionState.DELIVERED:
+                self._send_delivery_receipt(existing, f.source)
+            self._emit(existing, f"re-confirmed relay custody to {f.source}")
+            return
         if (existing and existing.direction == "in"
                 and existing.source == f.source and existing.final_dest == f.destination
                 and existing.state in {SessionState.RECEIVED_OK, SessionState.DELIVERED}):
@@ -1500,13 +1532,15 @@ class Orchestrator:
 
     def _rx_busy(self, f: ControlFrame) -> None:
         msg = self._mine(f, "out")
-        if msg and msg.state in (SessionState.ANNOUNCING, SessionState.WAITING_BUSY):
+        if (msg and f.source == msg.next_hop
+                and msg.state in (SessionState.ANNOUNCING, SessionState.WAITING_BUSY)):
             self._enter(msg, SessionState.WAITING_BUSY)
             self._emit(msg, f"{f.source} busy — backing off")
 
     def _rx_start(self, f: ControlFrame) -> None:
         msg = self._mine(f, "in")
-        if msg and msg.state is SessionState.ACKED:
+        addressed = f.next_hop == self.callsign or (not f.next_hop and f.destination == self.callsign)
+        if msg and addressed and f.source == msg.source and msg.state is SessionState.ACKED:
             self._enter(msg, SessionState.RECEIVING)
             self._emit(msg, f"receiving payload over {self._payload_label(msg)}")
             if self.payload is not None:
@@ -1515,7 +1549,7 @@ class Orchestrator:
 
     def _rx_received(self, f: ControlFrame) -> None:
         msg = self._mine(f, "out")
-        if msg and msg.state is SessionState.TRANSFERRING:
+        if msg and f.source == msg.next_hop and msg.state is SessionState.TRANSFERRING:
             # Learn that this next hop reaches this destination (for next time).
             if msg.next_hop:
                 self.learned_paths[msg.final_dest] = msg.next_hop
@@ -1580,7 +1614,8 @@ class Orchestrator:
 
     def _rx_cancel(self, f: ControlFrame) -> None:
         msg = self.sessions.get(f.message_id)
-        if msg and not msg.state.terminal:
+        peer = (msg.next_hop if msg.direction == "out" else msg.source) if msg else ""
+        if msg and f.source == peer and not msg.state.terminal:
             self._enter(msg, SessionState.CANCELLED)
             self._stop_message_work(msg)
             self._emit(msg, f"cancelled by {f.source}")
@@ -1599,29 +1634,41 @@ class Orchestrator:
             self._send(FrameType.HAVE_MSG, msg)
             self._emit(msg, f"no ACK — re-announcing (attempt {msg.attempts})")
             return
-        # Try the configured backup hop once.
+        msg.failed_hops.add(msg.next_hop)
+        if msg.next_hop:
+            self.discovery.routes.mark_failure(msg.final_dest, msg.next_hop)
+        # Try the configured backup hop once, then other fresh known routes.
+        # A broadcast backup is deferred until those candidates are exhausted.
+        query_backup = False
         if not msg.tried_backup and self.routes is not None:
             backup = self.routes.next_hop(msg.final_dest, use_backup=True)
             if backup == "ANY" and self.auto_route:
-                msg.tried_backup = True
-                msg.offers.clear()
-                msg.offer_quality.clear()
-                self._enter(msg, SessionState.ROUTE_DISCOVERY)
-                self._send(FrameType.ROUTE_QUERY, msg)
-                self._emit(msg, "no ACK — asking the net for a backup route")
-                return
-            if backup and backup != msg.next_hop:
+                query_backup = True
+            elif backup and backup != "ANY" and backup not in msg.failed_hops | {msg.previous_hop}:
                 msg.next_hop = backup
                 msg.tried_backup = True
-                msg.attempts = 1
-                msg.t_state = self._now
-                self._send(FrameType.HAVE_MSG, msg)
+                self._begin_announce(msg)
                 self._emit(msg, f"no ACK — trying backup hop {backup}")
                 return
-        if msg.next_hop:
-            self.discovery.routes.mark_failure(msg.final_dest, msg.next_hop)
+        hop, how = self._resolve_next_hop(
+            msg.final_dest, for_relay=bool(msg.previous_hop),
+            exclude_hops=msg.failed_hops | {msg.previous_hop},
+        )
+        if hop:
+            msg.next_hop = hop
+            self._begin_announce(msg)
+            self._emit(msg, f"no ACK — trying known alternative via {hop} ({how})")
+            return
+        if query_backup:
+            msg.tried_backup = True
+            msg.offers.clear()
+            msg.offer_quality.clear()
+            self._enter(msg, SessionState.ROUTE_DISCOVERY)
+            self._send(FrameType.ROUTE_QUERY, msg)
+            self._emit(msg, "no ACK — asking the net for a backup route")
+            return
         if self._start_multihop(msg, "failed-route"):
-            self._emit(msg, "configured/learned hop failed — seeking an assisted route")
+            self._emit(msg, "known hops exhausted — seeking a recovery route")
             return
         self._fail(msg, "no ACK from next hop")
 
@@ -1642,7 +1689,9 @@ class Orchestrator:
             msg.payload_wire_size = 0
             msg.transfer_started_at = self._now
 
-    def _fail(self, msg: Message, reason: str) -> None:
+    def _fail(self, msg: Message, reason: str, *, route_failure: bool = False) -> None:
+        if route_failure and msg.direction == "out" and msg.next_hop:
+            self.discovery.routes.mark_failure(msg.final_dest, msg.next_hop)
         msg.error = reason
         self._enter(msg, SessionState.FAILED)
         self._stop_message_work(msg)

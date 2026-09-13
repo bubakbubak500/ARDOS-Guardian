@@ -25,6 +25,7 @@ from ..config import DEFAULT_CONFIG_PATH, config_dir
 from ..i18n import dual, tr
 from ..modem.audio import audio_backend_report
 from .runtime import ShellRuntime
+from .window_geometry import fit_dialog_to_screen
 
 
 class DiagnosticsDialog(QDialog):
@@ -32,7 +33,6 @@ class DiagnosticsDialog(QDialog):
         super().__init__(parent)
         self.runtime = runtime
         self.setWindowTitle(dual("Guardian diagnostics", "Diagnostika Guardianu"))
-        self.setMinimumSize(760, 520)
         outer = QVBoxLayout(self)
         heading = QLabel(dual("Diagnostics", "Diagnostika"))
         heading.setObjectName("PanelHeader")
@@ -67,6 +67,11 @@ class DiagnosticsDialog(QDialog):
         outer.addWidget(buttons)
         self.viewer.setPlainText(
             json.dumps(self.report(), indent=2, ensure_ascii=False)
+        )
+        fit_dialog_to_screen(
+            self,
+            preferred_size=(760, 520),
+            minimum_size=(520, 320),
         )
 
     def _probe_vara(self) -> None:

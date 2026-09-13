@@ -1132,6 +1132,18 @@ class AudioControlTransport(ControlTransport):
             )
         self.on_log(f"TX {frame.summary()}")
 
+    def channel_busy(self) -> bool:
+        """Recognised control activity, including acquisition before decode.
+
+        This is not a broadband carrier/speech detector. The same deadlines
+        are checked again at PTT acquisition to cover traffic arriving later.
+        """
+        with self._tx_condition:
+            return (
+                self._tx_suspended or self._transmitting.is_set()
+                or time.monotonic() < max(self._peer_ready_at, self._acquisition_ready_at)
+            )
+
     def _acquire_control_channel(self) -> None:
         # Called after output-device preparation, immediately before PTT. A
         # second neighbor advertisement can begin during that preparation or

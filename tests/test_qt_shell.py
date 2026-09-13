@@ -46,8 +46,8 @@ def test_shell_has_native_menu_minimum_size_and_snapshot_content(tmp_path) -> No
             window.map_window.windowFlags()
             & Qt.WindowType.WindowStaysOnTopHint
         )
-        assert window.minimumWidth() == 1180
-        assert window.minimumHeight() == 720
+        assert window.minimumWidth() <= 720
+        assert window.minimumHeight() <= 440
         assert [action.text() for action in window.menuBar().actions()] == [
             "&File",
             "&View",
@@ -121,12 +121,12 @@ def test_station_context_shows_actionable_mail_state(tmp_path) -> None:
         QSettings.Format.IniFormat,
     )
     runtime = ShellRuntime()
+    window = GuardianMainWindow(runtime, settings)
     runtime.snapshots.update(
         mailbox=MailboxSnapshot(inbox=2, unread=1, outbox=3, transit=1)
     )
-    window = GuardianMainWindow(runtime, settings)
     try:
-        window._refresh()
+        window._apply_snapshot(runtime.snapshots.read())
         text = window.context_activity.text()
         assert "Unread messages: 1" in text
         assert "Waiting to send: 3" in text
@@ -138,7 +138,7 @@ def test_station_context_shows_actionable_mail_state(tmp_path) -> None:
         runtime.snapshots.update(
             mailbox=MailboxSnapshot(inbox=2, unread=0, outbox=1, outbox_failed=1)
         )
-        window._refresh()
+        window._apply_snapshot(runtime.snapshots.read())
         text = window.context_activity.text()
         assert "Waiting to send" not in text
         assert "Failed, awaiting retry: 1" in text
@@ -147,7 +147,7 @@ def test_station_context_shows_actionable_mail_state(tmp_path) -> None:
         runtime.snapshots.update(
             mailbox=MailboxSnapshot(inbox=0, unread=0, outbox=3, outbox_failed=1)
         )
-        window._refresh()
+        window._apply_snapshot(runtime.snapshots.read())
         text = window.context_activity.text()
         assert "Waiting to send: 2" in text
         assert "Failed, awaiting retry: 1" in text
