@@ -387,7 +387,7 @@ Once the required software and map data are present, the core messaging system o
 
 # Current status
 
-Guardian **1.1.6** continues the 1.1.5 VARA and SC-FTN feature set with a correction to control-channel receive/transmit scheduling. See [release notes](docs/RELEASE_NOTES_1.1.6.md) for the changes and verification limits. Automatic MCS/FEC/LDPC and ARQ adaptation, paired Auto Tune, and aggressive XZ compression with lossless image repacking remain available. Windows builds fetch SHA-256-verified libjxl tools through `tools/fetch_jpegxl.ps1` and include their licenses; `tools/test_frozen.ps1` checks the packaged Qt and image-compression paths.
+Guardian **1.1.7** connects VARA receive and transmit progress to the session watchdog, preventing slow attachment transfers from being cancelled after three minutes while data is still moving. See [release notes](docs/RELEASE_NOTES_1.1.7.md) for the changes and verification limits. The 1.1.6 control-channel scheduling correction, automatic MCS/FEC/LDPC and ARQ adaptation, paired Auto Tune, and aggressive XZ compression with lossless image repacking remain available. Windows builds fetch SHA-256-verified libjxl tools through `tools/fetch_jpegxl.ps1` and include their licenses; `tools/test_frozen.ps1` checks the packaged Qt and image-compression paths.
 
 | Capability                      | Status                             |
 | ------------------------------- | ---------------------------------- |

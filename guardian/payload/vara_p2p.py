@@ -426,7 +426,11 @@ class VaraP2PBackend(PayloadBackend):
                     )
                     airtime = airtime_for(len(envelope), bitrate)
                     closing = disconnect_timeout_for(len(envelope), bitrate)
-                    result = self.vara.wait_transfer_complete(transfer_timeout)
+                    result = self.vara.wait_transfer_complete(
+                        transfer_timeout,
+                        on_progress=lambda moved: setattr(msg, "payload_progress_bytes", moved),
+                        check_cancelled=lambda: self._check_cancelled(msg),
+                    )
                     self._check_cancelled(msg)
                     if result is TransferResult.DRAINED:
                         self.on_log(
@@ -787,13 +791,22 @@ class VaraP2PBackend(PayloadBackend):
                 else:
                     self._check_cancelled(msg)
                     self.on_log("VARA P2P: link established, waiting for data header")
-                    started = time.monotonic()
-                    deadline = started + TRANSFER_TIMEOUT
+                    received = 0
 
-                    def remaining() -> float:
-                        return max(0.01, deadline - time.monotonic())
+                    def read_part(size: int, timeout: float) -> bytes:
+                        nonlocal received
 
-                    head = self.vara.read_exactly(_HDR.size, remaining())
+                        def progress(moved: int) -> None:
+                            msg.payload_progress_bytes = received + moved
+
+                        part = self.vara.read_exactly(
+                            size, timeout, on_progress=progress,
+                            check_cancelled=lambda: self._check_cancelled(msg),
+                        )
+                        received += len(part)
+                        return part
+
+                    head = read_part(_HDR.size, TRANSFER_TIMEOUT)
                     self._check_cancelled(msg)
                     magic, mid, length = _HDR.unpack(head)
                     if magic != _MAGIC:
@@ -801,18 +814,16 @@ class VaraP2PBackend(PayloadBackend):
                     wire_size = max(
                         MIN_WIRE_SIZE, _HDR.size + length + _CRC.size
                     )
+                    msg.payload_wire_size = wire_size
                     set_receive_total = getattr(
                         self.vara, "set_receive_transfer_total", None
                     )
                     if set_receive_total is not None:
                         set_receive_total(wire_size)
-                    deadline = max(
-                        deadline, started + transfer_timeout_for(wire_size)
-                    )
-                    body = self.vara.read_exactly(length, remaining())
+                    body = read_part(length, transfer_timeout_for(wire_size))
                     self._check_cancelled(msg)
                     crc_given = _CRC.unpack(
-                        self.vara.read_exactly(_CRC.size, remaining())
+                        read_part(_CRC.size, TRANSFER_TIMEOUT)
                     )[0]
                     if crc_given != crc16(head + body):
                         raise ValueError(f"CRC failed on #{mid}")
@@ -820,8 +831,8 @@ class VaraP2PBackend(PayloadBackend):
                         0, MIN_WIRE_SIZE - (_HDR.size + length + _CRC.size)
                     )
                     if padding_length:
-                        padding = self.vara.read_exactly(
-                            padding_length, remaining()
+                        padding = read_part(
+                            padding_length, TRANSFER_TIMEOUT
                         )
                         if padding.strip(b"\0"):
                             raise ValueError(f"invalid payload padding on #{mid}")

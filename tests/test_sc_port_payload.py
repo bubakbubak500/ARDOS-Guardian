@@ -139,7 +139,7 @@ def test_vara_handoff_timeout_defers_qsy_release_and_completion() -> None:
         def write_data(self, data: bytes) -> None:
             self.state.tx_buffer_bytes = len(data)
 
-        def wait_transfer_complete(self, timeout: float) -> TransferResult:
+        def wait_transfer_complete(self, timeout: float, **kwargs) -> TransferResult:
             return TransferResult.DRAINED
 
         def disconnect_link(self) -> None:

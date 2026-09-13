@@ -412,15 +412,23 @@ class VaraClient:
         self,
         timeout: float = 180.0,
         ingest_timeout: float = 10.0,
+        *,
+        on_progress: Callable[[int], None] | None = None,
+        check_cancelled: Callable[[], None] | None = None,
     ) -> TransferResult:
         """Wait for a post-write nonzero BUFFER report and its later drain.
 
         Command port 8300 and data port 8301 are independent TCP streams.  A
         successful sendall() therefore does not prove that VARA has placed the
         bytes in its RF queue.  First require BUFFER > 0, then accept BUFFER 0.
+        Only a new buffer low-water mark refreshes the inactivity budget;
+        repeated reports and retransmission-related increases are not progress.
+        The owning session independently enforces its absolute safety cap.
         """
         ingest_deadline = time.monotonic() + min(timeout, ingest_timeout)
         while not self._buffer_nonzero.is_set():
+            if check_cancelled:
+                check_cancelled()
             if self._stop.is_set() or self.state.link_state == "DISCONNECTED":
                 return TransferResult.PEER_CLOSED_EARLY
             if time.monotonic() >= ingest_deadline:
@@ -428,7 +436,21 @@ class VaraClient:
             self._stop.wait(0.05)
 
         drain_deadline = time.monotonic() + timeout
+        lowest_buffer = None
+        moved = 0
         while True:
+            if check_cancelled:
+                check_cancelled()
+            buffered = self.state.tx_buffer_bytes
+            if buffered is not None:
+                if lowest_buffer is None:
+                    lowest_buffer = buffered
+                elif buffered < lowest_buffer:
+                    moved += lowest_buffer - buffered
+                    lowest_buffer = buffered
+                    drain_deadline = time.monotonic() + timeout
+                    if on_progress:
+                        on_progress(moved)
             if self.state.tx_buffer_bytes == 0:
                 return TransferResult.DRAINED
             if self._stop.is_set() or self.state.link_state == "DISCONNECTED":
@@ -437,25 +459,42 @@ class VaraClient:
                 return TransferResult.TIMEOUT
             self._stop.wait(0.05)
 
-    def read_exactly(self, n: int, timeout: float = 60.0) -> bytes:
-        """Read exactly n payload bytes (raises on timeout/short read)."""
+    def read_exactly(
+        self, n: int, timeout: float = 60.0, *,
+        on_progress: Callable[[int], None] | None = None,
+        check_cancelled: Callable[[], None] | None = None,
+    ) -> bytes:
+        """Read n bytes, checking cancellation even while the socket is quiet.
+
+        With on_progress, timeout is an inactivity budget refreshed by each
+        received chunk, and the callback receives this read's cumulative count.
+        The owning session retains the absolute transfer deadline.
+        """
         if self._data is None:
             raise ConnectionError("VARA data port not connected")
         data = self._data
-        data.settimeout(timeout)
         deadline = time.monotonic() + timeout
         buf = bytearray()
         try:
             while len(buf) < n:
+                if check_cancelled:
+                    check_cancelled()
                 if time.monotonic() > deadline:
                     raise TimeoutError("timed out reading payload")
-                chunk = data.recv(n - len(buf))
+                data.settimeout(max(0.001, min(0.25, deadline - time.monotonic())))
+                try:
+                    chunk = data.recv(n - len(buf))
+                except socket.timeout:
+                    continue
                 if not chunk:
                     raise ConnectionError("VARA data connection closed")
                 buf += chunk
                 self.state.data_bytes_read += len(chunk)
                 if self.state.transfer_direction == "receive":
                     self.state.rx_transfer_bytes += len(chunk)
+                if on_progress:
+                    on_progress(len(buf))
+                    deadline = time.monotonic() + timeout
             return bytes(buf)
         finally:
             try:

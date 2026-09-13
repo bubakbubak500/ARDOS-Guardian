@@ -79,7 +79,7 @@ class FakeVara:
     def wait_data_ready(self) -> None:
         self.commands.append(("data-ready",))
 
-    def wait_transfer_complete(self, timeout: float) -> TransferResult:
+    def wait_transfer_complete(self, timeout: float, **kwargs) -> TransferResult:
         self.commands.append(("wait-transfer",))
         self.transfer_timeout = timeout
         return self.transfer_result
@@ -91,7 +91,7 @@ class FakeVara:
     def finish_data_write(self) -> None:
         self.commands.append(("finish-write",))
 
-    def read_exactly(self, size: int, timeout: float) -> bytes:
+    def read_exactly(self, size: int, timeout: float, **kwargs) -> bytes:
         result = bytes(self.incoming[:size])
         del self.incoming[:size]
         if len(result) != size:
@@ -259,7 +259,7 @@ def test_cancel_active_vara_aborts_link_and_never_reports_success(cancel_at):
             if cancel_at == "ready":
                 backend.cancel(message)
 
-        def wait_transfer_complete(self, timeout):
+        def wait_transfer_complete(self, timeout, **kwargs):
             if cancel_at == "drain":
                 backend.cancel(message)
             return TransferResult.NO_BUFFER_REPORTS
@@ -631,7 +631,7 @@ def test_vara_read_exactly_restores_blocking_data_socket() -> None:
     vara._data = data
 
     assert vara.read_exactly(7, timeout=3.0) == b"payload"
-    assert data.timeouts == [3.0, None]
+    assert data.timeouts == [0.25, None]
 
 
 def test_vara_reconnects_the_complete_tcp_pair_when_existing_state_is_dead(

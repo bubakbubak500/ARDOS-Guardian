@@ -185,6 +185,7 @@ def session_transfer_timeout_for(msg: "Message") -> float:
     wire_size = max(
         _PAYLOAD_MIN_WIRE_SIZE,
         _PAYLOAD_WIRE_OVERHEAD + data_size,
+        getattr(msg, "payload_wire_size", 0),
     )
     payload_timeout = max(
         _PAYLOAD_TRANSFER_TIMEOUT,
@@ -290,6 +291,7 @@ class Message:
     # retains an independent hard cap against an endless marginal link.
     payload_progress_bytes: int = 0
     payload_progress_seen: int = 0
+    payload_wire_size: int = 0
     transfer_started_at: float = 0.0
     payload_sent_at: float | None = None
     receipt_queries: int = 0
@@ -1637,6 +1639,7 @@ class Orchestrator:
         if state in {SessionState.TRANSFERRING, SessionState.RECEIVING}:
             msg.payload_progress_bytes = 0
             msg.payload_progress_seen = 0
+            msg.payload_wire_size = 0
             msg.transfer_started_at = self._now
 
     def _fail(self, msg: Message, reason: str) -> None:
