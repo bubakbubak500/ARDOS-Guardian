@@ -326,10 +326,13 @@ class GuardianMainWindow(QMainWindow):
 
         self.operational_header = self._build_operational_header()
         outer.addWidget(self.operational_header)
+        from .second_radio_panel import SecondRadioPanel
+        self.second_radio_panel = SecondRadioPanel(self.runtime)
         self.alert_banner = AlertBanner()
         outer.addWidget(self.alert_banner)
         self.metric_strip = self._build_metric_strip()
         outer.addWidget(self.metric_strip)
+        outer.addWidget(self.second_radio_panel)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setMinimumHeight(260)
@@ -674,6 +677,10 @@ class GuardianMainWindow(QMainWindow):
         # Not while transmitting, and not while VARA holds the shared codec:
         # the operator is listening to the channel, not to the desktop.
         snapshot = self.runtime.snapshots.read()
+        coordinator = getattr(self.runtime, "radio_coordinator", None)
+        if coordinator is not None:
+            return all(not r.snapshots.read().radio.ptt and not r.payload_active()
+                       for r in coordinator.radios)
         return not snapshot.radio.ptt and not self.runtime.operations.payload_active()
 
     def _tray_activated(self, reason) -> None:
@@ -706,6 +713,7 @@ class GuardianMainWindow(QMainWindow):
         self.runtime.refresh()
         snapshot = self.runtime.snapshots.read()
         self._apply_snapshot(snapshot)
+        self.second_radio_panel.refresh()
         self._poll_station_lab_offer()
         self.notifications.poll()
         self.runtime.events.drain()
@@ -1082,6 +1090,12 @@ class GuardianMainWindow(QMainWindow):
         )
 
         def apply_changes() -> None:
+            configure_second = getattr(self.runtime, "configure_second_radio", None)
+            if callable(configure_second):
+                configure_second()
+                if dialog.second_editor is not None:
+                    radios = self.runtime.radio_coordinator.radios
+                    dialog.second_editor.operations = radios[1] if len(radios) > 1 else None
             selected_audio = [
                 self.runtime.config.audio_input,
                 self.runtime.config.audio_output,

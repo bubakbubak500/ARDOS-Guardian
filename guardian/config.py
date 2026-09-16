@@ -118,6 +118,11 @@ class StationConfig:
     callsign: str = "NOCALL"
     operator_name: str = ""
 
+    # Radio 1 retains the historical flat profile. Radio 2 only overrides
+    # hardware/channel fields; identity and mailbox policy remain shared.
+    dual_radio_enabled: bool = False
+    second_radio: dict = field(default_factory=dict)
+
     # Radio control backend: "hamlib" (rigctld) | "vox" (serial PTT) | "none"
     radio_backend: str = "none"
     radio: str = ""               # human-readable model name, e.g. "IC-7300"
@@ -605,11 +610,41 @@ class StationConfig:
         return cls(**clean).enforce_production_policy()
 
     def save(self, path: Path | str | None = None) -> Path:
+        if getattr(self, "_save_disabled", False):
+            return Path(path) if path else DEFAULT_CONFIG_PATH
+        owner = getattr(self, "_station_owner", None)
+        if owner is not None:
+            owner.second_radio = self.radio_channel_profile()
+            return owner.save(path)
         self.enforce_production_policy()
         path = Path(path) if path else DEFAULT_CONFIG_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
         return path
+
+    def radio_channel_profile(self) -> dict:
+        """All independently configurable radio, modem and audio settings."""
+        prefixes = ("radio", "rig", "cat_", "ptt_", "guardian_ptt", "vara_",
+                    "audio_", "ofdm_", "g2_")
+        extra = {"manual_frequency_hz", "control_modem", "control_channel", "payload_backend"}
+        return {key: value for key, value in asdict(self).items()
+                if key.startswith(prefixes) or key in extra}
+
+    def second_radio_config(self) -> "StationConfig":
+        """Build an independent channel with the station's shared policy."""
+        values = asdict(self)
+        allowed = self.radio_channel_profile()
+        saved = self.second_radio if isinstance(self.second_radio, dict) else {}
+        if not saved:
+            saved = dict(allowed)
+            saved.update(cat_port="", audio_input="", audio_output="",
+                         rigctld_port=4534, manual_frequency_hz=0,
+                         vara_cmd_port=8400, vara_data_port=8401,
+                         vara_fm_cmd_port=8400, vara_fm_data_port=8401,
+                         vara_hf_cmd_port=8400, vara_hf_data_port=8401)
+        values.update({key: value for key, value in saved.items() if key in allowed})
+        values.update(dual_radio_enabled=False, second_radio={})
+        return StationConfig(**values).enforce_production_policy()
 
     # --- Radio profiles --------------------------------------------------
     def radio_profile(self) -> dict:

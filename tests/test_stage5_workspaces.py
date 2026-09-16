@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from guardian.config import StationConfig
-from guardian.i18n import tr
+from guardian.i18n import dual, tr
 from guardian.message import (
     Attachment,
     Folder,
@@ -915,6 +915,7 @@ def test_heard_stations_show_the_signal_and_the_channel_they_arrived_on() -> Non
             tr("network.locator"),
             tr("network.distance"),
             tr("network.last_frame"),
+            dual("Radio", "Rádio"),
         ]
         rows = {
             workspace.heard_table.item(row, 0).text(): (

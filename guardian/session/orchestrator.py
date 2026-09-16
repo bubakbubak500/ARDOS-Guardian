@@ -429,6 +429,9 @@ class Orchestrator:
         # Optional persistence bridge: after a restart Operations can recover
         # the reverse hop from the stored mail history and mark it delivered.
         self.delivery_receipt_route: Callable[[int, str], str] | None = None
+        self.relay_handoff: Callable[[Message], bool] | None = None
+        self.receipt_transport: Callable[[ControlFrame], None] | None = None
+        self.bridge_reachable: Callable[[str], bool] | None = None
         # Broadcast alerts: what we have already seen (so a flood converges)
         # and what is waiting to go out (repeats and jittered relays).
         self.on_alert: Callable[[ControlFrame, bool], None] | None = None
@@ -471,6 +474,7 @@ class Orchestrator:
         ttl: int = 5,
         flags: Flags = Flags.NONE,
         payload_bytes: bytes | None = None,
+        previous_hop: str = "",
     ) -> Message:
         """Originate (or relay) a message toward final_dest."""
         final_dest = final_dest.strip().upper()
@@ -492,11 +496,13 @@ class Orchestrator:
                 local_profile is not None,
             ),
             body=body, payload_bytes=payload_bytes, direction="out",
+            previous_hop=previous_hop,
         )
         msg.ptt_delay_ms = own_delay
         self.sessions[msg_id] = msg
 
-        hop, how = self._resolve_next_hop(final_dest, explicit=next_hop)
+        hop, how = self._resolve_next_hop(final_dest, explicit=next_hop,
+            for_relay=bool(previous_hop), exclude_hops={previous_hop} if previous_hop else set())
         if hop:
             msg.next_hop = hop
             self._begin_announce(msg)
@@ -810,6 +816,9 @@ class Orchestrator:
     def _maybe_relay(self, inbound: Message) -> None:
         """Mesh: forward a received message toward its final destination."""
         if not self.relay or inbound.relayed:
+            return
+        if self.relay_handoff is not None and self.relay_handoff(inbound):
+            inbound.relayed = True
             return
         if inbound.ttl <= 1:
             self._emit(inbound, "TTL expired — not relaying")
@@ -1235,6 +1244,7 @@ class Orchestrator:
             or (self.routes is not None and self.routes.lookup(dest) is not None)
             or dest in self.learned_paths
             or self.heard.is_heard(dest, self._now)
+            or (self.bridge_reachable is not None and self.bridge_reachable(dest))
         )
         if can:
             offer = ControlFrame(
@@ -1286,7 +1296,7 @@ class Orchestrator:
             return
         if (existing and existing.direction == "in"
                 and existing.source == f.source and existing.final_dest == f.destination
-                and existing.state in {SessionState.RECEIVED_OK, SessionState.DELIVERED}):
+                and existing.state in {SessionState.RECEIVED_OK, SessionState.FORWARDED, SessionState.DELIVERED}):
             # A sender that finished DATA but lost the receipts asks again with
             # the original announcement. Preserve the completed session and
             # storage; only repeat confirmation, never request the payload again.
@@ -1594,7 +1604,7 @@ class Orchestrator:
                     previous = ""
             self._seen_delivery_receipts[f.message_id] = self._now
             if previous and f.ttl > 1:
-                self.transport.send(
+                self._transmit_receipt(
                     ControlFrame(
                         type=FrameType.DELIVERED,
                         source=self.callsign,
@@ -1722,7 +1732,7 @@ class Orchestrator:
         ttl: int = DELIVERY_RECEIPT_TTL,
     ) -> None:
         """Send a directed receipt one step back without changing the frame."""
-        self.transport.send(
+        self._transmit_receipt(
             ControlFrame(
                 type=FrameType.DELIVERED,
                 source=self.callsign,
@@ -1734,6 +1744,12 @@ class Orchestrator:
                 flags=msg.flags,
             )
         )
+
+    def _transmit_receipt(self, frame: ControlFrame) -> None:
+        if self.receipt_transport is not None:
+            self.receipt_transport(frame)
+        else:
+            self.transport.send(frame)
 
     def _emit(self, msg: Message, event: str) -> None:
         if self.on_event:

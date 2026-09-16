@@ -86,9 +86,13 @@ class SoundPlayer:
         default = default_output_device()
         if default is None:
             return "the system default output device is unknown"
-        radio = (self.config.audio_output or "").strip()
-        if radio and match_device_name([default], radio) is not None:
-            return f"the system default output is the radio ({default})"
+        outputs = [self.config.audio_output]
+        if getattr(self.config, "dual_radio_enabled", False):
+            outputs.append(self.config.second_radio_config().audio_output)
+        for output in outputs:
+            radio = (output or "").strip()
+            if radio and match_device_name([default], radio) is not None:
+                return f"the system default output is the radio ({default})"
         return ""
 
     def play(self, kind: str) -> bool:

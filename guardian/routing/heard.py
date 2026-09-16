@@ -25,6 +25,7 @@ class HeardStation:
     # Only beacons carry a position, so it survives every other frame type.
     grid: str = ""
     last_frame: str = ""
+    radio_id: int = 1
     # Destinations this station has offered to reach (from ROUTE_OFFER), so we
     # can prefer it as a relay toward those.
     reaches: set = field(default_factory=set)

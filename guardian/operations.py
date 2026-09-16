@@ -204,6 +204,8 @@ class Operations:
         heard: HeardStations,
     ) -> None:
         self.config = config
+        self.radio_id = 1
+        self.coordinator = None
         self.events = events
         self.snapshots = snapshots
         self.workers = workers
@@ -353,6 +355,8 @@ class Operations:
         source: str = "operation",
         kind: LogEventKind | str = LogEventKind.GENERAL,
     ) -> None:
+        if self.coordinator is not None and len(self.coordinator.radios) > 1:
+            message = f"[Radio {self.radio_id}] {message}"
         self.events.publish(message, level=level, source=source, kind=kind)
 
     # A HAVE_MSG is 0.9 s on AFSK 1200 but 5.2 s on MFSK-16, and an exchange is
@@ -430,9 +434,27 @@ class Operations:
         net.working_channel_offer = self._working_channel_offer
         net.working_channel_accept = self._working_channel_accept
         net.delivery_receipt_route = self._delivery_receipt_route
+        net.relay_handoff = lambda msg: (
+            self.coordinator.accept_relay(self, msg)
+            if self.coordinator is not None and len(self.coordinator.radios) > 1 else False
+        )
+        net.receipt_transport = lambda frame: (
+            self.coordinator.transmit_receipt(self, frame)
+            if self.coordinator is not None and len(self.coordinator.radios) > 1
+            else net.transport.send(frame)
+        )
+        net.bridge_reachable = self._bridge_reachable
+        net.discovery.bridge_reachable = net.bridge_reachable
         net.on_calibration_frame = self._on_calibration_frame
         self._scale_session_timeouts(net, transport)
         return net
+
+    def _bridge_reachable(self, destination: str) -> bool:
+        if (not self.config.auto_relay or self.coordinator is None
+                or len(self.coordinator.radios) < 2):
+            return False
+        other = self.coordinator.select(destination)
+        return other is not None and other is not self
 
     def _delivery_receipt_route(self, message_id: int, final_dest: str) -> str:
         """Recover a receipt's reverse hop from persistent mail after restart."""
@@ -662,7 +684,7 @@ class Operations:
 
     def current_frequency(self) -> int | None:
         """Where the radio is tuned according to CAT or the no-CAT operator."""
-        if self.is_no_cat_radio():
+        if self.is_no_cat_radio() or (self.config.radio_backend == "none" and self.config.manual_frequency_hz):
             return int(self.config.manual_frequency_hz or 0) or None
         return self.snapshots.read().radio.frequency_hz
 
@@ -860,6 +882,8 @@ class Operations:
                 "Mail was not deleted: a transfer is in progress.",
                 "Zprávy nebyly odstraněny: probíhá přenos.",
             )
+        if self.coordinator is not None and self.coordinator.busy():
+            return dual("Mail is in use by a radio.", "Poštu právě používá některé rádio.")
         preparing = (
             set(self._mail_preparing)
             if message_ids is None
@@ -3587,14 +3611,16 @@ class Operations:
         *,
         flags: Flags = Flags.NONE,
     ) -> None:
+        path = self.mailstore.radio_path(mail.msg_id)
         self.net.send_message(
             final_dest=mail.final_dest,
             body=mail.subject,
             msg_id=mail.msg_id,
             priority=Priority(mail.priority),
-            ttl=self.config.default_ttl,
+            ttl=path.get("ttl", self.config.default_ttl),
             flags=flags,
             payload_bytes=bundle,
+            previous_hop=path.get("previous_hop", ""),
         )
         self._log(
             dual(
@@ -3606,7 +3632,9 @@ class Operations:
             source="mail",
         )
 
-    def send_queued(self, message_id: int) -> bool:
+    def send_queued(self, message_id: int, *, _selected: bool = False) -> bool:
+        if not _selected and self.coordinator is not None and len(self.coordinator.radios) > 1:
+            return self.coordinator.send_queued(message_id)
         if self.audio_transport is None:
             self._log(
                 dual(
@@ -4056,6 +4084,8 @@ class Operations:
         )
 
     def _tick_auto_deliver(self, now: float) -> None:
+        if self.coordinator is not None and len(self.coordinator.radios) > 1:
+            return
         # Keep the mailbox selection and the send_queued transition together
         # with worker-side deletion. A busy worker simply lets the next tick
         # retry; no radio or UI thread waits on the mailbox lock.
@@ -4399,6 +4429,10 @@ class Operations:
                 # it the reserialised bundle so every hop becomes part of the
                 # route history carried to the final destination.
                 message.payload_bytes = stored_inbound.to_bundle()
+                if self.coordinator is not None and len(self.coordinator.radios) > 1:
+                    self.mailstore.radio_path(message.msg_id, inbound_radio=self.radio_id,
+                                              previous_hop=message.source,
+                                              ttl=message.ttl - 1)
             except Exception as exc:
                 self._log(
                     dual(

@@ -227,7 +227,7 @@ class NetworkWorkspace(QWidget):
         detail = QLabel(tr("network.heard_hint"))
         detail.setObjectName("Metadata")
         layout.addWidget(detail)
-        self.heard_table = RowTable(0, 8)
+        self.heard_table = RowTable(0, 9)
         self.heard_table.setMinimumHeight(self.TABLE_MIN_HEIGHT)
         self.heard_table.setHorizontalHeaderLabels(
             [
@@ -239,6 +239,7 @@ class NetworkWorkspace(QWidget):
                 tr("network.locator"),
                 tr("network.distance"),
                 tr("network.last_frame"),
+                dual("Radio", "Rádio"),
             ]
         )
         heard_header = self.heard_table.horizontalHeader()
@@ -249,6 +250,7 @@ class NetworkWorkspace(QWidget):
                 column, QHeaderView.ResizeMode.ResizeToContents
             )
         heard_header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        heard_header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.heard_table, 1)
         # An empty table is the normal state of a quiet channel and the normal
         # state of a channel that was never started. Saying which one it is here
@@ -950,6 +952,7 @@ class NetworkWorkspace(QWidget):
                 station.grid or "-",
                 "-" if relative is None else f"{relative[0]:.0f} km  {relative[1]:.0f}°",
                 station.last_frame,
+                str(getattr(station, "radio_id", 1)),
             )
             for column, value in enumerate(values):
                 self.heard_table.setItem(row, column, QTableWidgetItem(value))
@@ -1145,7 +1148,10 @@ class NetworkWorkspace(QWidget):
 
     def _heard_state_text(self, heard: list, now: float) -> str:
         """Say whether silence means a quiet channel or no channel at all."""
-        if not self._control_active:
+        coordinator = getattr(self.runtime.operations, "coordinator", None)
+        listening = (any(r.audio_transport is not None for r in coordinator.radios)
+                     if coordinator is not None else self._control_active)
+        if not listening:
             return tr("network.control_off_notice", action=tr("shell.start_control"))
         if not heard:
             lines = [tr("network.heard_state_quiet")]

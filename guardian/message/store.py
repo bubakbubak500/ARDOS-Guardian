@@ -80,7 +80,7 @@ class MessageStore:
         # Rebuilding an entry (for example when a relay re-stores a bundle)
         # must not erase times already learned locally.
         previous = self._index.get(mail.msg_id, {})
-        for key in ("received_at", "sent_at"):
+        for key in ("received_at", "sent_at", "radio_path"):
             if key in previous:
                 meta[key] = previous[key]
         return meta
@@ -207,6 +207,19 @@ class MessageStore:
             if next_hop is not None:
                 meta["next_hop"] = next_hop
             self._save_index()
+
+    def radio_path(self, msg_id: int, **updates) -> dict:
+        """Local relay provenance; never included in the over-air bundle."""
+        with self._lock:
+            meta = self._index.get(msg_id)
+            if meta is None:
+                return {}
+            value = dict(meta.get("radio_path", {}))
+            if updates:
+                value.update(updates)
+                meta["radio_path"] = value
+                self._save_index()
+            return value
 
     def delete(self, msg_id: int, *, folder: str | None = None) -> bool:
         with self._lock:

@@ -502,6 +502,8 @@ class DiscoveryEngine:
         self.on_event = on_event
         self.on_result = on_result
         self.on_failure = on_failure
+        # Station-level gateway can answer for another local radio channel.
+        self.bridge_reachable: Callable[[str], bool] | None = None
         self.routes = DynamicRouteStore(route_lifetime)
         self.live_topology = LiveTopologyStore(route_lifetime)
         self.pending: dict[int, PendingQuery] = {}
@@ -908,7 +910,14 @@ class DiscoveryEngine:
         metric = encode_discovery_metric(
             candidate.hops_from_origin, candidate.penalty_from_origin
         )
-        if target == self.callsign:
+        bridge_reachable = getattr(self, "bridge_reachable", None)
+        via_bridge = (target != self.callsign and self.forward and self.relay_enabled
+                      and frame.ttl > 1 and bridge_reachable is not None
+                      and bridge_reachable(target))
+        if target == self.callsign or via_bridge:
+            if via_bridge:
+                metric = encode_discovery_metric(min(15, candidate.hops_from_origin + 1),
+                                                 candidate.penalty_from_origin)
             reply = ControlFrame(
                 type=FrameType.MULTIHOP_RREP,
                 source=self.callsign,

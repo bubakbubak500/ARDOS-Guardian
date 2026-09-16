@@ -1011,14 +1011,16 @@ class MailWorkspace(QWidget):
         # `send_queued()` can also return False because an operator cancelled
         # a required manual no-CAT QSY. Do not misreport that deliberate safety
         # stop as a missing control channel.
-        if self.runtime.operations.audio_transport is None:
+        coordinator = getattr(self.runtime.operations, "coordinator", None)
+        radios = coordinator.radios if coordinator is not None else [self.runtime.operations]
+        if not any(radio.audio_transport is not None for radio in radios):
             QMessageBox.information(
                 self,
                 tr("mail.send_queued"),
                 tr("mail.send_requires_control"),
             )
             return
-        if self.runtime.operations.scanner is not None:
+        if len(radios) == 1 and self.runtime.operations.scanner is not None:
             QMessageBox.information(
                 self,
                 tr("mail.send_queued"),

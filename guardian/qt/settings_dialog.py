@@ -44,7 +44,7 @@ from ..protocol import MAX_PTT_DELAY_MS, PTT_DELAY_STEP_MS
 from ..radio.presets import CURATED, load_hamlib_models
 from ..radio.usb_serial import list_serial_ports, port_device
 from .theme import ThemePreference
-from .inputs import UppercaseLineEdit, callsign_list
+from .inputs import FrequencySpinBox, UppercaseLineEdit, callsign_list
 from .window_geometry import fit_dialog_to_screen
 
 _CALLSIGN = re.compile(r"^[A-Z0-9/]{3,16}$")
@@ -134,9 +134,12 @@ class SettingsDialog(QDialog):
         *,
         settings: QSettings | None = None,
         operations=None,
+        radio_only: bool = False,
     ) -> None:
         super().__init__(parent)
         self.config = config
+        self.radio_only = radio_only
+        self.second_editor = None
         self.settings = settings or QSettings()
         # Only the live station can key a radio. Without it (tests, previews)
         # the PTT test is offered but disabled rather than hidden, so the
@@ -170,6 +173,14 @@ class SettingsDialog(QDialog):
         self._build_payload_options()
         self._build_network()
         self._build_appearance(theme)
+        if radio_only:
+            for index in (0, 4, 5, 6):
+                self.tabs.setTabVisible(index, False)
+            self.tabs.setCurrentIndex(1)
+            intro.hide()
+            self.setWindowFlags(Qt.WindowType.Widget)
+        else:
+            self._build_dual_radio(theme)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -191,11 +202,51 @@ class SettingsDialog(QDialog):
             self.apply
         )
         outer.addWidget(self.buttons)
-        fit_dialog_to_screen(
-            self,
-            preferred_size=(960, 650),
-            minimum_size=(680, 420),
-        )
+        if radio_only:
+            self.buttons.hide()
+        if not radio_only:
+            fit_dialog_to_screen(
+                self,
+                preferred_size=(960, 650),
+                minimum_size=(680, 420),
+            )
+
+    def _build_dual_radio(self, theme) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.dual_radio_enabled = QCheckBox(dual("Enable two radios", "Zapnout dvě rádia"))
+        self.dual_radio_enabled.setChecked(self.config.dual_radio_enabled)
+        layout.addWidget(self.dual_radio_enabled)
+        note = QLabel(dual(
+            "Radio 2 shares the mailbox and station callsign. Select its own audio devices, "
+            "CAT port and VARA instance with different TCP ports. Configure those same ports "
+            "in the second VARA instance. For AIOC/no CAT, enter the actual dial frequency.",
+            "Rádio 2 sdílí poštu a volací značku. Vyberte jeho vlastní zvuková zařízení, "
+            "CAT port a instanci VARA s odlišnými TCP porty. Stejné porty nastavte i v druhé "
+            "instanci VARA. U AIOC / bez CAT zadejte skutečnou frekvenci rádia."))
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self._second_layout = layout
+        self._second_theme = theme
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        self._tab_scrolls.append(scroll)
+        self.tabs.addTab(scroll, dual("Two radios", "Dvě rádia"))
+        self.dual_radio_enabled.toggled.connect(self._toggle_second_editor)
+        self._toggle_second_editor(self.config.dual_radio_enabled)
+
+    def _toggle_second_editor(self, enabled) -> None:
+        if enabled and self.second_editor is None:
+            config = self.config.second_radio_config()
+            config._save_disabled = True
+            coordinator = getattr(self.operations, "coordinator", None)
+            second = (coordinator.radios[1] if coordinator and len(coordinator.radios) > 1 else None)
+            self.second_editor = SettingsDialog(config, self._second_theme, self,
+                settings=self.settings, operations=second, radio_only=True)
+            self._second_layout.addWidget(self.second_editor, 1)
+        if self.second_editor is not None:
+            self.second_editor.setVisible(enabled)
 
     def _page(self, title: str, description: str) -> QFormLayout:
         page = QWidget()
@@ -301,6 +352,9 @@ class SettingsDialog(QDialog):
                 "VOX používá pouze sériovou linku PTT RTS/DTR.",
             ),
         )
+        self.manual_frequency = FrequencySpinBox()
+        self.manual_frequency.setValue(int(self.config.manual_frequency_hz or 0))
+        form.addRow(dual("Dial frequency (without CAT)", "Frekvence rádia (bez CAT)"), self.manual_frequency)
         self.radio_backend = QComboBox()
         self.radio_backend.addItem(
             dual("No radio control", "Bez řízení rádia"), "none"
@@ -1308,6 +1362,10 @@ class SettingsDialog(QDialog):
         operations = self.operations
         if operations is None:
             return None
+        coordinator = getattr(operations, "coordinator", None)
+        if coordinator is not None and coordinator.busy():
+            return dual("Wait for both radios to finish their current operations.",
+                        "Počkejte, až obě rádia dokončí aktuální operace.")
         payload_active = getattr(operations, "payload_active", None)
         if callable(payload_active) and payload_active():
             return dual(
@@ -1396,6 +1454,44 @@ class SettingsDialog(QDialog):
                         f"Program {label} neexistuje: {value}",
                     )
                 )
+        if not self.radio_only and self.dual_radio_enabled.isChecked():
+            second = self.second_editor
+            errors.extend(f"Radio 2: {error}" for error in second.validation_errors())
+            def host(value):
+                value = value.text().strip().lower()
+                return "localhost" if value in {"localhost", "127.0.0.1", "::1"} else value
+            def ports(editor):
+                return ({editor.vara_hf_cmd.value(), editor.vara_hf_data.value()}
+                        if editor.vara_mode.currentText() == "HF" else
+                        {editor.vara_fm_cmd.value(), editor.vara_fm_data.value()})
+            if host(self.vara_host) == host(second.vara_host) and ports(self) & ports(second):
+                errors.append(dual("The two VARA instances must use different TCP ports.",
+                                   "Dvě instance VARA musí používat různé TCP porty."))
+            if (self.selected_cat_port() and self.selected_cat_port().upper() == second.selected_cat_port().upper()):
+                errors.append(dual("Each radio needs its own CAT/PTT port.", "Každé rádio potřebuje vlastní CAT/PTT port."))
+            if (self.radio_backend.currentData() == second.radio_backend.currentData() == "hamlib"
+                    and host(self.rigctld_host) == host(second.rigctld_host)
+                    and self.rigctld_port.value() == second.rigctld_port.value()):
+                errors.append(dual("Each Hamlib radio needs its own rigctld TCP port.",
+                                   "Každé rádio Hamlib potřebuje vlastní TCP port rigctld."))
+            for direction in ("audio_input", "audio_output"):
+                first = getattr(self, direction).currentText().strip()
+                other = getattr(second, direction).currentText().strip()
+                if first and first == other:
+                    errors.append(dual(f"Select separate {direction} devices for the radios.",
+                                       f"Vyberte pro rádia odlišná zařízení {direction}."))
+            for number, editor in enumerate((self, second), 1):
+                if (editor.radio_backend.currentData() in {"none", "vox"}
+                        or (editor.radio_backend.currentData() == "hamlib" and editor.radio_model.currentData() == 1)):
+                    if editor.manual_frequency.value() <= 0:
+                        errors.append(dual(f"Radio {number}: enter the actual dial frequency.",
+                                           f"Rádio {number}: zadejte skutečnou frekvenci rádia."))
+        if self.vara_mode.currentText() == "HF":
+            cmd, data = self.vara_hf_cmd.value(), self.vara_hf_data.value()
+        else:
+            cmd, data = self.vara_fm_cmd.value(), self.vara_fm_data.value()
+        if cmd == data:
+            errors.append(dual("VARA command and data ports must differ.", "Řídicí a datový port VARA musí být odlišné."))
         return errors
 
     def apply(self) -> bool:
@@ -1409,8 +1505,14 @@ class SettingsDialog(QDialog):
             self.error.setText(locked)
             self.error.show()
             return False
+        if (not self.radio_only and self.dual_radio_enabled.isChecked()
+                and not self.second_editor.apply()):
+            self.error.setText(self.second_editor.error.text())
+            self.error.show()
+            return False
         self.error.hide()
         cfg = self.config
+        cfg.manual_frequency_hz = self.manual_frequency.value()
         cfg.callsign = self.callsign.text().strip().upper() or "NOCALL"
         cfg.operator_name = self.operator_name.text().strip()
         cfg.notify_incoming = self.notify_incoming.isChecked()
@@ -1491,6 +1593,11 @@ class SettingsDialog(QDialog):
         cfg.discovery_denylist = callsign_list(self.discovery_denylist.text())
         cfg.appearance = self.selected_theme.value.title()
         cfg.enforce_production_policy()
+        if self.radio_only:
+            return True
+        cfg.dual_radio_enabled = self.dual_radio_enabled.isChecked()
+        if cfg.dual_radio_enabled:
+            cfg.second_radio = self.second_editor.config.radio_channel_profile()
         cfg.save()
         selected_language = self.selected_language
         self.settings.setValue("ui/language", selected_language.value)

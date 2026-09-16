@@ -15,6 +15,7 @@ from ..install.dependencies import inspect_dependencies
 from ..i18n import dual
 from ..message import Folder, MessageStore
 from ..operations import Operations
+from ..multi_radio import RadioCoordinator
 from ..routing import HeardStations, RouteTable, Topology
 from ..updates import UpdateInfo, check_for_update, download_installer
 from ..services import (
@@ -55,6 +56,8 @@ class ShellRuntime:
             self.routes,
             self.heard,
         )
+        self.radio_coordinator = RadioCoordinator(self.operations)
+        self.configure_second_radio()
         self.refresh()
         self.request_dependency_refresh()
         self.events.publish(
@@ -74,7 +77,7 @@ class ShellRuntime:
                 transit=counts.get(Folder.TRANSIT, 0),
             ),
             network=NetworkSnapshot(
-                active_sessions=current_network.active_sessions,
+                active_sessions=sum(r._active_session_count() for r in self.radio_coordinator.radios),
                 heard_stations=len(self.heard.active(time.monotonic())),
                 control_channel_active=current_network.control_channel_active,
                 scanner_active=current_network.scanner_active,
@@ -89,6 +92,8 @@ class ShellRuntime:
 
     def drain_workers(self) -> None:
         self.workers.drain()
+        for radio in self.radio_coordinator.radios[1:]:
+            radio.workers.drain()
 
     def tick(self) -> None:
         if not hasattr(self, "warships"):
@@ -96,7 +101,43 @@ class ShellRuntime:
             self.warships = WarshipsService(self.operations)
         self.warships.bind()
         self.operations.tick()
+        for radio in self.radio_coordinator.radios[1:]:
+            radio.tick()
+        if len(self.radio_coordinator.radios) > 1:
+            self.radio_coordinator.tick()
+        else:
+            self.radio_coordinator.flush_receipts()
         self.warships.tick()
+
+    def configure_second_radio(self) -> None:
+        coordinator = self.radio_coordinator
+        second = coordinator.radios[1] if len(coordinator.radios) > 1 else None
+        config = self.config.second_radio_config() if self.config.dual_radio_enabled else None
+        if second is not None:
+            if config is not None and config == second.config:
+                return
+            if (config is not None and config.radio_channel_profile()
+                    == second.config.radio_channel_profile()):
+                # Shared identity/policy edits do not need to disconnect the
+                # second radio. Its hardware and audio endpoints are unchanged.
+                from dataclasses import fields
+                for item in fields(config):
+                    setattr(second.config, item.name, getattr(config, item.name))
+                second.apply_network_settings()
+                return
+            # Settings have already checked both channels for active transfers.
+            # A retired worker must never save its old profile over the new one.
+            second.config._save_disabled = True
+            second.close()
+            second.workers.close(wait=True)
+            coordinator.radios.remove(second)
+        if config is not None:
+            config._station_owner = self.config
+            second = Operations(config, self.events, SnapshotStore(),
+                                WorkerPool(max_workers=3, thread_name_prefix="guardian-radio2"),
+                                self.mailstore, self.routes, HeardStations())
+            coordinator.attach(second, 2)
+        self.heard = coordinator.heard if config is not None else self.operations.heard
 
     def request_dependency_refresh(self) -> bool:
         config = self.config
@@ -290,5 +331,8 @@ class ShellRuntime:
         )
 
     def close(self) -> None:
+        for radio in self.radio_coordinator.radios[1:]:
+            radio.close()
+            radio.workers.close(wait=False)
         self.operations.close()
         self.workers.close(wait=False)
