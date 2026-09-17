@@ -17,6 +17,14 @@ datas = []
 binaries = []
 hiddenimports = []
 
+ardop_root = root / "native" / "ardop"
+ardop_dll = ardop_root / "bin" / "guardian_ardop.dll"
+if not ardop_dll.is_file():
+    raise FileNotFoundError("Build the ARDOP library with tools/build_ardop.py first")
+binaries.append((str(ardop_dll), "ardop"))
+datas.append((str(ardop_root / "vendor" / "LICENSE"), "ardop"))
+datas.append((str(ardop_root / "UPSTREAM.md"), "ardop"))
+
 for package in ("sounddevice", "pycaw", "comtypes", "zopfli"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas

@@ -69,6 +69,7 @@ from .window_geometry import fit_window_to_screen
 PAYLOAD_LABELS = {
     "vara_p2p": "VARA P2P",
     "ofdm_vhf": "SC-FTN",
+    "ardop": "ARDOP 500 Hz",
 }
 
 

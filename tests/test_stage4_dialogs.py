@@ -60,7 +60,7 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         assert [
             dialog.payload_backend.itemData(index)
             for index in range(dialog.payload_backend.count())
-        ] == ["vara_p2p", "ofdm_vhf"]
+        ] == ["vara_p2p", "ofdm_vhf", "ardop"]
         assert config.payload_backend == "vara_p2p"
         assert config.audio_input == "USB Audio CODEC RX"
         assert config.audio_output == "USB Audio CODEC TX"

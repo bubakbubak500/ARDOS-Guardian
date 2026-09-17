@@ -81,6 +81,17 @@ def _run_compression_self_test() -> None:
     _write_report(report_path, report)
 
 
+def _run_ardop_self_test() -> None:
+    from guardian.ardop.selftest import run
+    report_path = _self_test_report_path(sys.argv, "--ardop-self-test-report")
+    try:
+        report = run()
+    except BaseException:
+        _write_report(report_path, traceback.format_exc())
+        raise
+    _write_report(report_path, report)
+
+
 def _run_qt_self_test() -> None:
     report_path = _self_test_report_path(sys.argv, "--qt-self-test-report")
     try:
@@ -120,6 +131,8 @@ if __name__ == "__main__":
     freeze_support()
     if "--compression-self-test" in sys.argv:
         _run_compression_self_test()
+    elif "--ardop-self-test" in sys.argv:
+        _run_ardop_self_test()
     elif "--qt-self-test" in sys.argv:
         _run_qt_self_test()
     else:

@@ -175,7 +175,7 @@ def control_mode_compatible(modem: str, mode: str) -> bool:
     """
     value = (mode or "").strip().upper().replace("-", "")
     active = (modem or "").strip().lower()
-    if active == "mfsk16":
+    if active in {"mfsk16", "ardop500"}:
         return value in {"USB", "LSB", "PKTUSB", "PKTLSB", "DATAUSB", "DATALSB"}
     return value in {"FM", "NFM", "PKTFM", "DATAFM"}
 
@@ -427,7 +427,7 @@ class Operations:
         net.on_discovery_event = self._on_discovery_event
         net.channel_frequency = self.current_frequency
         net.ptt_delay_request = self._vara_keying_delay_request
-        net.ofdm_payload_request = self._ofdm_payload_configured
+        net.ofdm_payload_request = self._native_payload_configured
         net.g2_profile = self._g2_profile_token
         net.on_final_ack_sent = self._on_final_ack_sent
         net.position = self.beacon_position
@@ -527,7 +527,7 @@ class Operations:
         )
         self.net.working_channel_offer = self._working_channel_offer
         self.net.working_channel_accept = self._working_channel_accept
-        self.net.ofdm_payload_request = self._ofdm_payload_configured
+        self.net.ofdm_payload_request = self._native_payload_configured
         self.net.g2_profile = self._g2_profile_token
         self.net.on_calibration_frame = self._on_calibration_frame
         # A backend already executing owns its own reference. Replacing this
@@ -598,8 +598,13 @@ class Operations:
         """Whether this station advertises the opt-in SC-FTN payload."""
         return self.config.payload_backend == "ofdm_vhf"
 
+    def _native_payload_configured(self) -> bool:
+        return self.config.payload_backend in ("ofdm_vhf", "ardop")
+
     def _g2_profile_token(self) -> str:
         """Return the exact local SC-FTN profile token used per hop."""
+        if self.config.payload_backend == "ardop":
+            return "A500"
         return g2_profile_token(
             self.config.g2_waveform,
             self.config.g2_bandwidth,
@@ -694,7 +699,7 @@ class Operations:
         home_frequency = self.current_frequency()
         if not home_frequency:
             return []
-        fallback_mode = "USB" if self.config.active_modem() == "mfsk16" else "FM"
+        fallback_mode = "USB" if self.config.active_modem() in {"mfsk16", "ardop500"} else "FM"
         home_mode = (snapshot.mode or fallback_mode).strip().upper()
         if not control_mode_compatible(self.config.active_modem(), home_mode):
             return []
@@ -1168,7 +1173,7 @@ class Operations:
         if self.is_no_cat_radio():
             return []
         here = self.current_frequency()
-        fallback_mode = "USB" if self.config.active_modem() == "mfsk16" else "FM"
+        fallback_mode = "USB" if self.config.active_modem() in {"mfsk16", "ardop500"} else "FM"
         channels = [
             (freq, mode or fallback_mode)
             for freq, mode in self.routes.frequencies()
@@ -2985,6 +2990,8 @@ class Operations:
         c = self.config
         return dict(
             vara=self.vara,
+            callsign=c.callsign,
+            ardop_tx_scale=c.ardop_tx_percent / 100.0,
             on_log=lambda value: self._log(value, source="payload"),
             on_qsy=self._payload_send_qsy,
             on_receive_qsy=(
@@ -3418,6 +3425,8 @@ class Operations:
             )
             return False
         modem = make_modem(self.config.active_modem())
+        if self.config.payload_backend == "ardop":
+            modem.tx_scale = self.config.ardop_tx_percent / 100.0
         input_device = (
             resolve_device(self.config.audio_input, "input")
             if self.config.audio_input
@@ -4266,7 +4275,7 @@ class Operations:
         SC-FTN and tolerate a third-party backend that does not expose the
         optional setter.
         """
-        if str(payload_transport or "").strip().lower() != "ofdm_vhf":
+        if str(payload_transport or "").strip().lower() not in ("ofdm_vhf", "ardop"):
             return
         payload = getattr(self.net, "payload", None)
         candidates = [payload]
@@ -4702,6 +4711,8 @@ class Operations:
     def _working_mode_compatible(self, mode: str) -> bool:
         """Can VARA as configured here actually work on this mode?"""
         normal = (mode or "").strip().upper().replace("-", "")
+        if self.config.payload_backend == "ardop":
+            return control_mode_compatible("ardop500", normal)
         if (self.config.vara_mode or "FM").strip().upper() == "HF":
             return normal in {"USB", "LSB", "PKTUSB", "PKTLSB", "DATAUSB", "DATALSB"}
         return normal in {"FM", "NFM", "PKTFM", "DATAFM"}

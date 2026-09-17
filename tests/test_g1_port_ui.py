@@ -59,7 +59,8 @@ def test_settings_exposes_sc_widths_guardian_profiles_and_xz_compression(
     monkeypatch.setattr(config, "save", lambda: None)
     dialog = SettingsDialog(config, ThemePreference.SYSTEM)
     try:
-        assert dialog.payload_backend.count() == 2
+        assert dialog.payload_backend.count() == 3
+        assert dialog.payload_backend.findData("ardop") >= 0
         assert dialog.g2_waveform.count() == 1
         assert dialog.g2_bandwidth.count() == 6
         assert "AUTO" in dialog.g2_summary.text()

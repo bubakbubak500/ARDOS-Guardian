@@ -1,0 +1,4 @@
+e3d2b154e1b65f5f42bb9af124ae35130360faf987f7d8b8911305e2b26e8fd0  dist/Guardian/Guardian.exe
+e30a1ff4ab3ea461929fd15cd8e14cfb02044b259d2b6b7ddfc5e1908adbdc6a  native/ardop/bin/guardian_ardop.dll
+c339c2c14c32d5fd63af38408d88159e07640a9251bd55b0a144ad338b024cb8  native/ardop/bin/libguardian_ardop.so
+7536e339e6c1b25c1c64c11be76035f263e1245488991434d1dd96d7dc9fd980  release/Guardian-1.1.11-setup-win-x64.exe

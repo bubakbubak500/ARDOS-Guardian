@@ -43,7 +43,7 @@ DEFAULT_CONFIG_PATH = config_dir() / "config.json"
 # dependency-free module.  The payload package owns construction of each
 # backend.  VARA is deliberately the default and remains the safe fallback for
 # an old or hand-edited profile.
-PAYLOAD_BACKENDS = ("vara_p2p", "ofdm_vhf")
+PAYLOAD_BACKENDS = ("vara_p2p", "ofdm_vhf", "ardop")
 
 # These controls remain fields for API and migration compatibility, but the
 # shipped station policy always enables them.  Low-level protocol objects and
@@ -212,7 +212,8 @@ class StationConfig:
     # was dropped in 0.6.26; a config still holding it is coerced on load.
     # VARA remains the default; ofdm_vhf is the internal transport name for the
     # SC-FTN Guardian modem.
-    payload_backend: str = "vara_p2p"  # "vara_p2p" | "ofdm_vhf"
+    payload_backend: str = "vara_p2p"  # "vara_p2p" | "ofdm_vhf" | "ardop"
+    ardop_tx_percent: int = 100
 
     # Guardian SC-FTN modem settings.  The ``ofdm_*`` names are retained for
     # wire/API compatibility with the shared payload/link code; they do not
@@ -364,6 +365,10 @@ class StationConfig:
         """
         for name in PRODUCTION_FIXED_TRUE_FIELDS:
             setattr(self, name, True)
+        try:
+            self.ardop_tx_percent = max(1, min(100, int(self.ardop_tx_percent)))
+        except (TypeError, ValueError, OverflowError):
+            self.ardop_tx_percent = 100
 
         legacy_compression = any(
             bool(getattr(self, name, False)) for name in LEGACY_COMPRESSION_FIELDS
@@ -625,7 +630,7 @@ class StationConfig:
     def radio_channel_profile(self) -> dict:
         """All independently configurable radio, modem and audio settings."""
         prefixes = ("radio", "rig", "cat_", "ptt_", "guardian_ptt", "vara_",
-                    "audio_", "ofdm_", "g2_")
+                    "audio_", "ofdm_", "g2_", "ardop_")
         extra = {"manual_frequency_hz", "control_modem", "control_channel", "payload_backend"}
         return {key: value for key, value in asdict(self).items()
                 if key.startswith(prefixes) or key in extra}
@@ -702,6 +707,8 @@ class StationConfig:
 
     def active_modem(self) -> str:
         """Resolve the control-burst modem for the current VARA mode."""
+        if self.payload_backend == "ardop":
+            return "ardop500"
         if self.control_modem and self.control_modem != "auto":
             return self.control_modem
         return "mfsk16" if self.vara_mode.upper() == "HF" else "afsk1200"

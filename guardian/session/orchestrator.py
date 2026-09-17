@@ -187,6 +187,8 @@ def session_transfer_timeout_for(msg: "Message") -> float:
         _PAYLOAD_WIRE_OVERHEAD + data_size,
         getattr(msg, "payload_wire_size", 0),
     )
+    if msg.payload_transport == "ardop":
+        return max(300.0, (wire_size + 28) * 8 / 41 * 4 + 240)
     payload_timeout = max(
         _PAYLOAD_TRANSFER_TIMEOUT,
         wire_size * 8 / _SLOW_LINK_BPS * _TRANSFER_MARGIN,
@@ -543,7 +545,7 @@ class Orchestrator:
             if not bool(self.ofdm_payload_request()):
                 return None
             token = str(self.g2_profile()).strip().upper()
-            return token if _is_sc_ftn_profile_token(token) else None
+            return token if token == "A500" or _is_sc_ftn_profile_token(token) else None
         except Exception:  # noqa: BLE001 - configuration failure means no capability
             return None
 
@@ -1343,6 +1345,10 @@ class Orchestrator:
         msg.payload_transport = "ofdm_vhf" if agreed_ofdm else "vara_p2p"
         self.sessions[f.message_id] = msg
         self._enter(msg, SessionState.HEARD)
+        if local_profile == "A500" and not agreed_ofdm:
+            self._send(FrameType.CANCEL, msg)
+            self._fail(msg, "peer does not support Guardian ARDOP 500 Hz")
+            return
         if self.busy:
             self._send(FrameType.BUSY, msg)
             self._fail(msg, "declined — station busy")
@@ -1367,6 +1373,10 @@ class Orchestrator:
                 and self._own_g2_profile() is not None
             )
             msg.payload_transport = "ofdm_vhf" if agreed_ofdm else "vara_p2p"
+            if self._own_g2_profile() == "A500" and not agreed_ofdm:
+                self._send(FrameType.CANCEL, msg)
+                self._fail(msg, "peer does not support Guardian ARDOP 500 Hz")
+                return
             if not agreed_ofdm and self._own_ofdm_capable():
                 self._emit(
                     msg,
@@ -1403,7 +1413,7 @@ class Orchestrator:
     @staticmethod
     def _payload_label(msg: Message) -> str:
         """Operator-facing name of the transport negotiated for this hop."""
-        return "OFDM VHF" if msg.payload_transport == "ofdm_vhf" else "VARA"
+        return {"ofdm_vhf": "OFDM VHF", "ardop": "ARDOP 500 Hz"}.get(msg.payload_transport, "VARA")
 
     def _start_payload(self, msg: Message, peer: str) -> None:
         self._enter(msg, SessionState.STARTING_VARA)
@@ -1528,8 +1538,14 @@ class Orchestrator:
         ):
             return
         local = self._own_g2_profile()
-        if msg.payload_transport == "ofdm_vhf" and local == f.destination:
+        if local != f.destination and "A500" in (local, f.destination):
+            self._send(FrameType.CANCEL, msg)
+            self._fail(msg, "ARDOP 500 Hz profile not agreed")
+            return
+        if msg.payload_transport in ("ofdm_vhf", "ardop") and local == f.destination:
             msg.g2_profile_token = local or ""
+            if local == "A500":
+                msg.payload_transport = "ardop"
         else:
             msg.payload_transport = "vara_p2p"
             msg.g2_profile_token = "="
@@ -1544,9 +1560,15 @@ class Orchestrator:
         ):
             return
         if f.destination != msg.g2_profile_token:
+            if msg.g2_profile_token == "A500":
+                self._send(FrameType.CANCEL, msg)
+                self._fail(msg, "ARDOP 500 Hz profile not agreed")
+                return
             msg.payload_transport = "vara_p2p"
             msg.g2_profile_token = ""
             self._emit(msg, "Guardian G2 profile differs; falling back to VARA")
+        elif f.destination == "A500":
+            msg.payload_transport = "ardop"
         self._start_payload(msg, f.source)
 
     def _rx_busy(self, f: ControlFrame) -> None:

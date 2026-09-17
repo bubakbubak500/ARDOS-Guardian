@@ -239,6 +239,19 @@ class ReadinessDialog(QDialog):
 
         cfg = self.runtime.config
         by_kind = {item.kind: item for item in statuses}
+        if cfg.payload_backend == "ardop":
+            try:
+                from ..ardop import Engine
+                with Engine(cfg.callsign):
+                    pass
+                ready = bool(cfg.radio_backend != "none" and cfg.audio_input and cfg.audio_output)
+                detail = dual("ARDOP 500 Hz library ready; configure radio and audio RX/TX.",
+                              "Knihovna ARDOP 500 Hz je připravena; nastavte rádio a audio RX/TX.")
+            except (RuntimeError, ValueError, OSError) as exc:
+                ready, detail = False, str(exc)
+            self.summary.setProperty("statusRole", "success" if ready else "warning")
+            self.summary.setText(("● " if ready else "◆ ") + detail)
+            return
         if cfg.payload_backend == "ofdm_vhf":
             try:
                 policy = automatic_g2_policy(

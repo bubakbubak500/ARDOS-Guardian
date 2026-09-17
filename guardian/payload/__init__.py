@@ -102,7 +102,12 @@ def _make_ofdm(*, on_log=None, on_qsy=None, on_receive_qsy=None, on_unqsy=None,
     )
 
 
-_BACKENDS = {"vara_p2p": _make_vara, "ofdm_vhf": _make_ofdm}
+def _make_ardop(**deps):
+    from .ardop import ArdopBackend
+    return ArdopBackend(**deps)
+
+
+_BACKENDS = {"vara_p2p": _make_vara, "ofdm_vhf": _make_ofdm, "ardop": _make_ardop}
 
 
 def make_backend(name: str = "vara_p2p", **deps):

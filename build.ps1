@@ -39,6 +39,10 @@ try {
 
     & (Join-Path $root "tools\fetch_jpegxl.ps1")
 
+    Write-Host "Building the native ARDOP modem..." -ForegroundColor Cyan
+    & $python tools\build_ardop.py
+    if ($LASTEXITCODE -ne 0) { throw "ARDOP build failed. Install a C11 compiler or set CC." }
+
     if (-not $SkipTests) {
         Write-Host "Running characterization tests..." -ForegroundColor Cyan
         # A fixed pytest directory can be left owned by another Windows build

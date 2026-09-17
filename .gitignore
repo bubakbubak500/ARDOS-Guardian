@@ -38,6 +38,7 @@ _icon_preview.png
 .ui-baseline-data-frozen/
 .downloads/
 .build-temp/
+native/ardop/bin/
 artifacts/
 
 # Locally built release artifacts (the small manifest remains versioned)

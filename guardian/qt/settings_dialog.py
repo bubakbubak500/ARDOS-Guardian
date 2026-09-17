@@ -1091,6 +1091,16 @@ class SettingsDialog(QDialog):
         self.payload_backend = QComboBox()
         self.payload_backend.addItem("Guardian VARA P2P", "vara_p2p")
         self.payload_backend.addItem("Guardian SC-FTN", "ofdm_vhf")
+        self.payload_backend.addItem("Guardian ARDOP 500 Hz (experimental)", "ardop")
+        self.ardop_tx_percent = _spin(1, 100, self.config.ardop_tx_percent)
+        self.ardop_tx_percent.setSuffix(" %")
+        self.ardop_summary = QLabel(dual(
+            "ARDOP: maximum 500 Hz, automatic speed, narrow control frames. "
+            "Use SSB and select this mode on both stations. No external TNC is required.",
+            "ARDOP: nejvýše 500 Hz, automatická rychlost, úzkopásmové řízení. "
+            "Použijte SSB a tento režim na obou stanicích. Externí TNC není potřeba.",
+        ))
+        self.ardop_summary.setWordWrap(True)
         self.payload_backend.setCurrentIndex(
             max(0, self.payload_backend.findData(self.config.payload_backend))
         )
@@ -1161,6 +1171,8 @@ class SettingsDialog(QDialog):
         ))
         form.addRow(dual("Active VARA mode", "Aktivní režim VARA"), self.vara_mode)
         form.addRow(dual("Payload workflow", "Způsob přenosu"), self.payload_backend)
+        form.addRow(dual("ARDOP audio level", "Hlasitost ARDOP"), self.ardop_tx_percent)
+        form.addRow(self.ardop_summary)
         form.addRow(dual("Guardian waveform", "Vlna Guardian"), self.g2_waveform)
         form.addRow(dual("SC-FTN bandwidth", "Šířka pásma SC-FTN"), self.g2_bandwidth)
         form.addRow(dual("Resolved SC-FTN policy", "Výsledná politika SC-FTN"), self.g2_summary)
@@ -1196,6 +1208,18 @@ class SettingsDialog(QDialog):
     def _sync_bandwidth_row(self, mode: str) -> None:
         """Show only the selected transport's waveform and bandwidth rows."""
         sc_selected = self.payload_backend.currentData() == "ofdm_vhf"
+        ardop_selected = self.payload_backend.currentData() == "ardop"
+        self._modem_form.setRowVisible(self.ardop_tx_percent, ardop_selected)
+        self._modem_form.setRowVisible(self.ardop_summary, ardop_selected)
+        for widget in (self.vara_host, self.vara_fm_cmd, self.vara_fm_data,
+                       self.vara_fm_path, self.vara_hf_cmd, self.vara_hf_data,
+                       self.vara_hf_path):
+            self._modem_form.setRowVisible(widget, not ardop_selected)
+        self.control_modem.setEnabled(not ardop_selected)
+        self.control_modem.setToolTip(dual(
+            "ARDOP uses narrow control frames automatically. Both peers need Guardian 1.1.11 or newer.",
+            "ARDOP automaticky používá úzkopásmové řízení. Obě stanice potřebují Guardian 1.1.11 nebo novější.",
+        ) if ardop_selected else "")
         for widget in (self.g2_waveform, self.g2_bandwidth, self.g2_summary):
             self._modem_form.setRowVisible(widget, sc_selected)
         visible = (
@@ -1415,6 +1439,13 @@ class SettingsDialog(QDialog):
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
         callsign = self.callsign.text().strip().upper()
+        if self.payload_backend.currentData() == "ardop":
+            try:
+                from ..ardop import Engine
+                with Engine(callsign):
+                    pass
+            except (ValueError, RuntimeError, OSError) as exc:
+                errors.append(f"ARDOP: {exc}")
         if callsign != "NOCALL" and not _CALLSIGN.fullmatch(callsign):
             errors.append(
                 dual(
@@ -1531,6 +1562,7 @@ class SettingsDialog(QDialog):
         cfg.vara_fm_path = self.vara_fm_path.text()
         cfg.vara_hf_path = self.vara_hf_path.text()
         cfg.payload_backend = self.payload_backend.currentData()
+        cfg.ardop_tx_percent = self.ardop_tx_percent.value()
         cfg.g2_waveform = SC_FTN_WAVEFORM
         cfg.g2_bandwidth = str(self.g2_bandwidth.currentData() or "2K7").upper()
         cfg.g2_adaptive_mcs = True

@@ -21,6 +21,9 @@ __all__ = ["AFSKModem", "MFSKModem", "make_modem"]
 def make_modem(name: str, sample_rate: int = 48000):
     """Build a modem by control_modem name ('afsk1200' | 'mfsk16')."""
     name = (name or "afsk1200").lower()
+    if name == "ardop500":
+        from .ardop import ArdopControlModem
+        return ArdopControlModem(sample_rate=sample_rate)
     if name == "mfsk16":
         return MFSKModem(sample_rate=sample_rate)
     return AFSKModem(sample_rate=sample_rate)

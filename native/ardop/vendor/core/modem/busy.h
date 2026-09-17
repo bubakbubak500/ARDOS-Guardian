@@ -1,0 +1,187 @@
+#ifndef ARDOP_MODEM_BUSY_H_
+#define ARDOP_MODEM_BUSY_H_
+
+#include <stdbool.h>
+#include <stdint.h>
+
+/**
+ * @file busy.h
+ * @brief Channel-busy detector: is someone else already using the frequency?
+ *
+ * Ported from `BusyDetect3` in the inherited `BusyDetect.c`. Given a magnitude
+ * spectrum, it decides whether the channel is occupied, so the link layer can
+ * hold off transmitting. It is consulted only while searching for a leader --
+ * once a leader is found the receiver is committed and no longer asks.
+ *
+ * Sans-I/O: all state lives in a caller-owned ::ardop_busy_detector, the clock
+ * is passed in, and configuration (bandwidth, sensitivity) is passed in rather
+ * than read from globals.
+ *
+ * @par A note on time.
+ * The detector's thresholds are defined by the protocol in milliseconds (a
+ * 5-second busy hold, a 610 ms clear delay), and the inherited code compares
+ * them against an `unsigned int` millisecond clock that wraps at 2^32. To stay
+ * bit-identical -- including that wrap -- this port keeps time as a
+ * `uint32_t` millisecond value rather than the sample count the rest of the
+ * core uses. The caller derives it from the one sample clock (`samples / 12`
+ * at 12 kHz); doing so here rather than reading a wall clock is what closes the
+ * drift problem `analysis/03` describes, while the ms unit keeps the busy
+ * arithmetic faithful.
+ *
+ * @par A preserved accident.
+ * `BusyDetect3` intends a slow rolling average of the signal-to-noise ratio,
+ * but reads a function-local that is re-zeroed every call (the persistent
+ * `dblAvgStoNSlow*` globals are declared and never used). The average therefore
+ * never accumulates: it is just a 0.2 gain on the current ratio, except on the
+ * first call after a bandwidth change, where it is the full ratio -- a 5x
+ * sensitivity step. This is preserved bit-for-bit; see
+ * [[normative-accidents-catalog]].
+ */
+
+/** @brief Channel bandwidth, selecting the busy thresholds. */
+typedef enum {
+	ARDOP_BW_200 = 0,
+	ARDOP_BW_500,
+	ARDOP_BW_1000,
+	ARDOP_BW_2000,
+} ardop_bandwidth;
+
+/**
+ * @brief Busy-detector state. Caller-owned; zero-initialise before first use.
+ *
+ * A zeroed struct matches the inherited globals' initial state. ardop_busy_clear()
+ * applies the `ClearBusy()` reset used at protocol transitions.
+ */
+typedef struct {
+	int last_start;             /**< Bin range of the previous call (intLastStart). */
+	int last_stop;              /**< (intLastStop). */
+	int busy_on_count;          /**< Consecutive busy detections (intBusyOnCnt). */
+	int busy_off_count;         /**< Consecutive idle detections (intBusyOffCnt). */
+	bool last_busy;             /**< Last reported busy state (blnLastBusy). */
+	uint32_t last_trip;         /**< ms of the last confirmed busy (dttLastTrip). */
+	uint32_t last_busy_trip;    /**< ms busy last asserted (dttLastBusyTrip). */
+	uint32_t prior_last_busy_trip; /**< prior of the above (dttPriorLastBusyTrip). */
+	uint32_t last_busy_clear;   /**< ms busy last cleared (dttLastBusyClear). */
+} ardop_busy_detector;
+
+/**
+ * @brief Apply the `ClearBusy()` reset: forget history and clear busy now.
+ *
+ * Used when the detector is (re)enabled or the protocol state changes. Forces
+ * the rolling averages to reinitialise on the next call (by zeroing the bin
+ * range) and clears any asserted busy immediately.
+ *
+ * @param b       Detector to reset.
+ * @param now_ms  Current time, milliseconds.
+ */
+void ardop_busy_clear(ardop_busy_detector *b, uint32_t now_ms);
+
+/**
+ * @brief Decide whether the channel is busy from a magnitude spectrum.
+ *
+ * Ported from `BusyDetect3`. Sorts the bins in [@p start, @p stop] to separate
+ * signal peaks from the noise baseline over a narrow (~94 Hz) and a wide (~2/3
+ * bandwidth) window, forms a signal-to-noise ratio for each, and trips busy
+ * when either exceeds a bandwidth- and sensitivity-dependent threshold. The
+ * result is filtered: busy must persist ~3 calls (~250 ms) to be reported, and
+ * once reported it is held for 5 s past the last trip before clearing.
+ *
+ * @param b         Detector state, updated in place.
+ * @param mag       Magnitude spectrum; bins @p start..@p stop are read.
+ * @param start     First bin of the search range.
+ * @param stop      Last bin of the search range (@p stop - @p start + 1 <= 200).
+ * @param bw        Channel bandwidth (selects thresholds).
+ * @param busy_det  Sensitivity 0..10 (host `BusyDet`); 0 disables (never busy).
+ * @param now_ms    Current time, milliseconds (see the file note on time).
+ * @return true if the channel is currently reported busy.
+ */
+bool ardop_busy_detect(ardop_busy_detector *b, const float *mag, int start,
+		       int stop, ardop_bandwidth bw, int busy_det,
+		       uint32_t now_ms);
+
+/** @brief Samples one busy analysis consumes (the FFT size). */
+#define ARDOP_BUSY_WINDOW 1024
+
+/**
+ * @brief Geometry of the magnitude spectrum ::ardop_busy_spectrum produces.
+ *
+ * The detector searches a 206-bin slice of the 1024-point transform, which at
+ * 12 kHz is 11.719 Hz per bin covering roughly 293..2695 Hz -- the SSB passband.
+ * These are exported because a spectrum consumer (a waterfall) has to label a
+ * frequency axis, and deriving the numbers a second time invites drift.
+ */
+#define ARDOP_BUSY_FIRST_BIN 25     /**< First transform bin kept (~293 Hz). */
+#define ARDOP_BUSY_MAG_BINS  206    /**< Bins kept (~293..2695 Hz). */
+#define ARDOP_BUSY_BIN_HZ    11.719f /**< Bin width, Hz (12000/1024). */
+
+/**
+ * @brief Fill the half Blackman-Harris window ::ardop_busy_analyze uses.
+ *
+ * The window is symmetric, so only the first 513 coefficients are stored (index
+ * 0..512); ::ardop_busy_analyze mirrors them for the upper half. Ported from
+ * generateBH. Call once and reuse.
+ *
+ * @param w  Output, at least 513 floats.
+ */
+void ardop_busy_window(float *w);
+
+/**
+ * @brief Window, transform and reduce one 1024-sample block to a spectrum.
+ *
+ * The front end of ::ardop_busy_analyze, split out so a consumer that wants the
+ * spectrum itself -- a waterfall -- can have it without a second FFT, and
+ * without being tied to the busy detector's state or its DISC-only gating.
+ *
+ * @param window   The 513-coefficient half window from ardop_busy_window().
+ * @param samples  Exactly ::ARDOP_BUSY_WINDOW captured samples.
+ * @param mag_out  Receives ::ARDOP_BUSY_MAG_BINS power magnitudes (re^2 + im^2,
+ *                 not dB; the caller scales for display).
+ */
+void ardop_busy_spectrum(const float *window, const int16_t *samples,
+			 float *mag_out);
+
+/**
+ * @brief Decide busy from an already-computed spectrum.
+ *
+ * The back end of ::ardop_busy_analyze: derives the tuning-line search range
+ * from the bandwidth and tuning range, then calls ardop_busy_detect. Pair with
+ * ardop_busy_spectrum() when the spectrum is wanted for another purpose too.
+ *
+ * @param b            Detector state, updated in place.
+ * @param mag          Spectrum from ardop_busy_spectrum().
+ * @param bw_hz        Channel bandwidth in Hz (200/500/1000/2000), for the range.
+ * @param bw           Same bandwidth as the enum, selecting detector thresholds.
+ * @param tuning_range Max tuning offset searched, Hz (host TuningRange).
+ * @param busy_det     Sensitivity 0..10 (host BusyDet); 0 disables.
+ * @param now_ms       Current time, milliseconds.
+ * @return true if the channel is currently reported busy.
+ */
+bool ardop_busy_detect_spectrum(ardop_busy_detector *b, const float *mag,
+				int bw_hz, ardop_bandwidth bw,
+				int tuning_range, int busy_det,
+				uint32_t now_ms);
+
+/**
+ * @brief Analyse one 1024-sample window and update the busy state.
+ *
+ * The full front end of the inherited UpdateBusyDetector: window the samples,
+ * FFT them, form the 206-bin magnitude spectrum (~300-2700 Hz), derive the
+ * tuning-line search range from the bandwidth and tuning range, and hand it to
+ * ardop_busy_detect. The per-call magnitudes are used raw (the 0.2/0.8 spectrum
+ * average in the original feeds only the waterfall).
+ *
+ * @param b            Detector state, updated in place.
+ * @param window       The 513-coefficient half window from ardop_busy_window().
+ * @param samples      Exactly ::ARDOP_BUSY_WINDOW captured samples.
+ * @param bw_hz        Channel bandwidth in Hz (200/500/1000/2000), for the range.
+ * @param bw           Same bandwidth as the enum, selecting detector thresholds.
+ * @param tuning_range Max tuning offset searched, Hz (host TuningRange).
+ * @param busy_det     Sensitivity 0..10 (host BusyDet); 0 disables.
+ * @param now_ms       Current time, milliseconds.
+ * @return true if the channel is currently reported busy.
+ */
+bool ardop_busy_analyze(ardop_busy_detector *b, const float *window,
+			const int16_t *samples, int bw_hz, ardop_bandwidth bw,
+			int tuning_range, int busy_det, uint32_t now_ms);
+
+#endif /* ARDOP_MODEM_BUSY_H_ */
