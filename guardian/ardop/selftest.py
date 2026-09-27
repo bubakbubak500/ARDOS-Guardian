@@ -18,7 +18,7 @@ def run():
                         rx.receive(wave[i:i+960])
             received.extend(b.read())
             if received == payload and a.queued == 0:
-                return 'ARDOP ABI 1: native 500 Hz ARQ roundtrip OK (256 binary bytes, two independent instances)\n'
+                return 'PASS\nARDOP ABI 1: native 500 Hz ARQ roundtrip OK (256 binary bytes, two independent instances)\n'
             if not a.transmitting and not b.transmitting:
                 for _ in range(50):
                     a.receive(np.zeros(960, dtype=np.int16))

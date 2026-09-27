@@ -7,7 +7,7 @@ if (-not $ReportDirectory) { $ReportDirectory = Join-Path $root ".build-temp\fro
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
 New-Item -ItemType Directory -Force -Path $ReportDirectory | Out-Null
 $ReportDirectory = (Resolve-Path -LiteralPath $ReportDirectory).Path
-foreach ($test in @("qt", "compression")) {
+foreach ($test in @("qt", "compression", "ardop")) {
     $report = Join-Path $ReportDirectory ("$test-" + [guid]::NewGuid().ToString("N") + ".txt")
     $process = Start-Process -FilePath $Executable -ArgumentList @(
         "--$test-self-test", "--$test-self-test-report", ('"' + $report + '"')

@@ -1,7 +1,7 @@
 # Guardian 1.1.10: two radios
 
-Development branch: `feature/1.1.10-dual-radio`, based on G1 `v1.1.9`.
-Local development only; no tag, push, or merge to main until requested.
+Původní vývojová větev: `feature/1.1.10-dual-radio`, založená na G1 `v1.1.9`.
+Funkce je součástí vydání 1.1.11 spolu s ARDOP 500 Hz.
 
 Required outcome:
 - Optional second radio with the complete radio/audio/modem configuration.
@@ -70,5 +70,4 @@ rádia 2 uložené pro příští zapnutí.
 Testy rádia a přenosu jsou simulované; skutečná RF zkouška se dvěma rádii
 a dvěma nativními modemy VARA zatím nebyla provedena.
 
-Lokální instalátor: `release/Guardian-1.1.10-setup-win-x64.exe`.
-Nevytváří se tag ani veřejný release; zveřejněný manifest zůstává beze změny.
+Lokální ověřovací instalátor 1.1.10: `release/Guardian-1.1.10-setup-win-x64.exe`.

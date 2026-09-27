@@ -91,5 +91,5 @@ Hotový program umí bez rádia ověřit přibalenou knihovnu:
 `Guardian.exe --ardop-self-test --ardop-self-test-report <soubor>`.
 Obdobně zůstávají dostupné `--qt-self-test` a `--compression-self-test`.
 
-Lokální instalátor: `release/Guardian-1.1.11-setup-win-x64.exe`.
-Verze je určena k lokálnímu ověření; nebyl proveden push, tag ani publikace.
+Lokální ověřovací instalátor: `release/Guardian-1.1.11-setup-win-x64.exe`.
+Veřejný release vytváří sestavení GitHub Actions ze zdrojového tagu.
