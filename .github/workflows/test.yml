@@ -25,6 +25,21 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -e ".[dev]"
 
+      - name: Fetch verified Zig 0.14.1 and build ARDOP
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "zig-x86_64-windows-0.14.1.zip"
+          $toolchain = Join-Path $env:GITHUB_WORKSPACE ".build-temp\toolchain"
+          New-Item -ItemType Directory -Force -Path $toolchain | Out-Null
+          Invoke-WebRequest "https://ziglang.org/download/0.14.1/zig-x86_64-windows-0.14.1.zip" -OutFile $archive
+          $expected = "554f5378228923ffd558eac35e21af020c73789d87afeabf4bfd16f2e6feed2c"
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw "Zig archive checksum mismatch."
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $toolchain
+          python tools/build_ardop.py
+          if ($LASTEXITCODE -ne 0) { throw "ARDOP build failed." }
+
       - name: Fetch verified JPEG XL tools
         shell: pwsh
         run: .\tools\fetch_jpegxl.ps1
