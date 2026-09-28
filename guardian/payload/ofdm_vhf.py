@@ -1091,6 +1091,14 @@ class OfdmVhfBackend(PayloadBackend):
         with self._active_lock:
             msg = self._active_message
             if msg is not None:
+                # The receiver has no envelope size at START. Publish the
+                # manifest-derived size as soon as it is known, so its session
+                # watchdog uses the same size budget as the sender. Preserve
+                # the upper estimate when the short final block arrives.
+                msg.payload_wire_size = max(
+                    int(getattr(msg, "payload_wire_size", 0)),
+                    int(status.total_bytes),
+                )
                 moved = max(int(status.tx_bytes), int(status.rx_bytes))
                 msg.payload_progress_bytes = max(
                     int(getattr(msg, "payload_progress_bytes", 0)), moved

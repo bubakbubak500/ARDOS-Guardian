@@ -166,6 +166,29 @@ class RxBurstState:
     reply_decode_margin: float = 0.0
     feedback_burst_id: int | None = None
     feedback_metrics: LinkMetrics | None = None
+    arq_block_bytes: int = 0
+    final_block_bytes: int | None = None
+
+    def observe_lengths(self, lengths: dict[int, int]) -> int:
+        """Estimate size from the sender's CRC-checked manifest, not the PHY.
+
+        send_message splits at a fixed ARQ size; only the last block is short.
+        Until its manifest arrives the estimate exceeds the exact size by less
+        than one block. Receiving that last block first must not set the stride.
+        """
+        last = self.total_blocks - 1
+        self.arq_block_bytes = max(
+            self.arq_block_bytes,
+            max((size for sequence, size in lengths.items() if sequence < last),
+                default=0),
+        )
+        if last in lengths:
+            self.final_block_bytes = lengths[last]
+        if self.total_blocks > 1 and not self.arq_block_bytes:
+            return 0
+        tail = (self.arq_block_bytes if self.final_block_bytes is None
+                else self.final_block_bytes)
+        return last * self.arq_block_bytes + tail
 
 
 @dataclass
@@ -204,6 +227,7 @@ class OfdmLink:
     channel_seconds: float = 0.0
     _next_burst_id: int = 0
     _started_at: float | None = None
+    _data_header: PhyHeader | None = None
     _current_train_bursts: int = 1
     _train_clean_streak: int = 0
     _mcs_clean_streak: int = 0
@@ -419,6 +443,14 @@ class OfdmLink:
             self.on_log(message)
 
     def _publish_profile(self) -> None:
+        if self._data_header is not None:
+            # Keep the actual DATA profile through ACK/POLL and idle waits.
+            # The local RX controller and robust control frames do not describe
+            # the remote transmitter; rescue retries also differ from TX policy.
+            self.status.mcs = self._data_header.mcs
+            self.status.fec = fec_spec(self._data_header.fec).label
+            self.status.burst_bytes = self._data_header.payload_len
+            return
         selected = self.controller.profile
         self.status.fec = fec_spec(selected.fec).label
         self.status.mcs = self.mcs_index
@@ -454,6 +486,8 @@ class OfdmLink:
 
     def _transmit(self, waveform: np.ndarray, *, header: PhyHeader,
                   control: bool = False) -> None:
+        if header.frame_type is OfdmFrameType.DATA:
+            self._data_header = header
         self._publish("transmitting")
         context = getattr(self.pipe, "set_transmit_context", None)
         if context is not None:
@@ -686,6 +720,7 @@ class OfdmLink:
 
     def send_message(self, msg_id: int, payload: bytes) -> bool:
         self._started_at = time.monotonic()
+        self._data_header = None
         self.status.direction = "send"
         if self._is_cancelled():
             self._publish("failed")
@@ -1180,6 +1215,8 @@ class OfdmLink:
 
     def _transmit_train(self, waveform: np.ndarray,
                         headers: list[PhyHeader]) -> None:
+        if headers:
+            self._data_header = headers[-1]
         self._publish("transmitting")
         context = getattr(self.pipe, "set_transmit_context", None)
         if context is not None:
@@ -1275,6 +1312,7 @@ class OfdmLink:
     def receive_message(self, msg_id: int | None = None,
                         timeout: float | None = None) -> bytes | None:
         self._started_at = time.monotonic()
+        self._data_header = None
         self.status.direction = "receive"
         wait = self.receive_idle_timeout() if timeout is None else timeout
         idle_deadline = time.monotonic() + wait
@@ -1349,10 +1387,10 @@ class OfdmLink:
                     return self._receive_legacy_burst(decoded, msg_id, wait)
                 if state is None:
                     state = RxBurstState(header.msg_id, header.block_count)
-                    self.status.total_bytes = state.total_blocks * self.profile.block_size
                 if header.msg_id != state.msg_id or header.block_count != state.total_blocks:
                     self._log("OFDM: inconsistent message identity or block count")
                     continue
+                self._data_header = header
                 if timeout is None:
                     wait = self.receive_idle_timeout(state.total_blocks)
                 idle_deadline = time.monotonic() + wait
@@ -1369,6 +1407,8 @@ class OfdmLink:
                         answer = (OfdmFrameType.NACK, header, decoded.metrics)
                     continue
 
+                self.status.total_bytes = state.observe_lengths(decoded.block_lengths)
+                self.status.arq_block_bytes = state.arq_block_bytes
                 for sequence, payload in decoded.blocks.items():
                     if sequence in state.blocks:
                         self.adaptation.duplicates += 1
@@ -1607,6 +1647,7 @@ class OfdmLink:
             if (header is not None and header.frame_type is OfdmFrameType.DATA
                     and (msg_id is None or header.msg_id == msg_id)):
                 expected = header.block_count
+                self._data_header = header
                 if decoded.ok and header.block_seq not in blocks:
                     blocks[header.block_seq] = decoded.payload or b""
                     self.adaptation.blocks_received += 1
