@@ -24,13 +24,22 @@ def main():
     files += [vendor / 'shell' / name for name in ('runtime.c', 'resample.c', 'telemetry.c', 'capture.c', 'sys.c')]
     command = shlex.split(args.cc)
     command += ['-std=c11', '-O2', '-shared', '-I' + str(vendor), '-I' + str(vendor / 'core')]
+    zig = Path(command[0]).stem.lower() == 'zig'
     if args.target:
         command += ['-target', args.target]
+    elif windows and zig:
+        command += ['-target', 'x86_64-windows-gnu']
+    if windows and (not args.target or args.target.startswith('x86_64-')):
+        # A native Zig build inherits the build machine's CPU features.  The
+        # installer must also load on older x64 processors without AVX.
+        command += ['-mcpu=x86_64' if zig else '-march=x86-64']
     if not windows:
         command += ['-fPIC', '-D_POSIX_C_SOURCE=200809L', '-pthread']
     command += [str(source / 'guardian_ardop.c'), *map(str, files), '-o', str(output), '-lm']
     cache = ROOT / '.build-temp' / 'zig-cache'
-    env = dict(os.environ, ZIG_GLOBAL_CACHE_DIR=str(cache / 'global'), ZIG_LOCAL_CACHE_DIR=str(cache / 'local'))
+    env = dict(os.environ)
+    env.setdefault('ZIG_GLOBAL_CACHE_DIR', str(cache / 'global'))
+    env.setdefault('ZIG_LOCAL_CACHE_DIR', str(cache / 'local'))
     subprocess.run(command, check=True, cwd=ROOT, env=env)
     print(output)
 
