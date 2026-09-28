@@ -1,0 +1,4 @@
+ef7533470f865ea9550e03ba4966faa56a7b98d576c9c857ada3ef8f28e260fe  release/Guardian-1.1.15-setup-win-x64.exe
+da85c7e676b5cc97e3a55da6cb03bf2c34928ad565cde4c8330f00f68f684c9f  release/Guardian-1.1.15-win-x64.zip
+926c97c318b10dbe11557b75c1ceebad1f2f79865e744e81576f063cfd9468b9  dist/Guardian/Guardian.exe
+34a7e4234abe584e8130fe51692e79c10f5a10e7bb28210008ec94e747f83761  dist/Guardian/_internal/ardop/guardian_ardop.dll

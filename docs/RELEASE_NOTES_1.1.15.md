@@ -20,6 +20,11 @@ Nastavení a data stanice zůstávají při aktualizaci zachována.
 
 ## Ověření
 
+- Kompletní sada z hlavní složky: **896 passed**.
+- Zabalená aplikace: Qt/BLE, komprese a nativní ARDOP roundtrip **PASS**.
+- Verze Windows EXE: **1.1.15**; instalátor sestaven lokálně.
+- ZIP ověřen kontrolou CRC a shodou EXE/ARDOP se zabalenou aplikací.
+
 Regresní test simuluje příjem 3131 bloků / přibližně 800 kB, po 50 blocích
 za 25 sekund. Kontroluje dokončení za původním časovým limitem, procenta,
 změny MCS/FEC, duplicity, krátký poslední blok a funkční ochranné limity.
