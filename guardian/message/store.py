@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import threading
 import time
+import zipfile
 
 from ..config import config_dir
 from ..protocol import crc16
@@ -80,7 +81,7 @@ class MessageStore:
         # Rebuilding an entry (for example when a relay re-stores a bundle)
         # must not erase times already learned locally.
         previous = self._index.get(mail.msg_id, {})
-        for key in ("received_at", "sent_at", "radio_path"):
+        for key in ("received_at", "sent_at", "radio_path", "remote_request"):
             if key in previous:
                 meta[key] = previous[key]
         return meta
@@ -105,11 +106,14 @@ class MessageStore:
         *,
         received_at: float | None = None,
         sent_at: float | None = None,
+        remote_request: dict | None = None,
     ) -> None:
         bundle = mail.to_bundle()
         with self._lock:
             self._bundle_path(mail.msg_id).write_bytes(bundle)
             meta = self._meta(mail, len(bundle))
+            if remote_request is not None:
+                meta["remote_request"] = dict(remote_request)
             # A timestamp supplied by a new local event is only applied when
             # this message has not already recorded that event. This keeps a
             # duplicate incoming bundle from moving its displayed date.
@@ -127,6 +131,42 @@ class MessageStore:
                 if folder is None or m.get("folder") == folder
             ]
             return sorted(items, key=lambda m: m.get("created", 0), reverse=True)
+
+    def queue_remote_text(self, mail: MailMessage, key: str, digest: str) -> tuple[int, bool]:
+        """Store the message and its retry token in the same index transaction.
+
+        The token survives reconnects and restarts while the message is retained.
+        Reusing it with different content is rejected instead of creating mail.
+        """
+        with self._lock:
+            for meta in self._index.values():
+                receipt = meta.get("remote_request", {})
+                if receipt.get("key") == key:
+                    if receipt.get("digest") != digest:
+                        raise ValueError("Remote request token conflict")
+                    return meta["msg_id"], True
+            mail.msg_id = self.next_id(mail.source)
+            try:
+                self.add(mail, remote_request={"key": key, "digest": digest})
+            except Exception:
+                # Do not acknowledge an in-memory entry whose index failed to save.
+                self._index.pop(mail.msg_id, None)
+                raise
+            return mail.msg_id, False
+
+    def get_text(self, msg_id: int) -> tuple[dict, str] | None:
+        """Read local plain text without loading attachments or marking as read."""
+        with self._lock:
+            meta = self._index.get(msg_id)
+            if meta is None:
+                return None
+            with zipfile.ZipFile(self._bundle_path(msg_id)) as bundle:
+                if "body.txt" not in bundle.namelist():
+                    return dict(meta), ""
+                if bundle.getinfo("body.txt").file_size > 1024 * 1024:
+                    raise ValueError("Text exceeds BLE browsing limit")
+                text = bundle.read("body.txt").decode("utf-8", errors="replace")
+            return dict(meta), text
 
     def counts(self) -> dict[str, int]:
         with self._lock:

@@ -1,4 +1,5 @@
 # Guardian (ARDOS) runtime dependencies
+bleak>=3.0,<4
 pyserial>=3.5
 pillow>=10.0.0
 PySide6-Essentials>=6.7,<7

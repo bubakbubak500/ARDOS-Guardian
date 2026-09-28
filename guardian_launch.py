@@ -106,6 +106,11 @@ def _run_qt_self_test() -> None:
             "winrt.windows.devices.geolocation"
         )
         foundation = importlib.import_module("winrt.windows.foundation")
+        # Import the real BLE backends without scanning or requesting pairing.
+        ble_client = importlib.import_module("bleak.backends.winrt.client")
+        ble_scanner = importlib.import_module("bleak.backends.winrt.scanner")
+        from guardian.guard_mesh import GuardianStatus
+        assert len(GuardianStatus().encode(0)) == 20
 
         # Touch one native symbol from every Qt library the main shell imports.
         report = (
@@ -116,6 +121,8 @@ def _run_qt_self_test() -> None:
             f"QtWidgets module={QtWidgets.__name__}\n"
             f"WinRT geolocation={geolocation.__name__}\n"
             f"WinRT foundation={foundation.__name__}\n"
+            f"BLE client={ble_client.__name__}\n"
+            f"BLE scanner={ble_scanner.__name__}\n"
         )
     except BaseException:
         report = "\n".join(_native_module_diagnostics()) + "\n" + traceback.format_exc()

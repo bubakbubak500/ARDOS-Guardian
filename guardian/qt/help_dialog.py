@@ -1863,6 +1863,28 @@ def help_topics() -> list[HelpTopic]:
             "glossary terms ardos ttl rreq link advert qsy locator buffer "
             "slovníček pojmy zkratky",
         ),
+        _topic(
+            "Guard Mesh — Bluetooth", "Guard Mesh — Bluetooth",
+            """<h2>Guard Mesh</h2><p>Open <b>Settings → Station settings → Guard Mesh</b>,
+            search for your device and pair. The connection continues when settings close.
+            Use Disconnect to stop sharing.</p><p>The device receives Guardian's TX/RX activity,
+            transfer percentages, Inbox/unread/Outbox counts and radio, VARA and control-channel
+            connection states. Unknown progress is shown as unavailable, never as completed.</p>
+            <p>On request it can browse live and saved contacts and message text. Attachments
+            are not transferred and browsing does not mark messages as read. Messages composed
+            on the device are placed in Guardian's Outbox and follow its normal delivery rules.
+            Acceptance into Outbox does not confirm RF delivery.</p>""",
+            """<h2>Guard Mesh</h2><p>Otevřete <b>Nastavení → Nastavení stanice → Guard Mesh</b>,
+            vyhledejte zařízení a spárujte ho. Připojení pokračuje i po zavření nastavení.
+            Sdílení ukončíte tlačítkem Odpojit.</p><p>Zařízení dostává aktivitu TX/RX,
+            procenta přenosu, počty zpráv v inboxu, nepřečtených a k odeslání, stav připojení
+            rádia, VARA a řídicího kanálu. Neznámý průběh není dokončený přenos.</p>
+            <p>Na vyžádání lze procházet živé a uložené kontakty a text zpráv. Přílohy se
+            nepřenášejí a prohlížení nemění označení přečteno. Zprávy napsané na zařízení
+            se zařadí do složky K odeslání a doručují podle běžných pravidel Guardianu.
+            Přijetí do fronty není potvrzení doručení po rádiu.</p>""",
+            "guard mesh bluetooth ble contacts inbox progress kontakty procenta zprávy",
+        ),
     ]
 
 

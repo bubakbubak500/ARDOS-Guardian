@@ -135,6 +135,7 @@ class SettingsDialog(QDialog):
         settings: QSettings | None = None,
         operations=None,
         radio_only: bool = False,
+        guard_mesh_panel=None,
     ) -> None:
         super().__init__(parent)
         self.config = config
@@ -181,6 +182,14 @@ class SettingsDialog(QDialog):
             self.setWindowFlags(Qt.WindowType.Widget)
         else:
             self._build_dual_radio(theme)
+            from .guard_mesh_dialog import GuardMeshPanel
+            self.guard_mesh_panel = guard_mesh_panel if guard_mesh_panel is not None else GuardMeshPanel(self)
+            self.guard_mesh_scroll = QScrollArea()
+            self.guard_mesh_scroll.setWidgetResizable(True)
+            self.guard_mesh_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            self.guard_mesh_scroll.setWidget(self.guard_mesh_panel)
+            self._tab_scrolls.append(self.guard_mesh_scroll)
+            self.tabs.addTab(self.guard_mesh_scroll, "Guard Mesh")
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save

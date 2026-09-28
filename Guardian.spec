@@ -25,7 +25,7 @@ binaries.append((str(ardop_dll), "ardop"))
 datas.append((str(ardop_root / "vendor" / "LICENSE"), "ardop"))
 datas.append((str(ardop_root / "UPSTREAM.md"), "ardop"))
 
-for package in ("sounddevice", "pycaw", "comtypes", "zopfli"):
+for package in ("sounddevice", "pycaw", "comtypes", "zopfli", "bleak"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries

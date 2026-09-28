@@ -714,6 +714,9 @@ class GuardianMainWindow(QMainWindow):
         self.runtime.refresh()
         snapshot = self.runtime.snapshots.read()
         self._apply_snapshot(snapshot)
+        if hasattr(self, "guard_mesh_panel"):
+            from ..guard_mesh import guardian_status
+            self.guard_mesh_panel.client.publish(guardian_status(self.runtime))
         self.second_radio_panel.refresh()
         self._poll_station_lab_offer()
         self.notifications.poll()
@@ -1074,6 +1077,15 @@ class GuardianMainWindow(QMainWindow):
                 QTreeWidgetItem([component, state, detail])
             )
 
+    def _ensure_guard_mesh_panel(self):
+        from .guard_mesh_dialog import GuardMeshPanel
+        if not hasattr(self, "guard_mesh_panel"):
+            self.guard_mesh_panel = GuardMeshPanel(self, runtime=self.runtime)
+            self.guard_mesh_panel.hide()
+        from ..guard_mesh import guardian_status
+        self.guard_mesh_panel.client.publish(guardian_status(self.runtime))
+        return self.guard_mesh_panel
+
     def _show_settings(self) -> None:
         operations = self.runtime.operations
         applied_audio = [
@@ -1088,6 +1100,7 @@ class GuardianMainWindow(QMainWindow):
             self,
             settings=self.settings,
             operations=operations,
+            guard_mesh_panel=self._ensure_guard_mesh_panel(),
         )
 
         def apply_changes() -> None:
@@ -1169,7 +1182,14 @@ class GuardianMainWindow(QMainWindow):
             self._refresh()
 
         dialog.saved.connect(apply_changes)
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            # Preserve the BLE session and request pump beyond this settings window.
+            dialog.guard_mesh_scroll.takeWidget()
+            self.guard_mesh_panel.setParent(self)
+            self.guard_mesh_panel.hide()
+            dialog.deleteLater()
 
     def _show_readiness(self) -> None:
         ReadinessDialog(self.runtime, self.settings, self).exec()
@@ -1400,6 +1420,8 @@ class GuardianMainWindow(QMainWindow):
             self.restoreGeometry(geometry)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if hasattr(self, "guard_mesh_panel"):
+            self.guard_mesh_panel.shutdown()
         self.warships_access.shutdown()
         self.refresh_timer.stop()
         self.protocol_timer.stop()
