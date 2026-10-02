@@ -2,572 +2,134 @@
 
 # Guardian
 
-### Resilient emergency messaging over amateur radio
+### One connected ecosystem. More ways to operate your station.
 
-**A Windows communication system for sending messages, files and structured emergency traffic directly over VHF/UHF FM or HF — without the Internet, Winlink or any central server.**
+**Send messages, files and structured traffic over amateur radio without an Internet connection or central server.**
 
-[![Latest Release](https://img.shields.io/github/v/release/bubakbubak500/ARDOS-Guardian?label=release)](../../releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/bubakbubak500/ARDOS-Guardian?label=release)](../../releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![Radio](https://img.shields.io/badge/radio-HF%20%7C%20VHF%20%7C%20UHF-orange)
 
-[Download Guardian](../../releases/latest) · [Project Status](STATUS.md) · [Technical Details](PRODUCT.md)
+[Download Guardian](../../releases/latest) · [Explore the ecosystem](#one-ecosystem-several-ways-to-communicate) · [Project status](STATUS.md)
 
 </div>
-
----
 
 <p align="center">
   <img src="docs/screenshots/guardian-home.png" alt="Guardian main window" width="900">
 </p>
 
-## What is Guardian?
+## One ecosystem, several ways to communicate
 
-Guardian turns a Windows PC and an amateur-radio transceiver into an independent digital messaging station.
+Guardian is the Windows station console and the common mailbox for this ecosystem. It manages radio links, routing and delivery. The connected projects let you work with that same station from a Guard Mesh touch device or use supported Quansheng and Baofeng handhelds as integrated radios. You can also operate Guardian with other compatible transceivers.
 
-Instead of relying on the Internet or a central messaging service, Guardian communicates **directly over radio**.
+| Project | What it does | Where to start |
+| --- | --- | --- |
+| **[Guardian](https://github.com/bubakbubak500/ARDOS-Guardian)** | Windows application for direct and store-and-forward messages, attachments, emergency forms and radio network operations. | [Windows releases](../../releases/latest) |
+| **[GUARD-MESH](https://github.com/bubakbubak500/GUARD-MESH)** | Guardian-focused fork of WadaMesh for supported MeshCore touch devices. Its Guardian BLE app can show PC station information and compose messages for Guardian's Outbox. | [Repository and device list](https://github.com/bubakbubak500/GUARD-MESH) · [Guardian BLE app](https://github.com/bubakbubak500/GUARD-MESH/blob/main/docs/GUARDIAN-BLE.md) |
+| **[Guardian K5FW](https://github.com/bubakbubak500/Guardian-K5FW-Releases)** | Firmware and K5 Manager binary releases for the **Quansheng UV-K5 V1 (DP32G030)**. | [Firmware and Manager releases](https://github.com/bubakbubak500/Guardian-K5FW-Releases/releases) |
+| **[Guardian K61FW](https://github.com/bubakbubak500/Guardian-K61FW-Releases)** | Firmware releases for the **Baofeng UV-K61**. Separate images target the FD6818 and FD6818B hardware variants. | [Firmware releases and compatibility notes](https://github.com/bubakbubak500/Guardian-K61FW-Releases) |
 
-Operators can compose an email-like message, attach files, address it to another callsign and send it across an amateur-radio network.
+### Choose how you operate
 
-Guardian handles:
+- **At the PC:** compose, receive and track messages in Guardian, using a compatible HF, VHF or UHF radio.
+- **With a handheld:** use Guardian K5FW or K61FW on the supported radio for a dedicated AIOC/UART control path into the same Guardian station.
+- **From a Guard Mesh touch device:** view Guardian's live status and messages over BLE, browse contacts and submit a text message to Guardian's Outbox. Guardian then sends it using its configured radio path.
+- **Across two radios:** attach an optional second radio to one Guardian mailbox and forward traffic between radio paths.
 
-* radio control;
-* station discovery;
-* route selection;
-* relay stations;
-* frequency changes;
-* message queues;
-* VARA data transfer;
-* delivery tracking.
+The handheld firmwares are optional. Guardian also supports Hamlib, serial PTT and operator-controlled no-CAT setups. **Check the exact radio and chip variant before flashing any firmware.** Each firmware release repository provides its own compatibility notes.
 
-The result is a decentralized **store-and-forward radio messaging network** that can continue operating when normal network infrastructure is unavailable.
-
-> Guardian is designed for licensed amateur-radio operation, experimentation and emergency-communications exercises. It is not a certified public-safety or life-safety system.
-
----
-
-# Why Guardian?
-
-Most digital amateur-radio applications solve one specific part of the communication chain.
-
-Guardian tries to connect the entire workflow.
+### How the pieces fit
 
 ```text
-      Compose a message
-             │
-             ▼
-       Find destination
-             │
-      ┌──────┴───────┐
-      │              │
-   Direct RF      Relay path
-      │              │
-      └──────┬───────┘
-             │
-             ▼
-   Negotiate radio link
-             │
-             ▼
-       VARA FM / HF
-             │
-             ▼
-     Message + files
-             │
-             ▼
-     Delivery receipt
+                         GUARD-MESH device
+                    status, contacts and messages
+                              ⇅ BLE
+                     Guardian on Windows
+                   mailbox · routing · radio control
+                              ⇅ audio / CAT / AIOC
+                  HF, VHF or UHF transceiver
+                              ⇅ RF
+                 another Guardian station or relay
 ```
 
-Guardian uses short **ARDOS control transmissions** to coordinate stations and VARA FM/HF to move the actual payload.
+Guard Mesh is a **local Bluetooth companion** to the PC application. A message composed on a supported Guard Mesh device is queued in Guardian's normal Outbox; Guardian applies its usual radio delivery rules. The Guard Mesh project also has its own MeshCore radio functions. Connecting the two does not make their radio networks interchangeable or create an automatic gateway between them.
 
-The control layer answers questions such as:
+## What Guardian does
 
-* Is the destination reachable?
-* Which station should receive the message next?
-* Is a relay required?
-* Which frequency should be used?
-* Is the receiving station busy?
-* Was the message forwarded?
-* Did it finally reach its destination?
+- **Direct messaging:** address text and attachments to another station by callsign.
+- **Store-and-forward:** keep messages locally and relay them through other Guardian stations when a direct path is unavailable.
+- **Routing and discovery:** use manual routes, shared topology, heard stations and bounded assisted multi-hop discovery.
+- **Delivery visibility:** follow Outbox, Transit and Sent state, acknowledgements and radio activity.
+- **Structured traffic:** compose ICS-213, ICS-214, IARU emergency and SITREP messages.
+- **Network operations:** view heard stations and routes on an operational map, send short network alerts and inspect logs.
+- **Two radios:** optionally run independent radio, audio, modem and PTT paths against one shared mailbox, including forwarding between them.
 
-The operator does not need to manually orchestrate every individual step.
+Guardian keeps messages, attachments, routes and station settings locally. The core message path runs over radio. Internet access is used only for optional downloads, updates and map data.
 
----
+### Radio and modem options
 
-# What can you use it for?
+| Payload path | Role |
+| --- | --- |
+| **VARA FM / VARA HF** | Established FM and HF payload options. VARA is separately licensed third-party software and is not bundled with Guardian. |
+| **Guardian SC-FTN** | Guardian's own sound-card payload modem, negotiated per hop with a compatible peer. VARA remains available as a fallback where configured. |
+| **Guardian ARDOP 500 Hz** | Experimental narrow-band payload option bundled as a native library. Both stations must select a compatible mode and configure suitable SSB radio settings. |
 
-### 📻 Direct station-to-station messaging
+Short ARDOS control transmissions coordinate stations and transfers. Depending on the selected mode, Guardian uses AFSK 1200, MFSK-16 or narrow ARDOP control frames. A calling channel and a separate working channel can be configured; CAT-controlled radios can change frequency automatically, while other radios use an operator-confirmed workflow.
 
-Send text and attachments directly between two radio stations.
+Guardian can control many radios through **Hamlib / rigctld**. It also supports serial RTS/DTR PTT and the dedicated Guardian K5FW/K61FW AIOC/UART paths. Named radio profiles make it easier to switch station hardware.
 
-No Internet connection and no central mailbox are required.
+## Guard Mesh companion
 
----
+With a paired device running a compatible Guard Mesh build, Guardian can share live station and transfer status over Bluetooth LE. The BLE v2 interface also supports contacts, message lists, plain-text reading and submitting a new message to Guardian's Outbox. Attachments are not transferred through this interface. Pairing is under **Settings → Station settings → Guard Mesh**.
 
-### 📊 Visible, efficient payload transfer
+The features available on a device depend on its firmware and Guardian BLE app version. See the [GUARD-MESH project](https://github.com/bubakbubak500/GUARD-MESH) and the [BLE API reference](docs/GUARD_MESH_BLE_V2_CS.md) for details.
 
-The header shows genuine VARA byte progress for both outgoing and incoming messages. Optional payload settings provide either native **VARA FILES** compression or Guardian's single-pass **BZIP2** compression; the two modes are mutually exclusive and BZIP2 keeps the standard ZIP whenever compression would make it larger.
+## Get started
 
-After the final acknowledgement, the destination can optionally append both callsigns as a **40 WPM Morse ID**.
+1. [Download the latest Guardian installer or portable ZIP](../../releases/latest).
+2. Open **Operation → Station readiness** and enter your callsign.
+3. Configure the radio, PTT and RX/TX audio devices.
+4. Choose and configure a payload modem. Install VARA separately if you select VARA FM or HF.
+5. Connect the radio, start the control channel and compose a message.
 
----
+The Windows package includes Python and the required Python libraries. Station readiness can help install a verified portable Hamlib package and can download a reviewed VARA installer **only after operator confirmation**. Starting Guardian does not key the transmitter or start RF audio automatically.
 
-### 🔁 Store-and-forward networks
+Current Windows builds are not Authenticode signed, so Windows may show an **Unknown publisher** or SmartScreen warning. Download from this repository's [Releases page](../../releases) and verify the supplied SHA-256 checksums when needed.
 
-A station that cannot reach the destination directly can hand the message to another Guardian station.
+### Run from source
 
-The relay stores the message locally and forwards it when the next hop becomes available.
-
-```text
-OK7AAA  ───►  OK7BBB  ───►  OK7CCC  ───►  OK7DDD
- Source         Relay          Relay       Destination
-```
-
-Delivery state follows the message across the network.
-
----
-
-### 🧭 Automatic and assisted routing
-
-Guardian can determine the next hop using several sources of information:
-
-* manually configured routes;
-* a shared network topology;
-* stations heard directly on the radio;
-* assisted route discovery;
-* experimental live network topology.
-
-Operators can therefore build anything from a simple two-station link to a larger regional radio network.
-
----
-
-### 🚨 Emergency and structured traffic
-
-Guardian includes structured message templates for:
-
-* **ICS-213**
-* **ICS-214**
-* **IARU emergency messages**
-* **SITREP**
-
-Messages remain ordinary interoperable text inside the Guardian transport rather than being locked into a proprietary document format.
-
----
-
-### 🗺️ Situational awareness
-
-Guardian includes an operational station map.
-
-<p align="center">
-  <img src="docs/screenshots/guardian-map.png" alt="Guardian operational station map" width="900">
-</p>
-
-The map can show:
-
-* your own station;
-* recently heard stations;
-* Maidenhead locators;
-* radio links and message activity;
-* distance and bearing;
-* 50 / 100 / 200 km range rings;
-* route availability;
-* current network alerts.
-
-A station can be selected directly on the map to start composing a message.
-
-The map can also be prepared for offline operation and exported as PNG. Guardian 1.1.1 additionally recognises a manually supplied XYZ tile tree at `maps\tiles\<zoom>\<x>\<y>.png` beside the installed application. It remains unused until the operator selects **Use manually installed map** in the map window and confirms the choice; without both the files and that consent, the normal ČÚZK background behaves exactly as before.
-
----
-
-### ⚠️ Network alerts
-
-Guardian stations can broadcast short network-wide alerts independently from ordinary mail.
-
-Alerts can be received, displayed and relayed by other Guardian stations and can optionally be transmitted across configured channels.
-
----
-
-# FM and HF
-
-Guardian supports both **VARA FM** and **VARA HF**.
-
-The same mailbox and routing model can therefore be used for local VHF/UHF networks and longer-distance HF communication.
-
-|               | FM               | HF                       |
-| ------------- | ---------------- | ------------------------ |
-| Control modem | AFSK 1200        | MFSK-16                  |
-| Payload       | VARA FM          | VARA HF                  |
-| Typical use   | Local / regional | Regional / long distance |
-| Routing       | ✅                | ✅                        |
-| Relay         | ✅                | ✅                        |
-| Attachments   | ✅                | ✅                        |
-
-Guardian automatically selects the appropriate ARDOS control modem for the operating mode.
-
----
-
-# Calling and working channels
-
-Guardian can operate everything on one frequency or separate the network into a **calling channel** and a **working channel**.
-
-For example:
-
-```text
-145.500 MHz
-ARDOS calling / coordination
-       │
-       │ stations negotiate
-       ▼
-145.350 MHz
-VARA payload transfer
-       │
-       ▼
-145.500 MHz
-return to calling channel
-```
-
-With CAT-controlled radios, Guardian can perform the required QSY automatically.
-
-Radios without CAT can still be used through an operator-confirmed tuning workflow.
-
----
-
-# The Guardian workspace
-
-Guardian 1.1 provides task-oriented workspaces instead of exposing protocol internals to the operator.
-
-### Home
-
-Station status, radio and VARA connectivity, control-channel state and current operation.
-
-### Mail
-
-A local store-and-forward mailbox with:
-
-* Inbox
-* Outbox
-* Sent
-* Transit
-
-Messages can contain text, structured traffic and file attachments.
-
-### Network
-
-One operational view for:
-
-* Routes
-* Heard stations
-* Network builder
-* Route discovery
-* Live topology
-
-Routes clearly show **where the information came from** instead of mixing permanent configuration and temporary RF observations.
-
-### Log
-
-Operational and diagnostic information for troubleshooting radio, control-channel and payload activity.
-
----
-
-# Shared network topology
-
-A Guardian network can be planned centrally without manually creating a different routing table for every computer.
-
-Define the links once:
-
-```text
-        OK7BBB
-       /      \
-OK7AAA          OK7DDD
-       \      /
-        OK7CCC
-```
-
-The same topology can be distributed to all stations.
-
-Each Guardian installation uses its own callsign to calculate the appropriate local next-hop routes automatically.
-
-Manual routes remain available as overrides.
-
----
-
-# Assisted route discovery
-
-Guardian can also search for a destination that is not already present in the configured topology.
-
-Stations cooperate using bounded multi-hop route discovery.
-
-```text
-SOURCE
-  │
-  ├──► Relay A
-  │       │
-  │       └──► Relay B
-  │                │
-  │                └──► DESTINATION
-  │
-  ◄──────── discovered route ────────
-```
-
-Discovery is deliberately bounded to avoid uncontrolled radio traffic.
-
-The resulting dynamic route is temporary and remains distinct from permanent network configuration.
-
-In Assisted mode the source operator can review a discovered path before the payload is transmitted.
-
----
-
-# Radio integration
-
-Guardian supports a wide range of radios through **Hamlib / rigctld**.
-
-Depending on the radio and interface, Guardian can control:
-
-* frequency;
-* mode;
-* PTT;
-* signal level;
-* automatic QSY.
-
-For simpler radios and interfaces, serial RTS/DTR PTT is also supported.
-
-This makes Guardian usable with both modern CAT-controlled transceivers and much simpler FM radios.
-
----
-
-# Radio profiles
-
-Different radios and interfaces can be stored as named profiles.
-
-For example:
-
-```text
-IC-705 Portable
-IC-705 Base
-AIOC Handheld
-FTDX10 HF
-```
-
-Changing station hardware therefore does not require re-entering the complete CAT and PTT configuration.
-
----
-
-# Spectrum and waterfall
-
-Guardian includes its own VARA monitoring window.
-
-It provides:
-
-* live RX spectrum;
-* waterfall;
-* RX/TX frequency;
-* PTT state;
-* VARA connection state;
-* FM/HF passband scaling.
-
-The monitor observes the selected radio input and does not independently key the transmitter.
-
----
-
-# Designed for offline operation
-
-The radio messaging system itself does not require Internet access.
-
-Messages, attachments, routes, heard stations and delivery state are stored locally.
-
-Network access is used only for optional functions such as:
-
-* downloading updates;
-* installing verified Hamlib packages;
-* downloading VARA after operator confirmation;
-* obtaining map tiles before offline use;
-* optional Windows position detection.
-
-Once the required software and map data are present, the core messaging system operates over radio.
-
----
-
-# Current status
-
-Guardian **1.1.9** adds removal of the entire network-builder topology, restores the G1 icon in the application and installer, and adds OK2JLD to About. See [release notes](docs/RELEASE_NOTES_1.1.9.md).
-
-| Capability                      | Status                             |
-| ------------------------------- | ---------------------------------- |
-| Direct VARA FM messaging        | ✅ Confirmed on air                 |
-| Direct VARA HF messaging        | ✅ Confirmed on air                 |
-| AFSK FM control channel         | ✅ Confirmed on air                 |
-| MFSK HF control channel         | ✅ Confirmed on air                 |
-| Attachments                     | ✅ Confirmed on air                 |
-| Network alerts                  | ✅ Confirmed on air                 |
-| Automatic CAT QSY               | ✅ Confirmed on hardware            |
-| Calling / working channel split | ✅ Confirmed on air                 |
-| Production channel scanner      | ✅ Confirmed on hardware            |
-| No-CAT / serial PTT operation   | ✅ Confirmed on hardware            |
-| Shared network topology         | ✅ Implemented                      |
-| Assisted multi-hop discovery    | 🧪 Implemented and software tested |
-| Live topology advertisements    | 🧪 Experimental                    |
-
-See [STATUS.md](STATUS.md) for the complete engineering and field-verification record.
-
----
-
-# Installation
-
-## Windows release
-
-Download the latest installer:
-
-### **[→ Download Guardian](../../releases/latest)**
-
-The Windows package already contains Python and the required Python libraries.
-
-A separate Python installation is not required.
-
-> **Windows warning**
->
-> Current builds are not Authenticode signed. Windows may therefore display **Unknown publisher** or a Microsoft Defender SmartScreen warning.
->
-> Download Guardian only from this repository's Releases page and verify the supplied SHA-256 manifest when required.
-
----
-
-# First start
-
-After installing Guardian:
-
-1. Open **Operation → Station readiness**
-2. Enter your callsign
-3. Configure the radio
-4. Select RX and TX audio devices
-5. Locate or install Hamlib
-6. Locate or install VARA FM / VARA HF
-7. Connect the radio
-8. Connect VARA
-9. Start the ARDOS control channel
-10. Compose a message
-
-Guardian does **not** automatically begin transmitting when the application starts.
-
-RF activity is explicitly initiated by the operator.
-
----
-
-# VARA
-
-Guardian uses VARA as the payload modem but does not redistribute it.
-
-VARA remains separately licensed third-party software.
-
-The Station Readiness assistant can, after operator confirmation:
-
-1. download the reviewed VARA archive from the official distribution server;
-2. verify its expected size and SHA-256;
-3. ask again before starting the vendor installer.
-
-Guardian never silently accepts or installs third-party software.
-
----
-
-# Hamlib
-
-Guardian communicates with CAT radios through `rigctld`.
-
-Hamlib can be installed automatically from:
-
-**Operation → Station readiness**
-
-Guardian downloads the reviewed portable package, verifies it and installs it into the Guardian application-data directory.
-
-Administrator rights are not normally required.
-
----
-
-# Running from source
-
-Python **3.11 or later** is required when running Guardian from source.
+Python **3.11 or later** is required:
 
 ```powershell
 git clone https://github.com/bubakbubak500/ARDOS-Guardian.git
 cd ARDOS-Guardian
-
 .\setup.ps1
 .\run.ps1
 ```
 
-To create the standalone Windows build:
+To build the standalone Windows application, run `.\build.ps1`. The output is `dist\Guardian\Guardian.exe`.
 
-```powershell
-.\build.ps1
-```
+## Status and documentation
 
-Output:
+Guardian includes features at different stages of verification. Direct VARA messaging and several radio-control workflows have been tested on air or on hardware. Assisted multi-hop discovery, SC-FTN and ARDOP have software validation, with physical-radio verification varying by feature and release. Read the [engineering status](STATUS.md) and [release notes](docs/RELEASE_NOTES_1.1.16.md) before relying on a specific workflow.
 
-```text
-dist\Guardian\Guardian.exe
-```
+- [Product scope and safety boundaries](PRODUCT.md)
+- [Engineering and field-verification record](STATUS.md)
+- [Multi-hop discovery](docs/MULTIHOP_DISCOVERY.md)
+- [Guard Mesh BLE interface](docs/GUARD_MESH_BLE_V2_CS.md)
+- [Security policy](SECURITY.md)
+- [GitHub releases](../../releases)
 
----
+## Responsible operation
 
-# Documentation
+Guardian is intended for licensed amateur-radio operators, experiments and emergency-communications exercises. It is **not a certified public-safety or life-safety system**. Operators remain responsible for permitted frequencies, bandwidth, power, identification, third-party traffic and local regulations. Keep another communication option available where immediate safety depends on delivery.
 
-The README provides the high-level overview of Guardian.
-
-Detailed design and implementation information is intentionally kept elsewhere:
-
-* **[PRODUCT.md](PRODUCT.md)** — product scope and operational boundaries
-* **[STATUS.md](STATUS.md)** — development history, field tests and current verification
-* **[docs/MULTIHOP_DISCOVERY.md](docs/MULTIHOP_DISCOVERY.md)** — multi-hop discovery
-* **[SECURITY.md](SECURITY.md)** — security policy
-* **[GitHub Releases](../../releases)** — installers and release notes
-
----
-
-# Safety and regulatory responsibility
-
-Guardian automates parts of a radio communication workflow.
-
-It does **not** determine whether a transmission is legal.
-
-The operator remains responsible for:
-
-* possessing the required amateur-radio licence;
-* permitted frequencies;
-* bandwidth and emission mode;
-* transmit power;
-* identification requirements;
-* third-party traffic restrictions;
-* local amateur-radio regulations.
-
-Guardian is experimental software and must not be the sole communication system for situations involving immediate risk to life.
-
----
-
-# Contributing and field testing
-
-Guardian is developed around real radio operation.
-
-Field reports are particularly useful.
-
-When reporting a radio-related problem, please include where possible:
-
-* Guardian version;
-* radio model;
-* interface;
-* CAT / PTT configuration;
-* VARA FM or VARA HF;
-* frequency and mode;
-* relevant Guardian diagnostic export.
-
-Bug reports and development discussions are welcome through **[GitHub Issues](../../issues)**.
-
----
+Field reports are welcome in [GitHub Issues](../../issues). Include the Guardian version, radio and interface, modem, frequency, PTT setup and a relevant diagnostic export where possible.
 
 <div align="center">
 
-### Guardian
-
 **Messages when the network isn't there.**
 
-From HAMs to HAMs
-
-OK7PS / OK2IPW / OK6LZ / OK2MTV
+From HAMs to HAMs · OK7PS / OK2IPW / OK6LZ / OK2MTV
 
 </div>
