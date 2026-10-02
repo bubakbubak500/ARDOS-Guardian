@@ -12,7 +12,8 @@ from guardian.modem.ardop import ArdopControlModem
 from guardian.payload.ardop import ArdopBackend, envelope, decode_envelope
 from guardian.config import StationConfig
 from guardian.session import LoopbackBus, Orchestrator, SessionState
-from guardian.protocol import FrameType
+from guardian.protocol import ControlFrame, FrameType
+from guardian.modem.audio import AudioControlTransport
 
 
 def carry(tx, rx, *, lose=False):
@@ -70,6 +71,50 @@ def test_narrow_control_roundtrip_at_unknown_offset_and_with_noise():
     samples += rng.normal(0, 0.002, len(samples))
     assert modem.demodulate(samples, validator=lambda p: p == data) == [data]
     assert abs(len(wave) / 48000 - modem.airtime(48)) < 0.05
+
+
+def test_control_waveform_stays_inside_500_hz_channel():
+    modem = ArdopControlModem()
+    wave = modem.modulate(bytes(range(48)))
+    power = np.abs(np.fft.rfft(wave)) ** 2
+    frequencies = np.fft.rfftfreq(len(wave), 1 / modem.fs)
+    occupied = power[(frequencies >= 1250) & (frequencies <= 1750)].sum()
+    assert occupied / power.sum() > 0.999
+
+
+@pytest.mark.parametrize('offset', [7132, 48000 * 7 + 193])
+def test_real_control_transport_receives_ardop_through_rolling_audio(offset):
+    modem = ArdopControlModem()
+    frame = ControlFrame(FrameType.START_VARA, source='N0AAA',
+                         destination='N0BBB', message_id=42)
+    transport = AudioControlTransport(modem=modem)
+    received = []
+    transport.on_frame = received.append
+    samples = np.concatenate((np.zeros(offset), modem.modulate(frame.encode()),
+                              np.zeros(48000 * 2))).astype(np.float32)
+
+    class CaptureClock:
+        """Feed genuine callback blocks between each receive-worker poll."""
+        position = 0
+
+        def wait(self, seconds):
+            if self.position >= len(samples):
+                return True
+            end = min(len(samples), self.position + round(seconds * modem.fs))
+            while self.position < end:
+                stop = min(end, self.position + 960)
+                block = samples[self.position:stop].reshape(-1, 1)
+                transport._rx_callback(block, len(block), None, None)
+                self.position = stop
+            return False
+
+        def is_set(self):
+            return False
+
+    assert transport.rx_window > modem.airtime(len(frame.encode())) + transport.poll_interval
+    transport._rx_loop(CaptureClock())
+    assert transport.pump() == 1
+    assert received == [frame]
 
 
 @pytest.mark.parametrize('frame_type,size', [(0x48,16), (0x42,16), (0x40,64),

@@ -1188,8 +1188,9 @@ class AudioControlTransport(ControlTransport):
         return self._stopped or getattr(self._tx_context, "token", None) in self._cancelled_tx
 
     def _release_control_channel(self) -> None:
-        self._rx_buf.clear()
-        self._transmitting.clear()
+        with self._tx_condition:
+            self._rx_buf.clear()
+            self._transmitting.clear()
 
     # ------------------------------------------------------------------ #
     #  Receive                                                            #
@@ -1271,9 +1272,13 @@ class AudioControlTransport(ControlTransport):
 
     def _rx_loop(self, stopped: threading.Event) -> None:
         while not stopped.wait(self.poll_interval):
-            if len(self._rx_buf) < self.fs * 0.4:
-                continue
-            window = np.fromiter(self._rx_buf, dtype=np.float32)
+            # PortAudio appends under this same lock. Iterating a deque while
+            # its callback mutates it raises RuntimeError and kills the RX
+            # worker; copy a consistent window before decoding off the lock.
+            with self._tx_condition:
+                if len(self._rx_buf) < self.fs * 0.4:
+                    continue
+                window = np.fromiter(self._rx_buf, dtype=np.float32)
             snr = self.window_snr(window)
             for payload in self.modem.demodulate(
                 window,

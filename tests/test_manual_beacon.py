@@ -86,6 +86,38 @@ def test_manual_beacon_does_not_share_position_when_disabled(tmp_path) -> None:
         workers.close(wait=True)
 
 
+def test_ardop_pauses_beacons_and_resumes_saved_schedule(tmp_path, monkeypatch):
+    operations, workers = _operations(
+        tmp_path, payload_backend="ardop", beacon_enabled=True, beacon_interval=60.0,
+    )
+    operations.audio_transport = SimpleNamespace()
+    sent = _sent(operations)
+    monkeypatch.setattr(operations._beacon_random, "uniform", lambda low, high: 0.0)
+    try:
+        operations._next_beacon_at = 900.0
+        operations._beacon_schedule_interval = 60.0
+        for now in (1000.0, 1060.0, 1120.0):
+            operations._tick_beacon(now)
+        assert sent == []
+        assert operations._next_beacon_at is None
+        assert operations._beacon_schedule_interval is None
+        assert "ARDOP" in operations.beacon_block_reason()
+        assert operations.send_beacon_now() is False
+        assert sent == []
+        assert operations.config.beacon_enabled is True
+        assert operations.config.beacon_interval == 60.0
+
+        operations.config.payload_backend = "ofdm_vhf"
+        operations._tick_beacon(1200.0)
+        assert len(sent) == 1
+        assert sent[0].type is FrameType.BEACON
+        assert operations._next_beacon_at == 1260.0
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
 @pytest.mark.parametrize(
     "block, expected",
     [

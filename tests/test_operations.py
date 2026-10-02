@@ -2,6 +2,8 @@ import time
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from guardian.config import StationConfig
 from guardian.message import Folder, MailMessage, MessageStore, Status
 from guardian.operations import (
@@ -715,6 +717,101 @@ def test_direct_route_qsy_happens_before_message_announcement(
         assert operations._qsy_previous is None
     finally:
         operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+@pytest.mark.parametrize("sideband", ["USB", "LSB", "PKTUSB", "PKTLSB"])
+def test_ardop_route_qsy_preserves_cat_mode_and_filter(tmp_path, monkeypatch, sideband):
+    operations, workers, store = _operations(tmp_path, payload_backend="ardop", auto_qsy=True)
+    operations.radio = _SweepRadio(7_100_000, sideband)
+    operations.routes = RouteTable([Route("OK1AAA", "", freq_hz=7_110_000, mode="FM")])
+    operations.audio_transport = SimpleNamespace(stop=lambda: None)
+    message = MailMessage(
+        msg_id=store.next_id("OK7PS"), source="OK7PS", final_dest="OK1AAA",
+        body="Narrow control", created=time.time(), folder=Folder.OUTBOX, status=Status.QUEUED,
+    )
+    store.add(message)
+    announced = []
+    monkeypatch.setattr(operations.net, "send_message", lambda **kwargs: announced.append(
+        (operations.radio.frequency_hz, operations.radio.mode)))
+    try:
+        assert operations.send_queued(message.msg_id)
+        assert announced == [(7_110_000, sideband)]
+        assert operations.radio.commands == [("frequency", 7_110_000)]
+        operations._payload_restore_calling()
+        assert operations.radio.commands == [("frequency", 7_110_000), ("frequency", 7_100_000)]
+        assert operations.radio.mode == sideband
+    finally:
+        operations.audio_transport = None
+        operations.close()
+        workers.close(wait=True)
+
+
+@pytest.mark.parametrize("sideband", ["USB", "LSB"])
+def test_ardop_working_channel_uses_route_frequency_and_current_sideband(
+    tmp_path, monkeypatch, sideband,
+):
+    operations, workers = _working_operations(
+        tmp_path,
+        RouteTable([Route("OK1AAA", "", "", 7_100_000, "FM", 7_110_000, "FM")]),
+        payload_backend="ardop",
+    )
+    operations.radio = _SweepRadio(7_100_000, sideband)
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda seconds: None)
+    try:
+        channel = operations._working_channel_offer("OK1AAA")
+        assert channel == (7_110_000, sideband)
+        assert operations._working_channel_accept("OK1AAA", working_channel_token(*channel)) == channel
+        message = SimpleNamespace(
+            next_hop="OK1AAA", source="OK1AAA", working_frequency_hz=channel[0],
+            working_mode=channel[1],
+        )
+        for tune in (operations._payload_send_qsy, operations._payload_receive_qsy):
+            assert tune(message)
+            operations._payload_restore_calling()
+        assert operations.radio.commands == [("frequency", 7_110_000), ("frequency", 7_100_000)] * 2
+        assert operations.radio.mode == sideband
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_ardop_alert_sweep_preserves_mode_on_tune_and_return(tmp_path, monkeypatch):
+    operations, workers, _ = _operations(tmp_path, payload_backend="ardop")
+    operations.radio = _SweepRadio(7_100_000, "LSB")
+    monkeypatch.setattr("guardian.operations.time.sleep", lambda seconds: None)
+    monkeypatch.setattr(operations, "request_radio_poll", lambda **kwargs: None)
+    sent = []
+    net = SimpleNamespace(retransmit_alert=sent.append)
+    transport = SimpleNamespace(wait_tx_idle=lambda **kwargs: True)
+    try:
+        assert operations._alert_on_channel("alert", 7_110_000, "FM", net, transport)
+        operations._return_to_channel((7_100_000, "LSB"))
+        assert sent == ["alert"] * ALERT_SWEEP_BURSTS
+        assert operations.radio.commands == [("frequency", 7_110_000), ("frequency", 7_100_000)]
+        assert operations.radio.mode == "LSB"
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+@pytest.mark.parametrize("sideband,offered,accepted", [
+    ("LSB", "USB", False), ("USB", "LSB", False),
+    ("PKTUSB", "USB", True), ("DATALSB", "LSB", True),
+    ("FM", "USB", False),
+])
+def test_ardop_peer_working_channel_must_match_current_sideband(
+    tmp_path, sideband, offered, accepted,
+):
+    operations, workers = _working_operations(tmp_path, RouteTable(), payload_backend="ardop")
+    operations.radio = _SweepRadio(7_100_000, sideband)
+    try:
+        target = (7_110_000, offered)
+        result = operations._working_channel_accept("OK1AAA", working_channel_token(*target))
+        assert result == (target if accepted else None)
+        assert operations.radio.commands == []
+    finally:
         operations.close()
         workers.close(wait=True)
 

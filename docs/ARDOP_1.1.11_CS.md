@@ -24,6 +24,15 @@ Při dohodě profilu se používá token A500. Neshoda nebo chybějící podpora
 přenos odmítne; stanice ARDOP nepřejde automaticky na širší VARA.
 Původní řídicí AFSK/MFSK s touto úzkopásmovou sítí přímo nekomunikuje.
 
+Změna režimu v nastavení znovu otevře běžící řídicí kanál i při stejných
+zvukových zařízeních; přechod na ARDOP tak nenechá běžet původní AFSK/MFSK.
+Volby VARA jsou v ARDOPu neaktivní. Automatické i ručně vyvolané majáky jsou
+pozastavené; uložené povolení a interval se použijí po přepnutí zpět.
+Automatické CAT přeladění používá frekvenci trasy, ale neposílá změnu režimu
+rádia ani při návratu. USB/LSB a úzký filtr nastavuje operátor; údaj FM v síti
+je nepřepíše. Pro oddělený pracovní kanál se nabízí frekvence trasy se
+skutečným SSB režimem z CAT.
+
 ## Modem a rychlosti
 
 Jádro vychází z pevně určené revize rfb/ardopb; původ a licence jsou v

@@ -1218,6 +1218,8 @@ class SettingsDialog(QDialog):
         """Show only the selected transport's waveform and bandwidth rows."""
         sc_selected = self.payload_backend.currentData() == "ofdm_vhf"
         ardop_selected = self.payload_backend.currentData() == "ardop"
+        self.vara_mode.setEnabled(not ardop_selected)
+        self._modem_form.labelForField(self.vara_mode).setEnabled(not ardop_selected)
         self._modem_form.setRowVisible(self.ardop_tx_percent, ardop_selected)
         self._modem_form.setRowVisible(self.ardop_summary, ardop_selected)
         for widget in (self.vara_host, self.vara_fm_cmd, self.vara_fm_data,

@@ -70,6 +70,40 @@ def test_settings_validate_and_apply_grouped_station_profile() -> None:
         dialog.close()
 
 
+def test_ardop_disables_vara_mode_and_keeps_sc_ftn_selectable() -> None:
+    _application()
+    dialog = SettingsDialog(
+        StationConfig(payload_backend="ardop", vara_mode="HF"),
+        ThemePreference.SYSTEM,
+    )
+    try:
+        assert not dialog.vara_mode.isEnabled()
+        assert not dialog._modem_form.labelForField(dialog.vara_mode).isEnabled()
+        assert dialog.payload_backend.isEnabled()
+        assert not dialog.control_modem.isEnabled()
+
+        dialog.payload_backend.setCurrentIndex(
+            dialog.payload_backend.findData("ofdm_vhf")
+        )
+        assert dialog.payload_backend.currentData() == "ofdm_vhf"
+        assert dialog._modem_form.isRowVisible(dialog.g2_bandwidth)
+        assert dialog.control_modem.isEnabled()
+        assert dialog.vara_mode.isEnabled()
+        assert dialog.vara_mode.currentText() == "HF"
+
+        dialog.payload_backend.setCurrentIndex(
+            dialog.payload_backend.findData("vara_p2p")
+        )
+        assert dialog.vara_mode.isEnabled()
+        assert not dialog.vara_hf_bandwidth.isHidden()
+        dialog.payload_backend.setCurrentIndex(
+            dialog.payload_backend.findData("ardop")
+        )
+        assert not dialog.vara_mode.isEnabled()
+    finally:
+        dialog.close()
+
+
 def test_network_behaviour_page_owns_the_discovery_limits_and_trust_lists() -> None:
     # The limits are station configuration, so they live beside relay and TTL
     # instead of stealing table space on the operational discovery page.

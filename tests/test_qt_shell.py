@@ -183,3 +183,127 @@ def test_spectrum_auto_opens_only_for_vara_p2p(tmp_path) -> None:
     finally:
         window.close()
         runtime.close()
+
+
+def test_ardop_disables_vara_spectrum_and_backend_switch_restores_it(tmp_path) -> None:
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-spectrum-backend.ini"), QSettings.Format.IniFormat
+    )
+    runtime = ShellRuntime()
+    runtime.config.payload_backend = "ardop"
+    window = GuardianMainWindow(runtime, settings)
+    try:
+        assert not window.spectrum_action.isEnabled()
+        assert not window.vara_button.isEnabled()
+        assert "ARDOP" in window.vara_button.toolTip()
+        for backend in ("ofdm_vhf", "vara_p2p", "ardop"):
+            runtime.config.payload_backend = backend
+            window._apply_snapshot(runtime.snapshots.read())
+            assert window.spectrum_action.isEnabled() == (backend != "ardop")
+            assert window.vara_button.isEnabled() == (backend != "ardop")
+            assert bool(window.vara_button.toolTip()) == (backend == "ardop")
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_second_radio_vara_button_follows_its_own_payload_backend() -> None:
+    from types import SimpleNamespace
+    from guardian.config import StationConfig
+    from guardian.qt.second_radio_panel import SecondRadioPanel
+
+    _application()
+    snapshot = SimpleNamespace(radio=SimpleNamespace(error="", connected=False))
+    radio = SimpleNamespace(
+        config=StationConfig(payload_backend="ardop"),
+        snapshots=SimpleNamespace(read=lambda: snapshot),
+        current_frequency=lambda: 0,
+        vara=SimpleNamespace(connected=False, state=SimpleNamespace(error="")),
+        audio_transport=None,
+        has_frequency_control=lambda: False,
+        network_settings_busy=lambda: False,
+    )
+    runtime = SimpleNamespace(
+        config=StationConfig(payload_backend="vara_p2p"),
+        radio_coordinator=SimpleNamespace(radios=[object(), radio]),
+    )
+    panel = SecondRadioPanel(runtime)
+    try:
+        assert not panel.vara_button.isEnabled()
+        assert "ARDOP" in panel.vara_button.toolTip()
+        runtime.config.payload_backend = "ardop"
+        for backend in ("ofdm_vhf", "vara_p2p", "ardop"):
+            radio.config.payload_backend = backend
+            panel.refresh()
+            assert panel.vara_button.isEnabled() == (backend != "ardop")
+            assert bool(panel.vara_button.toolTip()) == (backend == "ardop")
+    finally:
+        panel.close()
+
+
+def test_settings_reopens_control_modem_with_unchanged_audio_endpoints(
+    tmp_path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+    from guardian.modem import make_modem
+    from guardian.qt.settings_dialog import SettingsDialog
+
+    _application()
+    settings = QSettings(
+        str(tmp_path / "guardian-control-settings.ini"), QSettings.Format.IniFormat
+    )
+    runtime = ShellRuntime()
+    runtime.config.payload_backend = "vara_p2p"
+    runtime.config.vara_mode = "FM"
+    runtime.config.control_modem = "auto"
+    restarts = []
+    restart_success = [True]
+
+    def restart():
+        if not restart_success[0]:
+            runtime.operations.audio_transport = None
+            return False
+        modem = make_modem(runtime.config.active_modem())
+        if runtime.config.payload_backend == "ardop":
+            modem.tx_scale = runtime.config.ardop_tx_percent / 100.0
+        restarts.append(modem)
+        runtime.operations.audio_transport = SimpleNamespace(
+            actual_input_device_name="RX", actual_output_device_name="TX"
+        )
+        return True
+
+    def settings_exec(dialog):
+        runtime.operations.audio_transport = SimpleNamespace()
+        endpoints = (runtime.config.audio_input, runtime.config.audio_output)
+        runtime.config.payload_backend = "ardop"
+        dialog.saved.emit()
+        assert "verified" in dialog.audio_status.text().lower()
+        assert (runtime.config.audio_input, runtime.config.audio_output) == endpoints
+        assert restarts[-1].name == "ardop500"
+        runtime.config.ardop_tx_percent = 65
+        dialog.saved.emit()
+        assert restarts[-1].tx_scale == 0.65
+        runtime.config.payload_backend = "ofdm_vhf"
+        dialog.saved.emit()
+        assert restarts[-1].name == "afsk1200"
+        runtime.config.ardop_tx_percent = 55
+        dialog.saved.emit()
+        assert len(restarts) == 3
+        restart_success[0] = False
+        runtime.config.payload_backend = "ardop"
+        dialog.saved.emit()
+        assert runtime.operations.audio_transport is None
+        assert "control modem" in dialog.audio_status.text()
+        assert "stopped" in dialog.audio_status.text()
+        return 0
+
+    monkeypatch.setattr(runtime.operations, "restart_control_channel", restart)
+    monkeypatch.setattr(SettingsDialog, "exec", settings_exec)
+    window = GuardianMainWindow(runtime, settings)
+    try:
+        window._show_settings()
+    finally:
+        runtime.operations.audio_transport = None
+        window.close()
+        runtime.close()

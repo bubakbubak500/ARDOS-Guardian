@@ -228,6 +228,7 @@ class GuardianMainWindow(QMainWindow):
             self,
         )
         spectrum_action.setShortcut("Ctrl+Shift+W")
+        self.spectrum_action = spectrum_action
         spectrum_action.triggered.connect(self.show_spectrum)
         view_menu.addAction(spectrum_action)
         map_action = QAction(tr("map.menu"), self)
@@ -833,6 +834,7 @@ class GuardianMainWindow(QMainWindow):
     def _apply_snapshot(self, snapshot: ApplicationSnapshot) -> None:
         self.alert_banner.show_latest(self.runtime.operations.alerts)
         config = self.runtime.config
+        self.spectrum_action.setEnabled(config.payload_backend != "ardop")
         sc_selected = config.payload_backend == "ofdm_vhf"
         sc_status = self._sc_status() if sc_selected else None
         no_cat = (
@@ -961,6 +963,11 @@ class GuardianMainWindow(QMainWindow):
             if snapshot.vara.command_connected
             else tr("shell.connect_vara")
         )
+        self.vara_button.setEnabled(config.payload_backend != "ardop")
+        self.vara_button.setToolTip(dual(
+            "ARDOP uses its own modem; VARA is unavailable for this backend.",
+            "ARDOP používá vlastní modem; VARA není pro tento přenos dostupná.",
+        ) if config.payload_backend == "ardop" else "")
         self.control_button.setText(
             tr("shell.stop_control")
             if snapshot.network.control_channel_active
@@ -1091,6 +1098,9 @@ class GuardianMainWindow(QMainWindow):
         applied_audio = [
             self.runtime.config.audio_input,
             self.runtime.config.audio_output,
+            self.runtime.config.active_modem(),
+            (self.runtime.config.ardop_tx_percent
+             if self.runtime.config.active_modem() == "ardop500" else None),
         ]
         applied_vara = [operations.vara_endpoint(), operations.vara_tuning()]
         applied_radio = [operations.radio_settings()]
@@ -1113,6 +1123,9 @@ class GuardianMainWindow(QMainWindow):
             selected_audio = [
                 self.runtime.config.audio_input,
                 self.runtime.config.audio_output,
+                self.runtime.config.active_modem(),
+                (self.runtime.config.ardop_tx_percent
+                 if self.runtime.config.active_modem() == "ardop500" else None),
             ]
             audio_changed = selected_audio != applied_audio
             if audio_changed and self.runtime.operations.audio_transport is not None:
@@ -1132,9 +1145,9 @@ class GuardianMainWindow(QMainWindow):
                 else:
                     dialog.audio_status.setText(
                         dual(
-                            "The selected audio endpoints could not be opened; "
+                            "The selected audio endpoints or control modem could not be opened; "
                             "the control channel was stopped.",
-                            "Vybrané zvukové endpointy se nepodařilo otevřít; "
+                            "Vybrané zvukové endpointy nebo řídicí modem se nepodařilo otevřít; "
                             "řídicí kanál byl zastaven.",
                         )
                     )

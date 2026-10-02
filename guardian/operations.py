@@ -846,7 +846,7 @@ class Operations:
         def operation() -> Channel:
             with self._radio_lock:
                 self.radio.set_frequency(channel.freq_hz)
-                if channel.mode:
+                if channel.mode and self.config.payload_backend != "ardop":
                     self.radio.set_mode(channel.mode)
             return channel
 
@@ -1249,6 +1249,8 @@ class Operations:
         return reached
 
     def _alert_on_channel(self, frame, freq: int, mode: str, net, transport) -> bool:
+        if self.config.payload_backend == "ardop":
+            mode = ""  # Keep the operator's sideband and narrow radio filter.
         megahertz = freq / 1_000_000
         try:
             with self._radio_lock:
@@ -1318,7 +1320,7 @@ class Operations:
                 self.radio.set_frequency(frequency)
                 # The sweep may have crossed a band: a rig left on USB after an
                 # HF hop would be deaf on the FM channel the operator was on.
-                if mode:
+                if mode and self.config.payload_backend != "ardop":
                     self.radio.set_mode(mode)
         except Exception as exc:  # noqa: BLE001
             self._log(
@@ -3914,6 +3916,11 @@ class Operations:
         Keeping the checks in one place prevents the manual action from cutting
         across a VARA hand-off or an alert frequency sweep.
         """
+        if self.config.payload_backend == "ardop":
+            return dual(
+                "Beacons are paused while ARDOP is selected.",
+                "Majáky jsou při zvoleném ARDOP pozastavené.",
+            )
         if self.audio_transport is None:
             return dual(
                 "Start control channel before sending a beacon.",
@@ -4065,7 +4072,7 @@ class Operations:
 
     def _tick_beacon(self, now: float) -> None:
         """Announce presence so peers can hear this station and route to it."""
-        if not self.config.beacon_enabled:
+        if self.config.payload_backend == "ardop" or not self.config.beacon_enabled:
             self._next_beacon_at = None
             self._beacon_schedule_interval = None
             return
@@ -4726,10 +4733,16 @@ class Operations:
             return None
         self._working_channel_guard()
         frequency, mode = target
+        if self.config.payload_backend == "ardop":
+            # Route tables may still describe an FM network. ARDOP borrows
+            # its frequency but negotiates the sideband already set on CAT.
+            channel = self._read_channel()
+            mode = channel[1] if channel is not None else ""
         if not self._working_mode_compatible(mode):
+            transport = ("ARDOP 500 Hz" if self.config.payload_backend == "ardop" else
+                         f"VARA {(self.config.vara_mode or 'FM').strip().upper()}")
             raise RuntimeError(
-                f"working mode {mode or '?'} is incompatible with VARA "
-                f"{(self.config.vara_mode or 'FM').strip().upper()}"
+                f"working mode {mode or '?'} is incompatible with {transport}"
             )
         return int(frequency), (mode or "").strip().upper()
 
@@ -4793,6 +4806,18 @@ class Operations:
             )
             return None
         channel = f"{frequency / 1_000_000:.4f} MHz {mode}"
+        if self.config.payload_backend == "ardop":
+            current = self._read_channel()
+            current_mode = (current[1] if current is not None else "").strip().upper().replace("-", "")
+            # CAT mode stays untouched: do not promise a peer the opposite
+            # sideband. DATA/PKT aliases still represent the same sideband.
+            if (not self._working_mode_compatible(current_mode)
+                    or mode[-3:] != current_mode[-3:]):
+                self._refuse_working_channel(callsign, dual(
+                    f"ARDOP keeps the radio sideband {current_mode or '?'}; {mode} was proposed",
+                    f"ARDOP zachovává postranní pásmo rádia {current_mode or '?'}; navrženo bylo {mode}",
+                ))
+                return None
         if not self._working_mode_compatible(mode):
             self._refuse_working_channel(
                 callsign,
@@ -4940,6 +4965,10 @@ class Operations:
         allow_manual: bool,
         settle: bool,
     ) -> bool:
+        if self.config.payload_backend == "ardop":
+            # Do not send SET MODE even for an SSB route: some radios reset
+            # the operator's narrow filter when the mode is selected again.
+            mode = ""
         if self.is_no_cat_radio():
             if not allow_manual:
                 self._log(
@@ -5017,7 +5046,7 @@ class Operations:
             try:
                 with self._radio_lock:
                     self.radio.set_frequency(self._qsy_previous)
-                    if self._qsy_previous_mode:
+                    if self._qsy_previous_mode and self.config.payload_backend != "ardop":
                         self.radio.set_mode(self._qsy_previous_mode)
                 if settle:
                     time.sleep(ALERT_SWEEP_SETTLE)
