@@ -82,6 +82,8 @@ Guardian can control many radios through **Hamlib / rigctld**. It also supports 
 
 With a paired device running a compatible Guard Mesh build, Guardian can share live station and transfer status over Bluetooth LE. The BLE v2 interface also supports contacts, message lists, plain-text reading and submitting a new message to Guardian's Outbox. Attachments are not transferred through this interface. Pairing is under **Settings → Station settings → Guard Mesh**.
 
+After the first connection, Guardian remembers the device and reconnects automatically if it goes out of range, Bluetooth is temporarily unavailable, or Guardian restarts. It keeps trying in the background while Guardian is running, including when Settings is closed. **Disconnect / cancel** stops the attempts and forgets the device. Reconnection scans only for the Guard Mesh BLE service and does not take over other Bluetooth devices.
+
 The features available on a device depend on its firmware and Guardian BLE app version. See the [GUARD-MESH project](https://github.com/bubakbubak500/GUARD-MESH) and the [BLE API reference](docs/GUARD_MESH_BLE_V2_CS.md) for details.
 
 ## Get started
@@ -111,7 +113,7 @@ To build the standalone Windows application, run `.\build.ps1`. The output is `d
 
 ## Status and documentation
 
-Guardian includes features at different stages of verification. Direct VARA messaging and several radio-control workflows have been tested on air or on hardware. Assisted multi-hop discovery, SC-FTN and ARDOP have software validation, with physical-radio verification varying by feature and release. Read the [engineering status](STATUS.md) and [release notes](docs/RELEASE_NOTES_1.1.16.md) before relying on a specific workflow.
+Guardian includes features at different stages of verification. Direct VARA messaging and several radio-control workflows have been tested on air or on hardware. Assisted multi-hop discovery, SC-FTN and ARDOP have software validation, with physical-radio verification varying by feature and release. Read the [engineering status](STATUS.md) and [release notes](docs/RELEASE_NOTES_1.1.17.md) before relying on a specific workflow.
 
 - [Product scope and safety boundaries](PRODUCT.md)
 - [Engineering and field-verification record](STATUS.md)

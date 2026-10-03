@@ -179,6 +179,7 @@ class GuardianMainWindow(QMainWindow):
         self._build_notifications()
         from .warships_window import WarshipsAccess
         self.warships_access = WarshipsAccess(self)
+        self._ensure_guard_mesh_panel()
         self._restore_geometry()
         # A geometry saved before a monitor change or DPI change may be larger
         # than today's logical work area.  Fit it once after restoration; later
@@ -1087,7 +1088,9 @@ class GuardianMainWindow(QMainWindow):
     def _ensure_guard_mesh_panel(self):
         from .guard_mesh_dialog import GuardMeshPanel
         if not hasattr(self, "guard_mesh_panel"):
-            self.guard_mesh_panel = GuardMeshPanel(self, runtime=self.runtime)
+            self.guard_mesh_panel = GuardMeshPanel(
+                self, runtime=self.runtime, settings=self.settings,
+            )
             self.guard_mesh_panel.hide()
         from ..guard_mesh import guardian_status
         self.guard_mesh_panel.client.publish(guardian_status(self.runtime))

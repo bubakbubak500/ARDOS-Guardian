@@ -207,6 +207,177 @@ def test_remote_disconnect_clears_connection():
     captured[0].callback(captured[0])
     wait_event(client, "disconnected")
     stop(client)
+    assert client.connect(DEVICE)
+    wait_event(client, "sent")
+    new_session = client._session
+    captured[0].callback(captured[0])  # A late callback must not clear the new session.
+    assert client.session_active(new_session)
+    stop(client)
+
+
+def test_panel_reconnects_after_link_loss_and_rescans_after_failed_retry(monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from guardian.qt.guard_mesh_dialog import GuardMeshPanel
+
+    clock = NS(now=100.0)
+    monkeypatch.setattr("guardian.qt.guard_mesh_dialog.time",
+                        NS(monotonic=lambda: clock.now))
+
+    class FakeBle:
+        def __init__(self):
+            self.events = Queue()
+            self.busy = False
+            self.calls = []
+
+        def connect(self, device):
+            self.calls.append(("connect", device))
+            self.busy = True
+            return True
+
+        def scan(self):
+            self.calls.append(("scan", None))
+            self.busy = True
+            return True
+
+        def stop(self):
+            self.calls.append(("stop", None))
+            self.busy = False
+
+    app = QApplication.instance() or QApplication([])
+    ble = FakeBle()
+    panel = GuardMeshPanel(client=ble)
+    panel.timer.stop()
+    try:
+        ble.busy = True
+        panel._operation = "connect"
+        ble.events.put(("connected", DEVICE))
+        panel._poll()
+        assert panel._reconnect_device is DEVICE
+
+        ble.busy = False
+        ble.events.put(("disconnected", None))
+        ble.events.put(("finished", None))
+        panel._poll()
+        assert panel._reconnect_due == 101
+        assert panel.disconnect_button.isEnabled()
+        clock.now = 101
+        panel._poll()
+        assert ble.calls == [("connect", DEVICE)]
+
+        ble.busy = False
+        ble.events.put(("error", "out of range"))
+        ble.events.put(("disconnected", None))
+        ble.events.put(("finished", None))
+        panel._poll()
+        assert panel._reconnect_due == 103
+        clock.now = 103
+        panel._poll()
+        assert ble.calls[-1] == ("scan", None)
+
+        refreshed = replace(DEVICE, device=object())
+        ble.busy = False
+        ble.events.put(("devices", [refreshed]))
+        ble.events.put(("finished", None))
+        panel._poll()
+        assert ble.calls[-1] == ("connect", refreshed)
+        assert panel._reconnect_attempt == 2
+
+        ble.busy = False
+        ble.events.put(("error", "adapter unavailable"))
+        ble.events.put(("finished", None))
+        panel._poll()
+        assert panel._reconnect_due == 108
+        clock.now = 108
+        panel._poll()
+        assert ble.calls[-1] == ("scan", None)
+        ble.busy = False
+        ble.events.put(("devices", []))
+        ble.events.put(("finished", None))
+        panel._poll()
+        assert panel._reconnect_due == 118
+        clock.now = 118
+        panel._poll()
+        assert ble.calls[-1] == ("scan", None)
+    finally:
+        panel.shutdown()
+
+
+def test_panel_manual_disconnect_cancels_pending_reconnect(monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from guardian.qt.guard_mesh_dialog import GuardMeshPanel
+
+    app = QApplication.instance() or QApplication([])
+    ble = NS(events=Queue(), busy=False, stop=lambda: None)
+    panel = GuardMeshPanel(client=ble)
+    panel.timer.stop()
+    try:
+        panel._reconnect_device = DEVICE
+        panel._reconnect_due = time.monotonic() - 1
+        panel._disconnect()
+        assert panel._reconnect_device is None
+        assert panel._reconnect_due is None
+        panel._poll()
+    finally:
+        panel.shutdown()
+
+
+def test_saved_device_reconnects_without_opening_settings(tmp_path, monkeypatch):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+    from guardian.qt.guard_mesh_dialog import GuardMeshPanel, RECONNECT_SETTING
+
+    clock = NS(now=200.0)
+    monkeypatch.setattr("guardian.qt.guard_mesh_dialog.time",
+                        NS(monotonic=lambda: clock.now))
+    app = QApplication.instance() or QApplication([])
+    settings = QSettings(str(tmp_path / "ble.ini"), QSettings.Format.IniFormat)
+    settings.setValue(RECONNECT_SETTING, DEVICE.address)
+
+    class FakeBle:
+        def __init__(self):
+            self.events = Queue()
+            self.busy = False
+            self.calls = []
+
+        def scan(self):
+            self.calls.append("scan")
+            self.busy = True
+            return True
+
+        def connect(self, device):
+            self.calls.append(("connect", device))
+            self.busy = True
+            return True
+
+        def stop(self):
+            self.busy = False
+
+    ble = FakeBle()
+    panel = GuardMeshPanel(client=ble, settings=settings)
+    panel.hide()
+    panel.timer.stop()
+    try:
+        clock.now = 201
+        panel._poll()
+        assert ble.calls == ["scan"]
+        ble.busy = False
+        ble.events.put(("devices", [DEVICE]))
+        ble.events.put(("finished", None))
+        panel._poll()
+        assert ble.calls[-1] == ("connect", DEVICE)
+        ble.events.put(("connected", DEVICE))
+        panel._poll()
+        assert settings.value(RECONNECT_SETTING) == DEVICE.address
+
+        ble.busy = False
+        ble.events.put(("disconnected", None))
+        ble.events.put(("finished", None))
+        panel._poll()
+        panel._disconnect()
+        assert not settings.contains(RECONNECT_SETTING)
+        assert panel._reconnect_due is None
+    finally:
+        panel.shutdown()
 
 
 def test_settings_tab_reuses_connection_and_has_no_status_variables(tmp_path, monkeypatch):
@@ -219,6 +390,8 @@ def test_settings_tab_reuses_connection_and_has_no_status_variables(tmp_path, mo
     app = QApplication.instance() or QApplication([])
     live = ShellRuntime()
     window = GuardianMainWindow(live, QSettings(str(tmp_path / "ble.ini"), QSettings.Format.IniFormat))
+    assert not window.guard_mesh_panel.isVisible()
+    assert window.guard_mesh_panel.timer.isActive()
     panels = []
     def settings_exec(dialog):
         panel = dialog.guard_mesh_panel

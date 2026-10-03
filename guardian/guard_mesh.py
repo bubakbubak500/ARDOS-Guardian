@@ -221,9 +221,11 @@ class MeshBleClient:
             self._client_factory = BleakClient
         disconnected = asyncio.Event()
         loop = asyncio.get_running_loop()
+        session = None
         def on_disconnected(_client):
             with self._lock:
-                self._session = None
+                if session is not None and self._session == session:
+                    self._session = None
             try:
                 loop.call_soon_threadsafe(disconnected.set)
             except RuntimeError:
