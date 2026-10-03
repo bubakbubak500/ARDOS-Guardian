@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 from .coding import FecProfile, fec_profile, fec_spec
 from .config import sc_mcs
@@ -33,6 +34,12 @@ class AdaptationConfig:
     loss_cooldown_bursts: int = 6
     ewma_alpha: float = 0.25
     rapid_acquisition: bool = False
+
+    @property
+    def recovery_cooldown_bursts(self) -> int:
+        # Rapid SC uses remembered failed profiles and improved DATA quality,
+        # rather than a fixed number of idle recovery windows.
+        return 0 if self.rapid_acquisition else self.loss_cooldown_bursts
 
     def __post_init__(self) -> None:
         fec_profile(self.fixed_fec)
@@ -77,12 +84,11 @@ class TxProfile:
 
 @dataclass
 class LinkAdaptationController:
-    """Conservative one-owner controller, shared across backend transfers.
+    """One controller per directed path, shared across backend transfers.
 
-    Delivery feedback leads.  A failure strengthens FEC immediately; only when
-    already at rate 1/2 does it shorten the burst.  A clean window upgrades one
-    dimension at a time, alternating FEC and burst length to avoid coupled
-    oscillation.  Fixed controls bypass either half independently.
+    SC AUTO explores bounded MCS/FEC profiles using DATA delivery feedback.
+    Other callers retain the incremental FEC/burst policy in report_burst.
+    Fixed controls bypass their corresponding adaptive choices.
     """
 
     config: AdaptationConfig = field(default_factory=AdaptationConfig)
@@ -106,6 +112,16 @@ class LinkAdaptationController:
     # immediately promote the profile that had just required retransmission.
     profile_upgrade_cooldown: int = 0
     mcs_upgrade_cooldown: int = 0
+    # One bounded experiment at a time. A clean long window can earn a trial
+    # even when a heuristic SNR threshold refuses admission indefinitely.
+    fec_probe_from: FecProfile | None = None
+    mcs_probe_from: int | None = None
+    capacity_probe_next: str = "mcs"
+    capacity_probe_profile: TxProfile | None = None
+    capacity_probe_quality: tuple[float, float] | None = None
+    capacity_fallback_profile: TxProfile | None = None
+    capacity_rejections: dict[tuple[int, int, int, int], tuple[float, float]] = field(default_factory=dict)
+    capacity_quality: dict[tuple[int, int], tuple[float, float]] = field(default_factory=dict)
     _next_upgrade: str = "fec"
 
     def __post_init__(self) -> None:
@@ -131,6 +147,8 @@ class LinkAdaptationController:
         )
         burst = (self.current_burst_bytes if self.config.adaptive_burst
                  else self.config.fixed_burst_bytes)
+        if self.fec_probe_from is not None or self.mcs_probe_from is not None:
+            burst = min(burst, max(2048, self.config.arq_block_bytes))
         return TxProfile(self.mcs_index, fec, burst, self.config.arq_block_bytes)
 
     def fec_for_retry(self, attempt: int) -> FecProfile:
@@ -157,12 +175,139 @@ class LinkAdaptationController:
             return ladder[max(0, ladder.index(base) - attempts)]
         return FecProfile(max(int(FecProfile.FEC_1_2), int(base) - attempts))
 
+    def report_capacity_burst(self, *, mcs_ladder, sent_blocks: int,
+                              acked_blocks: int, retransmitted_bytes: int,
+                              unique_bytes: int, elapsed_seconds: float,
+                              remote_snr_db: float | None,
+                              remote_evm_rms: float | None,
+                              mcs_index: int) -> None:
+        """Explore this directed path, one bounded profile trial per ACK.
+
+        SNR/EVM can select the first short probe. Thereafter one clean DATA
+        window is evidence to try the next density or code rate. A failed trial
+        restores its actual baseline and is remembered until quality measured
+        at that same baseline improves. ACK reception quality is never input.
+        """
+        self.report_burst(
+            sent_blocks=sent_blocks, acked_blocks=acked_blocks,
+            retransmitted_bytes=retransmitted_bytes, unique_bytes=unique_bytes,
+            elapsed_seconds=elapsed_seconds, remote_snr_db=remote_snr_db,
+            remote_evm_rms=remote_evm_rms, mcs_index=mcs_index,
+            adapt_profile=False,
+        )
+        if retransmitted_bytes:
+            # Rescue can use another modulation and code rate. It cannot
+            # qualify or disqualify the regular DATA profile a second time.
+            return
+        current = self.profile
+        baseline = self.capacity_probe_profile
+        quality = (remote_snr_db, remote_evm_rms)
+
+        def measured(pair):
+            return (pair[0] is not None and pair[1] is not None
+                    and math.isfinite(pair[0]) and math.isfinite(pair[1])
+                    and pair[0] > 0.0 and 0.0 < pair[1] < 1.0)
+
+        def key(target, source):
+            return (target.mcs_index, int(target.fec), source.mcs_index, int(source.fec))
+
+        if acked_blocks < sent_blocks:
+            fallback = baseline or self.capacity_fallback_profile
+            if fallback is None or (fallback.mcs_index, fallback.fec) == (current.mcs_index, current.fec):
+                fecs = (self._fec_ladder() if self.config.adaptive_fec
+                        else [current.fec])
+                position = next((i for i, item in enumerate(mcs_ladder)
+                                 if item.index == current.mcs_index), 0)
+                fallback = TxProfile(
+                    current.mcs_index if fecs.index(current.fec) else mcs_ladder[max(0, position - 1)].index,
+                    fecs[max(0, fecs.index(current.fec) - 1)],
+                    self.current_burst_bytes, current.arq_block_bytes,
+                )
+            failed_quality = (self.capacity_probe_quality if baseline is not None
+                              else self.capacity_quality.get((fallback.mcs_index, int(fallback.fec))))
+            if failed_quality is not None and measured(failed_quality):
+                self.capacity_rejections[key(current, fallback)] = failed_quality
+            self.mcs_index, self.current_fec = fallback.mcs_index, fallback.fec
+            # Repeated loss must continue toward a stronger profile, never
+            # resurrect the stale fallback from an earlier, faster state.
+            self.capacity_fallback_profile = None
+            self.fec_probe_from = self.mcs_probe_from = None
+            self.capacity_probe_profile = self.capacity_probe_quality = None
+            # At the robust floor, reduce exposure as well as retaining ARQ.
+            if (fallback.mcs_index, fallback.fec) == (current.mcs_index, current.fec):
+                self.current_burst_bytes = max(self.config.min_burst_bytes, self.current_burst_bytes // 2)
+            return
+
+        if baseline is not None:
+            self.capacity_fallback_profile = baseline
+            self.fec_probe_from = self.mcs_probe_from = None
+            self.capacity_probe_profile = self.capacity_probe_quality = None
+        if not measured(quality):
+            return
+        self.capacity_quality[(current.mcs_index, int(current.fec))] = quality
+        if self.config.adaptive_burst and unique_bytes >= 512:
+            self.current_burst_bytes = self.config.max_burst_bytes
+        current = self.profile
+        position = next((i for i, item in enumerate(mcs_ladder)
+                         if item.index == self.mcs_index), 0)
+        if unique_bytes < max(512, current.arq_block_bytes):
+            return
+        candidates = {"mcs": [], "fec": []}
+        fecs = (self._fec_ladder() if self.config.adaptive_fec
+                else [current.fec])
+        fec_index = fecs.index(current.fec)
+        current_density = float(sc_mcs(current.mcs_index).bits_per_symbol) * fec_spec(current.fec).rate
+        higher_mcs = mcs_ladder[position + 1:]
+        # Quality may justify skipping rungs, but is not a permanent veto on
+        # the next rung. All choices still have to pass a bounded CRC trial.
+        admitted = [item for item in higher_mcs
+                    if remote_snr_db >= item.min_snr_db + 1.5 + fec_snr_margin_db(current.fec)]
+        targets = list(reversed(admitted))
+        if higher_mcs and higher_mcs[0] not in targets:
+            targets.append(higher_mcs[0])
+        for item in targets:
+            # A higher constellation may need stronger FEC. Excluding these
+            # joint choices traps a clean low MCS at 4/5 or 9/10 forever.
+            for fec in reversed(fecs[:fec_index + 1]):
+                density = float(item.bits_per_symbol) * fec_spec(fec).rate
+                if density > current_density:
+                    candidates["mcs"].append(TxProfile(item.index, fec,
+                        current.burst_bytes, current.arq_block_bytes))
+        if self.config.adaptive_fec and fec_index + 1 < len(fecs):
+            higher_fec = fecs[fec_index + 1:]
+            admitted_fec = [fec for fec in higher_fec if self._fec_upgrade_allowed(fec)]
+            ordered_fec = list(reversed(admitted_fec))
+            if higher_fec[0] not in ordered_fec:
+                ordered_fec.append(higher_fec[0])
+            candidates["fec"] = [TxProfile(current.mcs_index, fec,
+                current.burst_bytes, current.arq_block_bytes) for fec in ordered_fec]
+        order = (self.capacity_probe_next, "mcs" if self.capacity_probe_next == "fec" else "fec")
+        for dimension in order:
+            for target in candidates[dimension]:
+                # Failure at this constellation also rejects weaker protection
+                # at it. Compare quality only at the same source constellation.
+                rejected = [quality for (mcs, fec, source_mcs, _), quality
+                            in self.capacity_rejections.items()
+                            if mcs == target.mcs_index and source_mcs == current.mcs_index
+                            and fec_spec(fec).rate <= fec_spec(target.fec).rate]
+                if any(remote_snr_db < snr + 1.5 and remote_evm_rms > evm * .85
+                       for snr, evm in rejected):
+                    continue
+                self.capacity_probe_profile = current
+                self.capacity_probe_quality = quality
+                self.mcs_probe_from = current.mcs_index if target.mcs_index != current.mcs_index else None
+                self.fec_probe_from = current.fec if target.fec != current.fec else None
+                self.mcs_index, self.current_fec = target.mcs_index, target.fec
+                self.capacity_probe_next = "fec" if dimension == "mcs" else "mcs"
+                return
+
     def report_burst(self, *, sent_blocks: int, acked_blocks: int,
                      retransmitted_bytes: int = 0,
                      unique_bytes: int = 0, elapsed_seconds: float = 0.0,
                      remote_snr_db: float | None = None,
                      remote_evm_rms: float | None = None,
-                     mcs_index: int | None = None) -> None:
+                     mcs_index: int | None = None,
+                     adapt_profile: bool = True) -> None:
         sent = max(1, int(sent_blocks))
         ratio = max(0.0, min(1.0, int(acked_blocks) / sent))
         retry_ratio = max(0.0, retransmitted_bytes / max(1, unique_bytes))
@@ -188,14 +333,23 @@ class LinkAdaptationController:
                 self.remote_evm_ewma, float(remote_evm_rms)
             )
 
+        if not adapt_profile:
+            # The joint capacity controller owns this decision; update only
+            # measurements here, without a second independent FEC decision.
+            self.clean_streak = 0
+            return
+
         if ratio < 1.0:
             self.clean_streak = 0
-            self.profile_upgrade_cooldown = self.config.loss_cooldown_bursts
+            self.profile_upgrade_cooldown = self.config.recovery_cooldown_bursts
             self._downgrade()
+            return
+        if self.config.rapid_acquisition and retransmitted_bytes:
+            # A successful robust retry says nothing about the normal profile.
             return
         if self.profile_upgrade_cooldown > 0:
             self.profile_upgrade_cooldown -= 1
-            self.clean_streak = 0
+            self.clean_streak = self.clean_streak + 1 if self.config.rapid_acquisition else 0
             return
         if (self.config.rapid_acquisition and self.config.adaptive_burst
                 and retransmitted_bytes == 0 and unique_bytes >= 512

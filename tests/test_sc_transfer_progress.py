@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from guardian.ofdm.coding import FecProfile, fec_spec
+from guardian.ofdm.adaptation import AdaptationConfig, LinkAdaptationController
 from guardian.ofdm.framing import (
     CAPACITY_FRAME_VERSION, DEFER_ACK_FLAG, AckBitmap, DecodedBurst,
     OfdmFrameType, PhyHeader, split_blocks,
@@ -149,6 +150,7 @@ def test_800kb_receive_progress_and_deadline_match_ack_bitmap(monkeypatch):
         assert view.fraction == pytest.approx(status.rx_bytes / len(payload), abs=0.0004)
         assert status.percent == int(100 * status.rx_bytes / status.total_bytes)
         assert status.arq_block_bytes == 256
+        assert status.total_bytes_exact == (status.total_bytes == len(payload))
         if status.rx_bytes > 50 * 256:
             assert view.mcs == 8
             assert view.fec == fec_spec(FecProfile.LDPC_3_4).label
@@ -232,3 +234,99 @@ def test_panel_refreshes_live_mcs_fec_without_losing_progress():
         assert f"FEC {fec_spec(fec).label}" in panel.detail.text()
         assert "SC_FTN_2K7" in panel.detail.text()
     panel.close()
+
+
+def test_receive_panel_names_wire_bytes_and_marks_manifest_estimate(monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from guardian import i18n
+    from guardian.ofdm.metrics import OfdmStatus
+    from guardian.qt.transfer_progress import TransferPanel
+
+    monkeypatch.setattr(i18n, "_language", i18n.Language.ENGLISH)
+    app = QApplication.instance() or QApplication([])
+    panel = TransferPanel()
+    status = OfdmStatus(
+        state="receiving", direction="receive", profile="SC_FTN_2K7",
+        rx_bytes=111_616, total_bytes=832 * 256,
+        data_airtime_seconds=190.0, keyed_seconds=4.0,
+        elapsed_seconds=320.0, est_bitrate_bps=4_162.0,
+    )
+    view = transfer_state(SimpleNamespace(vara=None), True, status)
+    panel.apply(view)
+    assert round(view.fraction * 100) == 52
+    assert "111616" in panel.detail.text()
+    assert "212992" in panel.detail.text()
+    assert "about" in panel.detail.text()
+    assert "modeled channel" in panel.detail.text()
+    assert "data airtime" in panel.detail.text()
+    assert "ACK TX" in panel.detail.text()
+
+    i18n.set_language("cs")
+    panel.apply(view)
+    assert "přibližně 212992 B" in panel.detail.text()
+    assert "modelovaný kanál" in panel.detail.text()
+
+    status.total_bytes = 212_917
+    status.total_bytes_exact = True
+    panel.apply(transfer_state(SimpleNamespace(vara=None), True, status))
+    assert "212917" in panel.detail.text()
+    assert "přibližně" not in panel.detail.text()
+    panel.close()
+
+
+def test_long_clean_superframes_do_not_downgrade_on_snr_alone():
+    controller = LinkAdaptationController(
+        AdaptationConfig(
+            modern_ldpc=True, rapid_acquisition=True,
+            initial_fec=FecProfile.LDPC_1_2,
+        ),
+        mcs_index=16,
+    )
+    link = OfdmLink(
+        SC_FTN_2K7, ScriptedPipe(0), mcs_index=17,
+        adaptive_mcs=True, superframe=True, controller=controller,
+    )
+    assert link.mcs_index == 16
+    for _ in range(3):
+        link._report_mcs_feedback(34, 34, 11.0, 0.28)
+    assert link.mcs_index == 16
+
+    link._report_mcs_feedback(34, 31, 11.0, 0.28)
+    assert link.mcs_index == 7
+    assert controller.mcs_upgrade_cooldown == 0
+    for _ in range(2):
+        link._report_mcs_feedback(34, 34, 18.0, 0.15)
+        assert link.mcs_index == 7
+    link._report_mcs_feedback(34, 34, 18.0, 0.15)
+    assert link.mcs_index == 16
+
+
+def test_sender_distinguishes_remote_data_quality_from_local_ack(monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from guardian.ofdm.metrics import OfdmStatus
+    from guardian.qt.transfer_progress import TransferPanel
+
+    app = QApplication.instance() or QApplication([])
+    panel = TransferPanel()
+    status = OfdmStatus(state="waiting_ack", direction="send",
+                        profile="SC_FTN_2K7", snr_db=19.8, evm_rms=.10,
+                        remote_snr_db=12.5, remote_evm_rms=.24)
+    panel.apply(transfer_state(SimpleNamespace(vara=None), True, status))
+    assert "DATA SNR 12.5 dB" in panel.detail.text()
+    assert "ACK SNR 19.8 dB" in panel.detail.text()
+    assert "DATA EVM 24.0%" in panel.detail.text()
+    panel.close()
+
+
+def test_receiver_control_quality_cannot_replace_data_quality():
+    link = OfdmLink(SC_FTN_2K7, ScriptedPipe(0), codec=ScriptedCodec())
+    link.status.direction = "receive"
+    frame = data_frame({0: b"x" * 256}, 2)
+    frame.metrics = LinkMetrics(residual_snr_db=12.5, evm_rms=.24)
+    link._record(frame)
+    link._data_header = frame.header
+    poll = DecodedBurst(header=PhyHeader(OfdmFrameType.POLL, 115),
+                        metrics=LinkMetrics(residual_snr_db=30.0, evm_rms=.03))
+    link._record(poll)
+    assert link.status.snr_db == 12.5
+    assert link.status.evm_rms == .24

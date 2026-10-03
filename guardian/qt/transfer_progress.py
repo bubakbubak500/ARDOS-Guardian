@@ -36,6 +36,7 @@ class TransferState:
     active: bool = False
     sent_bytes: int = 0
     total_bytes: int = 0
+    total_bytes_exact: bool = True
     transport: str = "vara"
     direction: str = "send"
     profile: str = ""
@@ -47,6 +48,8 @@ class TransferState:
     retransmitted_bytes: int = 0
     snr_db: float | None = None
     evm_rms: float | None = None
+    remote_snr_db: float | None = None
+    remote_evm_rms: float | None = None
     channel_goodput_bps: float | None = None
     phy_payload_bps: float | None = None
     keyed_duty_cycle: float | None = None
@@ -100,6 +103,7 @@ def transfer_state(snapshot, payload_active: bool, sc_status=None) -> TransferSt
                 active=True,
                 sent_bytes=max(0, min(total, moved)),
                 total_bytes=total,
+                total_bytes_exact=bool(getattr(sc_status, "total_bytes_exact", False)),
                 transport="sc_ftn",
                 direction=direction,
                 profile=str(getattr(sc_status, "profile", "") or ""),
@@ -119,6 +123,8 @@ def transfer_state(snapshot, payload_active: bool, sc_status=None) -> TransferSt
                 ),
                 snr_db=getattr(sc_status, "snr_db", None),
                 evm_rms=getattr(sc_status, "evm_rms", None),
+                remote_snr_db=getattr(sc_status, "remote_snr_db", None),
+                remote_evm_rms=getattr(sc_status, "remote_evm_rms", None),
                 goodput_bps=(
                     getattr(sc_status, "goodput_bps", None)
                     if getattr(sc_status, "goodput_bps", None) is not None
@@ -310,6 +316,14 @@ class TransferPanel(QWidget):
         self.bar.set_fraction(state.fraction)
         if state.direction == "receive" and state.total_bytes <= 0:
             detail = tr("transfer.detail_receive_waiting")
+        elif state.transport == "sc_ftn" and state.direction == "receive":
+            detail = tr(
+                "transfer.detail_sc_receive"
+                if state.total_bytes_exact else "transfer.detail_sc_receive_estimate",
+                sent=state.sent_bytes,
+                total=state.total_bytes,
+                percent=round(state.fraction * 100),
+            )
         else:
             detail = tr(
                 "transfer.detail_receive"
@@ -355,19 +369,30 @@ class TransferPanel(QWidget):
             if details:
                 lines.append(" · ".join(details))
             quality: list[str] = []
+            if state.direction == "send":
+                if state.remote_snr_db is not None:
+                    quality.append(f"DATA SNR {state.remote_snr_db:.1f} dB")
+                if state.remote_evm_rms is not None:
+                    quality.append(f"DATA EVM {state.remote_evm_rms * 100:.1f}%")
+            local_kind = "ACK " if state.direction == "send" else "DATA "
             if state.snr_db is not None:
-                quality.append(f"SNR {float(state.snr_db):.1f} dB")
+                quality.append(f"{local_kind}SNR {float(state.snr_db):.1f} dB")
             if state.evm_rms is not None:
-                quality.append(f"EVM {float(state.evm_rms) * 100:.1f}%")
+                quality.append(f"{local_kind}EVM {float(state.evm_rms) * 100:.1f}%")
             if state.channel_goodput_bps is not None:
                 quality.append(
-                    f"channel {state.channel_goodput_bps:.0f} bit/s"
+                    dual("modeled channel", "modelovaný kanál")
+                    + f" {state.channel_goodput_bps:.0f} bit/s"
                 )
             if state.phy_payload_bps is not None:
-                quality.append(f"PHY {state.phy_payload_bps:.0f} bit/s")
+                quality.append(
+                    dual("data airtime", "datový čas")
+                    + f" {state.phy_payload_bps:.0f} bit/s"
+                )
             if state.keyed_duty_cycle is not None:
                 quality.append(
-                    f"TX duty {state.keyed_duty_cycle * 100:.0f}%"
+                    ("ACK TX" if state.direction == "receive" else "TX duty")
+                    + f" {state.keyed_duty_cycle * 100:.0f}%"
                 )
             if state.ptt_cycles:
                 quality.append(f"PTT {state.ptt_cycles}")

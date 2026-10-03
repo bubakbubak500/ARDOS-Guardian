@@ -7,7 +7,7 @@ do not depend on matching a page of expert-only settings.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from .coding import FecProfile, fec_spec
 
@@ -94,15 +94,26 @@ def automatic_g2_policy(waveform: str | None, bandwidth: str | None, *,
                                 "uv-k5(8)", "quanshenguv-k6", "uv-k6"})
     proven_2k7 = width == "2K7"
     backend_name = str(radio_backend or "").strip().lower()
-    policy = G2AutomaticPolicy(
+    small_blocks = width in {"1K2", "2K7", "4K5", "5K"}
+    return G2AutomaticPolicy(
         waveform=family,
         bandwidth=width,
         profile_name=SC_FTN_PROFILE_FOR_BANDWIDTH[width],
-        # Wider and narrower profiles begin at the measured robust capacity
-        # point; delivery feedback moves MCS/FEC independently per peer.
-        initial_mcs=17,
-        maximum_mcs=17,
-        initial_fec=FecProfile.LDPC_4_5,
+        # Every path starts robustly and measures its own capacity. A radio
+        # model or the old two-Icom operating point is not a modulation limit.
+        initial_mcs=1,
+        maximum_mcs=19,
+        initial_fec=FecProfile.LDPC_1_2,
+        initial_burst_bytes=512 if small_blocks else 2048,
+        minimum_burst_bytes=512 if small_blocks else 2048,
+        arq_block_bytes=256 if small_blocks else 2048,
+        rapid_acquisition=True,
+        clean_bursts_to_upgrade=1,
+        maximum_retries=1,
+        rescue_mcs=0,
+        # Retain hardware keying/watchdog timing independently of capacity.
+        maximum_train_seconds=(14.5 if width == "2K7" else 7.5 if k5_hardware else 18.0),
+        tx_guard_ms=60 if width == "2K7" else 200 if k5_hardware else 140,
         # The retained SC-FTN 2K7 geometry is a PHY setting, not calibration.
         center_hz=1779.4117647058824 if proven_2k7 else None,
         nyquist_symbol_rate=2541.176470588235 if proven_2k7 else None,
@@ -113,37 +124,6 @@ def automatic_g2_policy(waveform: str | None, bandwidth: str | None, *,
             0.8 if width == "4K5" and backend_name == "guardian_k5" else 0.0
         ),
     )
-    # An audio modem cannot infer a clean path from a model name or CAT driver.
-    # Every 2K7 SC path acquires with the same short robust probe; Guardian UART
-    # adds control/telemetry, not permission to use the delivery rescue path.
-    rapid_sc = width == "2K7"
-    if rapid_sc or k5_hardware:
-        return replace(
-            policy,
-            initial_mcs=1,
-            maximum_mcs=(17 if rapid_sc else 3),
-            initial_fec=FecProfile.LDPC_1_2,
-            initial_burst_bytes=512 if rapid_sc else 2048,
-            rapid_acquisition=rapid_sc,
-            # GK5/AIOC RF qualification found a direction with roughly 9 dB
-            # raw SNR but correlated FM distortion: 512-byte rescue bursts made
-            # from 256-byte selective-repeat blocks completed 6/6 transfers,
-            # while a single 512-byte block and MCS1 rescue did not.  Normal
-            # clean traffic still aggregates these small blocks into large
-            # keyed trains, so this is rescue granularity rather than a cap on
-            # throughput.
-            minimum_burst_bytes=512,
-            maximum_burst_bytes=16_384,
-            arq_block_bytes=256,
-            # Preserve one same-profile retry for a transient loss, then enter
-            # the measured BPSK/mother-code delivery path.  Four rescue retries
-            # remain available after the switch.
-            maximum_retries=1,
-            maximum_train_seconds=14.5 if rapid_sc else 7.5,
-            tx_guard_ms=60 if rapid_sc else 200,
-            rescue_mcs=0,
-        )
-    return policy
 
 
 __all__ = [

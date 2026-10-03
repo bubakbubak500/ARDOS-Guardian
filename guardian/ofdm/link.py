@@ -338,7 +338,8 @@ class OfdmLink:
 
     def _report_mcs_feedback(self, sent: int, received: int,
                              remote_snr_db: float | None,
-                             remote_evm_rms: float | None = None) -> None:
+                             remote_evm_rms: float | None = None, *,
+                             retransmitted: bool = False) -> None:
         if not self.adaptive_mcs:
             return
         allowed = self._mcs_ladder()
@@ -348,9 +349,7 @@ class OfdmLink:
         if int(received) < int(sent):
             self._mcs_clean_streak = 0
             self.controller.mcs_clean_streak = 0
-            self.controller.mcs_upgrade_cooldown = (
-                self.controller.config.loss_cooldown_bursts
-            )
+            self.controller.mcs_upgrade_cooldown = self.controller.config.recovery_cooldown_bursts
             floor_position = 0
             if self.rescue_after_attempt is not None:
                 floor_position = next(
@@ -364,15 +363,13 @@ class OfdmLink:
                 self.mcs_index = allowed[position - 1].index
                 self.controller.mcs_index = self.mcs_index
             return
-        if remote_snr_db is None:
-            return
-        if self.controller.mcs_upgrade_cooldown > 0:
-            self.controller.mcs_upgrade_cooldown -= 1
-            self._mcs_clean_streak = 0
-            self.controller.mcs_clean_streak = 0
+        if remote_snr_db is None or (retransmitted and self.controller.config.rapid_acquisition):
             return
         self._mcs_clean_streak += 1
         self.controller.mcs_clean_streak = self._mcs_clean_streak
+        if self.controller.mcs_upgrade_cooldown > 0:
+            self.controller.mcs_upgrade_cooldown -= 1
+            return
         rapid = (
             self.controller.config.rapid_acquisition
             and int(sent) >= 2
@@ -390,16 +387,54 @@ class OfdmLink:
             if float(remote_snr_db) >= item.min_snr_db + 1.5 + fec_margin
             and (not rapid or float(item.bits_per_symbol) <= 4.0)
         ]
+        target_position = position
         if usable_positions:
             # Ordinary learning advances one rung. The opt-in acquisition path
             # can skip to at most four bits/symbol after a measured clean probe;
             # denser constellations still require subsequent delivery evidence.
+            # Clean delivery must never lower MCS solely because one reported
+            # SNR value fell below the admission threshold. Loss handles the
+            # downgrade above; SNR only gates an upgrade.
             target_position = (max(position, max(usable_positions)) if rapid else
-                               min(position + 1, max(usable_positions)))
-            target = allowed[target_position]
-            if target.index != self.mcs_index:
-                self.mcs_index = target.index
-                self.controller.mcs_index = target.index
+                               max(position, min(position + 1, max(usable_positions))))
+        target = allowed[target_position]
+        if target.index != self.mcs_index:
+            self.mcs_index = target.index
+            self.controller.mcs_index = target.index
+
+    def _report_delivery_feedback(self, *, sent: int, received: int,
+                                  retransmitted_bytes: int, unique_bytes: int,
+                                  elapsed_seconds: float, mcs_index: int,
+                                  remote_snr_db: float | None,
+                                  remote_evm_rms: float | None) -> None:
+        """Apply one DATA result to the selected capacity policy and publish it."""
+        before = self.controller.profile
+        mcs_trial = self.controller.mcs_probe_from is not None
+        fec_trial = self.controller.fec_probe_from is not None
+        feedback = dict(
+            sent_blocks=sent, acked_blocks=received,
+            retransmitted_bytes=retransmitted_bytes, unique_bytes=unique_bytes,
+            elapsed_seconds=elapsed_seconds, mcs_index=mcs_index,
+            remote_snr_db=remote_snr_db, remote_evm_rms=remote_evm_rms,
+        )
+        if self.superframe and self.adaptive_mcs and self.controller.config.rapid_acquisition:
+            self.controller.report_capacity_burst(mcs_ladder=self._mcs_ladder(), **feedback)
+            self.mcs_index = self.controller.mcs_index
+        else:
+            self._report_mcs_feedback(sent, received, remote_snr_db, remote_evm_rms,
+                                      retransmitted=retransmitted_bytes > 0)
+            self.controller.report_burst(**feedback)
+        after = self.controller.profile
+        if before != after or mcs_trial or fec_trial:
+            probing = self.controller.mcs_probe_from is not None or self.controller.fec_probe_from is not None
+            self._log(
+                f"SC RATE: MCS{before.mcs_index}/{fec_spec(before.fec).label} -> "
+                f"MCS{after.mcs_index}/{fec_spec(after.fec).label}; "
+                f"{received}/{sent} blocks; burst <= {after.burst_bytes} B"
+                f"{'; bounded probe' if probing else '; probe resolved' if mcs_trial or fec_trial else ''}"
+            )
+        self.status.remote_snr_db = remote_snr_db
+        self.status.remote_evm_rms = remote_evm_rms
 
     def _mcs_ladder(self):
         """Return one real robustness step for each useful density.
@@ -412,10 +447,14 @@ class OfdmLink:
         table = SC_MCS_TABLE
         ceiling = next((item for item in table
                         if item.index == self._maximum_mcs_index), table[0])
-        if ceiling.index == 17:
-            wanted = (1, 7, 16, 8, 17)
+        if ceiling.index in {17, 18, 19}:
+            # IDs identify constellations, not an ordered speed scale. Use one
+            # representative per density, including the already supported
+            # 128/256/512/1024-point modes above the old lab operating point.
+            wanted = (1, 7, 16, 8, 17, 10, 18, 13, 19)
             by_index = {item.index: item for item in table}
-            return [by_index[index] for index in wanted]
+            return [by_index[index] for index in wanted
+                    if by_index[index].bits_per_symbol <= ceiling.bits_per_symbol]
         # New experimental IDs preserve old wire assignments, so numeric MCS
         # order is intentionally not a robustness ladder (for example 8-PSK is
         # MCS7, after 256-QAM MCS4). Define "below the selected ceiling" by both
@@ -520,8 +559,16 @@ class OfdmLink:
         metrics = decoded.metrics
         self.last_metrics = metrics
         self.adaptation.record_burst(metrics)
-        self.status.snr_db = metrics.residual_snr_db or metrics.snr_db
-        self.status.evm_rms = metrics.evm_rms
+        receiving_data = (
+            decoded.header is not None
+            and decoded.header.frame_type is OfdmFrameType.DATA
+            and (self._data_header is None
+                 or decoded.header.msg_id == self._data_header.msg_id)
+        )
+        if self.status.direction != "receive" or receiving_data:
+            self.status.snr_db = (metrics.residual_snr_db
+                                  if metrics.residual_snr_db is not None else metrics.snr_db)
+            self.status.evm_rms = metrics.evm_rms
         if decoded.header is not None:
             lengths = ([decoded.block_lengths[sequence]
                         for sequence in decoded.block_order]
@@ -743,6 +790,7 @@ class OfdmLink:
             raise ValueError("OFDM message exceeds 65535 ARQ blocks")
         blocks = dict(enumerate(blocks_list))
         self.status.total_bytes = len(payload)
+        self.status.total_bytes_exact = True
         self.status.tx_bytes = 0
         self.status.retries = 0
         self.status.retransmitted_bytes = 0
@@ -960,11 +1008,6 @@ class OfdmLink:
                 received = state.pending & reported
                 received_here = sent_sequences & reported
                 self._report_train_feedback(len(members), len(received_here))
-                self._report_mcs_feedback(
-                    len(members), len(received_here),
-                    answer.remote_snr_db if answer else None,
-                    answer.remote_evm_rms if answer else None,
-                )
                 if attempt == 0:
                     state.first_pass_acked.update(received_here)
                 newly = received - acknowledged
@@ -978,9 +1021,9 @@ class OfdmLink:
                         sent_sequences - reported
                     )
                 moved = sum(len(state.blocks[sequence]) for sequence in newly)
-                self.controller.report_burst(
+                self._report_delivery_feedback(
                     mcs_index=attempt_mcs,
-                    sent_blocks=len(members), acked_blocks=len(received_here),
+                    sent=len(members), received=len(received_here),
                     retransmitted_bytes=(sum(len(block.payload)
                                              for block in members)
                                          if attempt else 0),
@@ -989,10 +1032,6 @@ class OfdmLink:
                     remote_snr_db=(answer.remote_snr_db if answer else None),
                     remote_evm_rms=(answer.remote_evm_rms if answer else None),
                 )
-                if answer is not None and answer.remote_snr_db is not None:
-                    self.status.remote_snr_db = answer.remote_snr_db
-                if answer is not None and answer.remote_evm_rms is not None:
-                    self.status.remote_evm_rms = answer.remote_evm_rms
                 self._rate(self.status.tx_bytes)
                 self._publish()
                 if not state.pending:
@@ -1172,11 +1211,6 @@ class OfdmLink:
             received = (set() if answer is None else
                         state.pending & set(answer.received))
             self._report_train_feedback(len(sequences), len(received))
-            self._report_mcs_feedback(
-                len(sequences), len(received),
-                answer.remote_snr_db if answer else None,
-                answer.remote_evm_rms if answer else None,
-            )
             if attempt == 0:
                 state.first_pass_acked.update(received)
             newly = received - acknowledged
@@ -1187,10 +1221,10 @@ class OfdmLink:
             state.pending.difference_update(received)
             if answer is not None and state.pending:
                 self.adaptation.blocks_nacked += len(state.pending)
-            moved = sum(len(state.blocks[sequence]) for sequence in received)
-            self.controller.report_burst(
+            moved = sum(len(state.blocks[sequence]) for sequence in newly)
+            self._report_delivery_feedback(
                 mcs_index=attempt_mcs,
-                sent_blocks=len(sequences), acked_blocks=len(received),
+                sent=len(sequences), received=len(received),
                 retransmitted_bytes=(sum(len(state.blocks[value]) for value in sequences)
                                      if attempt else 0),
                 unique_bytes=moved,
@@ -1319,6 +1353,7 @@ class OfdmLink:
         state: RxBurstState | None = None
         self.status.rx_bytes = 0
         self.status.total_bytes = 0
+        self.status.total_bytes_exact = False
         self.status.data_bursts = 0
         self.status.ack_bursts = 0
         self.status.ptt_cycles = 0
@@ -1408,6 +1443,7 @@ class OfdmLink:
                     continue
 
                 self.status.total_bytes = state.observe_lengths(decoded.block_lengths)
+                self.status.total_bytes_exact = state.final_block_bytes is not None
                 self.status.arq_block_bytes = state.arq_block_bytes
                 for sequence, payload in decoded.blocks.items():
                     if sequence in state.blocks:
@@ -1453,6 +1489,7 @@ class OfdmLink:
                 message = b"".join(state.blocks[index]
                                    for index in range(state.total_blocks))
                 self.status.total_bytes = len(message)
+                self.status.total_bytes_exact = True
                 self._publish("idle")
                 self._log(
                     f"OFDM: #{state.msg_id} received -- {len(message)} B in "
@@ -1559,6 +1596,7 @@ class OfdmLink:
         self._started_at = time.monotonic()
         blocks = split_blocks(payload, self.profile.block_size)
         self.status.total_bytes = len(payload)
+        self.status.total_bytes_exact = True
         self.status.tx_bytes = 0
         self.status.retries = 0
         self.status.retransmitted_bytes = 0
@@ -1659,6 +1697,7 @@ class OfdmLink:
                     message = b"".join(blocks[index] for index in range(expected))
                     self.status.rx_bytes = len(message)
                     self.status.total_bytes = len(message)
+                    self.status.total_bytes_exact = True
                     self._publish("idle")
                     return message
             samples = self.pipe.receive(wait)

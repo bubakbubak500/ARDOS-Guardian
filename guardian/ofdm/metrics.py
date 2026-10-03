@@ -155,6 +155,8 @@ class OfdmStatus:
     tx_bytes: int = 0
     rx_bytes: int = 0
     total_bytes: int = 0
+    # RX knows the exact wire size only after seeing the final block manifest.
+    total_bytes_exact: bool = False
     last_block_ok: bool | None = None
     last_burst_blocks: int = 0
     last_first_pass_ok: int = 0

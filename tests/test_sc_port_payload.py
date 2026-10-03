@@ -47,7 +47,7 @@ def test_factory_forwards_radio_model_into_the_automatic_policy() -> None:
     assert via_factory.policy == direct.policy == expected
     assert via_factory.policy is not None
     assert via_factory.policy.initial_mcs == 1
-    assert via_factory.policy.maximum_mcs == 3
+    assert via_factory.policy.maximum_mcs == 19
     assert via_factory.policy.arq_block_bytes == 256
 
 

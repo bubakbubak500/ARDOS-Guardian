@@ -147,6 +147,20 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 """
     g1 = _probe(ROOT, body)
     g2 = _probe(G2_ROOT, body)
+    # Deliberate capacity-policy replacement. PHY geometry, keying guards and
+    # all remaining fields still compare directly with the immutable G2 tree.
+    block_settings = {"1K2": (512, 512, 256), "2K7": (512, 512, 256),
+                      "4K5": (512, 512, 256), "5K": (512, 512, 256),
+                      "10K": (2048, 2048, 2048), "20K": (2048, 2048, 2048)}
+    initial, minimum, arq = block_settings[width]
+    expected_changes = dict(initial_mcs=1, maximum_mcs=19, initial_fec=5,
+                            initial_burst_bytes=initial, minimum_burst_bytes=minimum,
+                            arq_block_bytes=arq, rapid_acquisition=True,
+                            clean_bursts_to_upgrade=1, maximum_retries=1, rescue_mcs=0)
+    for current, reference in zip(g1["policies"], g2["policies"]):
+        for key, expected in expected_changes.items():
+            assert current[key] == expected, key
+            current[key] = reference[key]
     assert g1 == g2
 
 

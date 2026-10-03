@@ -111,6 +111,14 @@ TRANSLATIONS: dict[str, tuple[str, str]] = {
         "{sent} of {total} B received · {percent} %",
         "{sent} z {total} B přijato · {percent} %",
     ),
+    "transfer.detail_sc_receive": (
+        "Wire data received: {sent} of {total} B · {percent} %",
+        "Přenášená data přijata: {sent} z {total} B · {percent} %",
+    ),
+    "transfer.detail_sc_receive_estimate": (
+        "Wire data received: {sent} of about {total} B · {percent} %",
+        "Přenášená data přijata: {sent} z přibližně {total} B · {percent} %",
+    ),
     "transfer.detail_receive_waiting": (
         "Waiting for incoming payload size",
         "Čeká se na velikost příchozích dat",
