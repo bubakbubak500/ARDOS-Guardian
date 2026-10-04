@@ -94,6 +94,20 @@ def test_two_real_processes_share_factories_and_isolate_state():
         assert station["contracts"][2]["control"] == "guardian.modem.ardop.ArdopControlModem"
 
 
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows 8.3 TEMP paths")
+def test_two_real_processes_accept_same_directory_with_short_windows_temp_path(tmp_path, monkeypatch):
+    import ctypes
+    import tempfile
+    from guardian.lab.selftest import run
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetShortPathNameW(str(tmp_path), buffer, len(buffer))
+    if not length or Path(buffer.value) == tmp_path:
+        pytest.skip("8.3 path aliases are unavailable on this volume")
+    monkeypatch.setattr(tempfile, "tempdir", buffer.value)
+    result = run()
+    assert result["passed"] and not result["rf_started"]
+
+
 def test_export_never_includes_private_license_or_payload(tmp_path):
     lab = Lab(tmp_path)
     run_id = "20261004-120000-1234abcd"

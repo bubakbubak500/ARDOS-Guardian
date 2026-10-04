@@ -61,8 +61,12 @@ def run():
                 report = pipe.recv()
                 if report.get("error"):
                     raise RuntimeError(report["error"])
-                if report["fingerprint"] != expected or Path(report["state_dir"]) != Path(path):
-                    raise RuntimeError("LAB station parity or isolation failed")
+                if report["fingerprint"] != expected:
+                    raise RuntimeError(f"LAB station parity failed: {report['fingerprint']} != {expected}")
+                # CI may supply an 8.3 TEMP path (RUNNER~1); config_dir returns
+                # its canonical long spelling. Compare the actual directory.
+                if not Path(report["state_dir"]).samefile(path):
+                    raise RuntimeError(f"LAB station isolation failed: {report['state_dir']} != {path}")
                 process.join(5)
                 if process.exitcode != 0:
                     raise RuntimeError("LAB station probe did not exit cleanly")

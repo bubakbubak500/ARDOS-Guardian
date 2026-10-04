@@ -1,4 +1,4 @@
-# Guardian 1.1.19 — produkční LAB
+# Guardian 1.1.20 — produkční LAB
 
 Nový LAB spouští dvě izolované stanice ze stejné aktuální aplikace Guardian 1.
 Měří běžné odesílání zpráv včetně komprese, řídicích rámců, vyjednání,
@@ -20,7 +20,7 @@ ani tabulky SC-FTN; starý LAB z G2 není součástí této cesty.
   shodu sestavení i dostupnost všech produkčních backendů a řídicích modemů.
 
 Návod, architektura, API a pravidla údržby:
-[Guardian LAB](https://github.com/bubakbubak500/ARDOS-Guardian/blob/v1.1.19/docs/GUARDIAN_LAB_CS.md).
+[Guardian LAB](https://github.com/bubakbubak500/ARDOS-Guardian/blob/v1.1.20/docs/GUARDIAN_LAB_CS.md).
 
 Toto vydání nepřináší změnu řídicích rámců VARA/ARDOP ani algoritmu SC-FTN.
 RF laboratoř nebyla při vývoji dostupná: softwarové a distribuční kontroly
