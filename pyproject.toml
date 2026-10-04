@@ -9,6 +9,7 @@ description = "Store-and-forward ARDOS messaging and routing for VARA FM/HF"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "certifi>=2026.7.22",
   "cryptography>=46,<51",
   "bleak>=3.0,<4",
   "numpy>=1.26,<3",

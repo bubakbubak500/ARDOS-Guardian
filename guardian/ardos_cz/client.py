@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import base64
 import json
+import ssl
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import certifi
 
 from .protocol import callsign, MAX_BUNDLE
 
@@ -39,7 +42,11 @@ class Client:
         self.scopes = set()
         self.cancelled = threading.Event()
         self._request = request
-        self._opener = urllib.request.build_opener(NoRedirect)
+        # Bundle current public CA roots with the client. Windows' legacy roots
+        # can select an expired chain even for a valid Tailscale certificate.
+        context = ssl.create_default_context(cafile=certifi.where())
+        self._opener = urllib.request.build_opener(
+            NoRedirect, urllib.request.HTTPSHandler(context=context))
 
     def request(self, method, path, body=None):
         if self.cancelled.is_set():

@@ -1,8 +1,10 @@
 """Internet custody never implies delivery and never destroys a local identity."""
 import base64
 import json
+import ssl
 import threading
 import time
+import urllib.request
 from types import SimpleNamespace
 
 import pytest
@@ -35,6 +37,15 @@ def test_default_off_and_https_only():
                     'https://example.test/path', 'https://example.test?key=secret'):
         with pytest.raises(ValueError):
             server_url(invalid)
+
+
+def test_https_transport_requires_trusted_certificate_and_matching_hostname():
+    client = Client('https://example.test', 'OK1AAA', None)
+    handler = next(h for h in client._opener.handlers
+                   if isinstance(h, urllib.request.HTTPSHandler))
+    assert handler._context.verify_mode == ssl.CERT_REQUIRED
+    assert handler._context.check_hostname
+    assert handler._context.cert_store_stats()['x509_ca'] > 0
 
 
 def test_durable_import_restart_and_rf_duplicate(tmp_path):

@@ -18,7 +18,9 @@ administrace a provozní tajemství patří do samostatného privátního repozi
 Server nepřiděluje oprávnění pouhým zadáním značky. Správce nejprve založí značku,
 práva a pozvánku. Stanice vyžaduje `connect`, pro odesílání `deposit`, pro příjem
 `receive`. Soukromý test používá HTTPS přes Tailscale Serve; klient nevypíná
-ověřování certifikátů a odmítá přesměrování na jiný endpoint.
+ověřování certifikátů a odmítá přesměrování na jiný endpoint. Veřejné kořenové
+certifikáty dodává balíček `certifi`, aby zastaralý Windows řetězec nezablokoval
+platný certifikát. Kontrola důvěryhodnosti i jména serveru zůstává povinná.
 
 ## Odesílání a stavy
 
