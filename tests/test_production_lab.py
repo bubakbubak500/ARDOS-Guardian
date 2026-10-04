@@ -271,6 +271,9 @@ def test_trial_requires_final_receipt_exact_contents_and_actual_modem(
         def __init__(self, label): self.label = label
         def send(self, command):
             if command["op"] == "send":
+                if expected:
+                    assert Path(command["payload_path"]).name == "sample.txt"
+                    assert Path(command["payload_path"]).read_bytes() == b"own payload"
                 a["latest"]["submitted"] = {"message_id": 42, "content": content,
                     "original_bytes": 1000, "bundle_bytes": 1200}
                 a["latest"]["snapshot"] = {"message_id": 42, "elapsed": 10,
@@ -287,6 +290,10 @@ def test_trial_requires_final_receipt_exact_contents_and_actual_modem(
     monkeypatch.setattr(lab, "_wait", lambda predicate, timeout, description: pytest.fail(description) if not predicate() else None)
     value = plan()
     value["stop_on_failure"] = False
+    if expected:
+        sample = tmp_path / "sample.txt"
+        sample.write_bytes(b"own payload")
+        value["cases"][0]["payload_path"] = str(sample)
     result = lab._trial(value, value["cases"][0], 1, "a-to-b", 1)
     assert result is expected
     row = lab.state["results"][0]

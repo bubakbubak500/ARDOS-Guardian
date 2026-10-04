@@ -253,10 +253,13 @@ class Lab:
         receiver["latest"].pop("mail", None)
         payload_dir = self.run_dir / "private" / "payloads"
         payload_dir.mkdir(exist_ok=True)
-        path = payload_dir / "payload.bin"
+        supplied_path = Path(case["payload_path"]) if case.get("payload_path") else None
+        # Preserve the extension: production compression chooses image codecs
+        # from the real attachment name just as it does in the normal Outbox.
+        path = payload_dir / (supplied_path.name if supplied_path else "payload.bin")
         # The same deterministic bytes for a given size are used for every
         # modem, repetition and direction. No modem-specific benchmark framing.
-        data = (Path(case["payload_path"]).read_bytes() if case.get("payload_path")
+        data = (supplied_path.read_bytes() if supplied_path
                 else random.Random(int(case.get("seed", 20261004))).randbytes(case["bytes"]))
         if len(data) > 32 * 1024 * 1024:
             raise ValueError("Payload file exceeds 32 MiB")
