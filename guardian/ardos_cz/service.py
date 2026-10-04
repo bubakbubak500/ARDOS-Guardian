@@ -12,7 +12,7 @@ from .client import Client, ServerError, server_url
 from .credentials import WindowsCredentials
 from .protocol import inspect_bundle
 
-HELD_STATES = {'uploading', 'unknown', 'accepted'}
+HELD_STATES = {'checking', 'uploading', 'unknown', 'accepted'}
 
 
 class ArdosService:
@@ -117,17 +117,47 @@ class ArdosService:
     def holds(self, message_id):
         return self.store.server_path(message_id).get('state') in HELD_STATES
 
+    def accept_relay(self, radio, message):
+        """Take durable local custody before RF can announce the next leg."""
+        if (not self.enabled() or self.config.ardos_cz_preference != 'server_first'
+                or not radio.config.auto_relay):
+            return False
+        mail = self.store.get(message.msg_id)
+        path = self.store.server_path(message.msg_id)
+        from ..session import SessionState
+        if mail is not None and path.get('ingress') == 'rf_bridge' and path.get('state') == 'delivered':
+            self.store.server_path(message.msg_id, rf_receipt_due=True)
+            radio.net._enter(message, SessionState.DELIVERED)
+            return True
+        if mail is None or mail.folder != Folder.TRANSIT or message.ttl <= 1:
+            return False
+        self.store.radio_path(message.msg_id, inbound_radio=radio.radio_id,
+                              previous_hop=message.source, ttl=message.ttl - 1)
+        if path.get('state') not in HELD_STATES:
+            self.store.server_path(message.msg_id, state='checking', ingress='rf_bridge',
+                                   attempted_at=time.time())
+        radio.net._enter(message, SessionState.FORWARDED)
+        radio._log(f'ARDOS CZ: checking server route for relay #{message.msg_id}.', source='mail')
+        # Network work is queued here; a busy worker leaves it durable for tick().
+        self.send(message.msg_id)
+        return True
+
     def _publish_receipt(self, mid, reply):
-        self.store.server_path(mid, server_id=reply['id'], state=reply['state'], expires=reply['expires'])
+        path = self.store.server_path(mid)
+        updates = {}
+        if path.get('ingress') == 'rf_bridge' and reply['state'] == 'delivered' and path.get('state') != 'delivered':
+            updates['rf_receipt_due'] = True
+        self.store.server_path(mid, server_id=reply['id'], state=reply['state'], expires=reply['expires'], **updates)
         if reply['state'] == 'delivered':
             self.store.set_status(mid, status=Status.DELIVERED, folder=Folder.SENT)
             self.store.mark_sent(mid)
-        elif reply['state'] == 'expired':
+        elif reply['state'] == 'expired' and self.store.get(mid).status != Status.DELIVERED:
             self.store.set_status(mid, status=Status.FAILED)
 
     def send(self, message_id, *, leave=False):
         """Return None when RF policy should proceed, True when handled/held."""
-        if self.holds(message_id):
+        path = self.store.server_path(message_id)
+        if self.holds(message_id) and path.get('state') != 'checking':
             return True
         if not leave and self.store.server_path(message_id).get('state') == 'rf_fallback':
             return None
@@ -135,18 +165,25 @@ class ArdosService:
             return False if leave else None
         if not leave and self.config.ardos_cz_preference != 'server_first':
             return None
-        if self._active:
-            return False if leave else None
         op = self.operations
+        mail = self.store.get(message_id)
+        bridge = bool(mail and mail.folder == Folder.TRANSIT)
+        if self._active:
+            return False if leave or bridge else None
         if not op._mail_mutation_lock.acquire(blocking=False):
             return False
         try:
             mail = self.store.get(message_id)
-            if not mail or mail.folder != Folder.OUTBOX or mail.source != self.config.callsign:
+            if not mail or (not bridge and (mail.folder != Folder.OUTBOX or mail.source != self.config.callsign)):
                 return False if leave else None
-            # Every manually configured RF route takes precedence over automatic internet selection.
+            if bridge:
+                provenance = self.store.radio_path(message_id)
+                if not provenance.get('previous_hop') or provenance.get('ttl', 0) < 1:
+                    return False
+            # Own outbound mail keeps explicit RF routing; relay mail follows
+            # the station's server-first policy before choosing its next RF leg.
             route = op.routes.lookup(mail.final_dest)
-            if not leave and route is not None and getattr(route, 'source', 'manual') == 'manual':
+            if not bridge and not leave and route is not None and getattr(route, 'source', 'manual') == 'manual':
                 return None
             if message_id in op._mail_preparing or (op.coordinator and op.coordinator.active_message(message_id)):
                 return False
@@ -158,6 +195,8 @@ class ArdosService:
             except (ValueError, RuntimeError):
                 self._set_state('invalid_configuration')
                 return False if leave else None
+            if bridge and path.get('state') != 'checking':
+                self.store.server_path(message_id, state='checking', ingress='rf_bridge', attempted_at=time.time())
             op._mail_preparing.add(message_id)
             self._active = True
         finally:
@@ -168,15 +207,20 @@ class ArdosService:
             bundle = mail.to_bundle()
             info = inspect_bundle(bundle)
             mode = 'leave' if leave else 'online'
-            key = hashlib.sha256(f"{client.url}\n{mail.source}\n{mail.msg_id}\n{info['content_hash']}\n{mode}".encode()).hexdigest()
+            ingress = 'rf_bridge' if bridge else 'direct'
+            identity = f"{client.url}\n{mail.source}\n{mail.msg_id}\n{info['content_hash']}\n{mode}"
+            if bridge:
+                identity += f"\nrf_bridge\n{client.station}\n{getattr(client, 'device_id', '')}"
+            key = hashlib.sha256(identity.encode()).hexdigest()
             if not leave:
-                availability = client.request('POST', '/v1/delivery/availability', {'destination': mail.final_dest})
+                availability = client.request('POST', '/v1/delivery/availability',
+                                              {'destination': mail.final_dest, 'ingress': ingress})
                 if not availability['online']:
                     raise ServerError('destination_offline', 409)
             self.store.server_path(message_id, state='uploading', key=key, mode=mode,
-                                   server_url=client.url, content_hash=info['content_hash'], attempted_at=time.time())
+                                   server_url=client.url, content_hash=info['content_hash'], attempted_at=time.time(), ingress=ingress)
             try:
-                reply = client.request('PUT', '/v1/messages', {'protocol': 1, 'ingress': 'direct',
+                reply = client.request('PUT', '/v1/messages', {'protocol': 1, 'ingress': ingress,
                     'mode': mode, 'key': key, 'size': len(bundle), 'bundle_hash': info['bundle_hash'],
                     'bundle': base64.b64encode(bundle).decode()})
             except ServerError as exc:
@@ -192,6 +236,8 @@ class ArdosService:
                 op._mail_preparing.discard(message_id)
             self._finish(result)
             self._last_auto_send[message_id] = time.monotonic()
+            if result.error and bridge and self.store.server_path(message_id).get('state') in {'checking', 'rejected'}:
+                self.store.server_path(message_id, state='rf_fallback')
             if result.error and not leave and not self.holds(message_id) and not self.closed:
                 op.send_queued(message_id, _skip_server=True)
 
@@ -203,18 +249,19 @@ class ArdosService:
 
     def _poll(self, client):
         lease = self._heartbeat(client)
-        for meta in self.store.list(Folder.OUTBOX):
+        for meta in self.store.list():
             if self.closed or not self.enabled():
                 return lease
             path = meta.get('server_path', {})
-            if path.get('state') not in HELD_STATES | {'rf_fallback'} or path.get('server_url') != client.url:
+            if (not path.get('key') or path.get('state') not in HELD_STATES | {'rf_fallback'}
+                    or path.get('server_url') != client.url):
                 continue
             mid = meta['msg_id']
             try:
                 reply = client.request('GET', '/v1/handoffs/' + path['key'])
             except ServerError as exc:
                 if exc.status == 404:
-                    self.store.server_path(mid, state='not_accepted')
+                    self.store.server_path(mid, state='rf_fallback' if path.get('ingress') == 'rf_bridge' else 'not_accepted')
                     continue
                 raise
             self._publish_receipt(mid, reply)
@@ -228,26 +275,46 @@ class ArdosService:
                     raise ServerError('content_hash_mismatch')
                 with self.operations._mail_mutation_lock:
                     self.store.import_server(bundle, client.station, {'server_id': message['id'],
-                        'server_url': client.url, 'content_hash': message['content_hash'], 'origin_verified': True})
+                        'server_url': client.url, 'content_hash': message['content_hash'],
+                        'origin_verified': message.get('origin_verified', False),
+                        'relay': message.get('relay', '')})
                 client.request('POST', '/v1/messages/' + message['id'] + '/ack',
                                {'content_hash': message['content_hash']})
         return lease
 
     def tick(self):
         self.workers.drain()
+        self._queue_rf_receipts()
         # A timeout is not a rejection. Reconcile first; after 90 seconds the
         # durable receiver dedupe permits RF even if the server remains down.
         if not self._active:
-            for meta in self.store.list(Folder.OUTBOX):
+            for meta in self.store.list():
                 path = meta.get('server_path', {})
-                if (path.get('state') in {'uploading', 'unknown'}
+                if (path.get('state') in {'checking', 'uploading', 'unknown'}
                         and time.time() - path.get('attempted_at', time.time()) >= 90):
                     self.store.server_path(meta['msg_id'], state='rf_fallback')
+        # Resume retained relay mail even when the server is now disabled. The
+        # usual RF path still enforces radio availability, TTL and session locks.
+        if not self._active and self.config.auto_relay:
+            for meta in self.store.list(Folder.TRANSIT):
+                mid = meta['msg_id']
+                path = self.store.server_path(mid)
+                if (path.get('ingress') == 'rf_bridge' and path.get('state') == 'rf_fallback'
+                        and time.monotonic() - self._last_auto_send.get(mid, -60) >= 60):
+                    self._last_auto_send[mid] = time.monotonic()
+                    self.operations.send_queued(mid, _skip_server=True)
         if not self.enabled():
             self._set_state('disabled')
             return
         if self._active:
             return
+        if self.config.auto_relay and self.config.ardos_cz_preference == 'server_first':
+            for meta in self.store.list(Folder.TRANSIT):
+                mid = meta['msg_id']
+                state = self.store.server_path(mid).get('state')
+                if (state == 'checking' or (not state and meta.get('status') == Status.WAITING_PICKUP)):
+                    if self.send(mid):
+                        return
         if time.monotonic() < self.next_poll:
             if self.snapshot()['state'] == 'online' and self.config.auto_deliver and self.config.ardos_cz_preference == 'server_first':
                 for meta in self.store.list(Folder.OUTBOX):
@@ -268,6 +335,37 @@ class ArdosService:
         if self.state != 'online':
             self._set_state('connecting')
         self.workers.submit('poll', lambda: self._poll(client), self._finish)
+
+    def _queue_rf_receipts(self):
+        """Publish final RF receipts on the control thread, after recipient ACK."""
+        from ..protocol import ControlFrame, FrameType, Priority
+        from ..session import SessionState
+        from ..session.orchestrator import DELIVERY_RECEIPT_TTL
+        coordinator = self.operations.coordinator
+        if coordinator is None:
+            return
+        for meta in self.store.list():
+            mid = meta['msg_id']
+            path = self.store.server_path(mid)
+            if path.get('state') != 'delivered' or not path.get('rf_receipt_due'):
+                continue
+            radio_path = self.store.radio_path(mid)
+            previous = radio_path.get('previous_hop')
+            if not previous:
+                continue
+            frame = ControlFrame(type=FrameType.DELIVERED, source=self.config.callsign,
+                destination=meta['final_dest'], next_hop=previous, message_id=mid,
+                priority=Priority(meta['priority']), ttl=DELIVERY_RECEIPT_TTL)
+            # Persist the queued frame before clearing the durable obligation.
+            coordinator.transmit_receipt(self.operations, frame)
+            self.store.set_status(mid, status=Status.DELIVERED, folder=Folder.SENT)
+            self.store.server_path(mid, rf_receipt_due=False)
+            for radio in coordinator.radios:
+                message = radio.net.sessions.get(mid)
+                if message is not None and message.final_dest == meta['final_dest']:
+                    if not message.state.terminal:
+                        radio.net._stop_message_work(message)
+                    radio.net._enter(message, SessionState.DELIVERED)
 
     def close(self):
         self.closed = True

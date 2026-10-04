@@ -61,7 +61,17 @@ class MessageStore:
                     handle.write(json.dumps(payload, indent=2))
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(pending, self.index_path)
+                # Windows readers/scanners can briefly deny an atomic rename.
+                # Retry that sharing/access failure for at most 100 ms; never
+                # publish an in-memory receipt after a persistent disk failure.
+                for attempt in range(5):
+                    try:
+                        os.replace(pending, self.index_path)
+                        break
+                    except PermissionError as exc:
+                        if getattr(exc, 'winerror', None) not in (5, 32, 33) or attempt == 4:
+                            raise
+                        time.sleep(.01 * (attempt + 1))
             finally:
                 try:
                     pending.unlink(missing_ok=True)
@@ -274,8 +284,12 @@ class MessageStore:
             value = dict(meta.get("radio_path", {}))
             if updates:
                 value.update(updates)
-                meta["radio_path"] = value
-                self._save_index()
+                self._index[msg_id] = {**meta, "radio_path": value}
+                try:
+                    self._save_index()
+                except Exception:
+                    self._index[msg_id] = meta
+                    raise
             return value
 
     def server_path(self, msg_id: int, **updates) -> dict:

@@ -111,7 +111,7 @@ class RadioCoordinator:
             result = server.send(message_id)
             if result is not None:
                 return result
-        if self.mailstore.server_path(message_id).get("state") in {"uploading", "unknown", "accepted"}:
+        if self.mailstore.server_path(message_id).get("state") in {"checking", "uploading", "unknown", "accepted"}:
             return False
         lock = self.radios[0]._mail_mutation_lock
         if not lock.acquire(blocking=False):
@@ -160,10 +160,11 @@ class RadioCoordinator:
         # Only a reverse relay hop crosses back to the original channel.
         if path.get("previous_hop") != frame.next_hop:
             ingress = radio.radio_id
-        self._receipt_queue.append((ingress, frame))
         self.mailstore.radio_path(frame.message_id, pending_receipt={
             "radio_id": ingress, "frame": frame.encode().hex()
         })
+        if (ingress, frame) not in self._receipt_queue:
+            self._receipt_queue.append((ingress, frame))
 
     def flush_receipts(self):
         for radio_id, frame in list(self._receipt_queue):

@@ -435,10 +435,7 @@ class Operations:
         net.working_channel_offer = self._working_channel_offer
         net.working_channel_accept = self._working_channel_accept
         net.delivery_receipt_route = self._delivery_receipt_route
-        net.relay_handoff = lambda msg: (
-            self.coordinator.accept_relay(self, msg)
-            if self.coordinator is not None and len(self.coordinator.radios) > 1 else False
-        )
+        net.relay_handoff = self._relay_handoff
         net.receipt_transport = lambda frame: (
             self.coordinator.transmit_receipt(self, frame)
             if self.coordinator is not None and len(self.coordinator.radios) > 1
@@ -449,6 +446,15 @@ class Operations:
         net.on_calibration_frame = self._on_calibration_frame
         self._scale_session_timeouts(net, transport)
         return net
+
+    def _relay_handoff(self, message) -> bool:
+        primary = self.coordinator.radios[0] if self.coordinator is not None else self
+        server = getattr(primary, "ardos_cz", None)
+        if server is not None and server.accept_relay(self, message):
+            return True
+        if self.coordinator is not None and len(self.coordinator.radios) > 1:
+            return self.coordinator.accept_relay(self, message)
+        return False
 
     def _bridge_reachable(self, destination: str) -> bool:
         if (not self.config.auto_relay or self.coordinator is None
@@ -883,6 +889,7 @@ class Operations:
         to live session state, the preparing set covers the compression window
         before a session exists and after ``send_queued`` has marked SENDING.
         """
+        selected = None if message_ids is None else set(message_ids)
         if self._payload_active.is_set() or self._active_session_count():
             return dual(
                 "Mail was not deleted: a transfer is in progress.",
@@ -892,14 +899,24 @@ class Operations:
             return dual("Mail is in use by a radio.", "Poštu právě používá některé rádio.")
         preparing = (
             set(self._mail_preparing)
-            if message_ids is None
-            else set(message_ids).intersection(self._mail_preparing)
+            if selected is None
+            else selected.intersection(self._mail_preparing)
         )
         if preparing:
             return dual(
                 "Mail was not deleted: a selected message is being prepared for transmission.",
                 "Zprávy nebyly odstraněny: vybraná zpráva se připravuje k přenosu.",
             )
+        for meta in self.mailstore.list():
+            if selected is not None and meta['msg_id'] not in selected:
+                continue
+            path = meta.get('server_path', {})
+            if path.get('ingress') == 'rf_bridge' and (
+                path.get('state') in {'checking', 'uploading', 'unknown', 'accepted'}
+                or path.get('rf_receipt_due') or meta.get('radio_path', {}).get('pending_receipt')
+            ):
+                return dual('Relay mail is awaiting server delivery or a return RF receipt.',
+                            'Předávaná zpráva čeká na doručení serverem nebo zpáteční RF potvrzení.')
         return None
 
     def _mailbox_snapshot(self) -> MailboxSnapshot:
@@ -3623,6 +3640,12 @@ class Operations:
         *,
         flags: Flags = Flags.NONE,
     ) -> None:
+        # A server reconciliation may finish while RF compression is running.
+        # Recheck durable custody before announcing a stale prepared bundle.
+        if self.mailstore.server_path(mail.msg_id).get('state') in {
+            'checking', 'uploading', 'unknown', 'accepted', 'delivered'
+        }:
+            return
         path = self.mailstore.radio_path(mail.msg_id)
         self.net.send_message(
             final_dest=mail.final_dest,
@@ -3650,7 +3673,7 @@ class Operations:
             result = server.send(message_id)
             if result is not None:
                 return result
-        if self.mailstore.server_path(message_id).get("state") in {"uploading", "unknown", "accepted"}:
+        if self.mailstore.server_path(message_id).get("state") in {"checking", "uploading", "unknown", "accepted"}:
             return False
         if not _selected and self.coordinator is not None and len(self.coordinator.radios) > 1:
             return self.coordinator.send_queued(message_id, _skip_server=True)
@@ -3711,6 +3734,8 @@ class Operations:
                 return False
             mail = self.mailstore.get(message_id)
             if mail is None:
+                return False
+            if mail.folder == Folder.TRANSIT and self.mailstore.radio_path(message_id).get("ttl", 1) < 1:
                 return False
             route = self.routes.lookup(mail.final_dest)
             direct_route = route is not None and (
@@ -4453,10 +4478,8 @@ class Operations:
                 # it the reserialised bundle so every hop becomes part of the
                 # route history carried to the final destination.
                 message.payload_bytes = stored_inbound.to_bundle()
-                if self.coordinator is not None and len(self.coordinator.radios) > 1:
-                    self.mailstore.radio_path(message.msg_id, inbound_radio=self.radio_id,
-                                              previous_hop=message.source,
-                                              ttl=message.ttl - 1)
+                self.mailstore.radio_path(message.msg_id, inbound_radio=self.radio_id,
+                                          previous_hop=message.source, ttl=message.ttl - 1)
             except Exception as exc:
                 self._log(
                     dual(
@@ -4479,9 +4502,8 @@ class Operations:
                 stored = self.mailstore.store_incoming(message.payload_bytes, self.config.callsign, via=message.source)
                 message.payload_bytes = stored.to_bundle()
                 self._stored_inbound.add(message.msg_id)
-                if self.coordinator is not None and len(self.coordinator.radios) > 1:
-                    self.mailstore.radio_path(message.msg_id, inbound_radio=self.radio_id,
-                                              previous_hop=message.source, ttl=message.ttl - 1)
+                self.mailstore.radio_path(message.msg_id, inbound_radio=self.radio_id,
+                                          previous_hop=message.source, ttl=message.ttl - 1)
             return True
         except Exception:
             self._log(f"Incoming #{message.msg_id}: local import failed; no ACK.", LogLevel.ERROR, source="mail")

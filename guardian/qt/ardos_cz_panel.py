@@ -9,7 +9,12 @@ from ..i18n import dual
 
 def server_status(path):
     state = path.get('state', '')
+    if state == 'received' and path.get('origin_verified') is False:
+        relay = path.get('relay') or '?'
+        return dual(f'Via RF relay {relay}; origin unverified',
+                    f'Přes RF relay {relay}; původ neověřen')
     labels = {
+        'checking': ('Checking server route', 'Ověřuji serverovou cestu'),
         'uploading': ('Passing to server', 'Předávám serveru'),
         'unknown': ('Upload uncertain; checking', 'Výsledek neznámý; ověřuji'),
         'accepted': ('Server accepted; awaiting recipient', 'Server převzal; čeká na vyzvednutí'),

@@ -40,6 +40,7 @@ class Client:
         self.credentials = credentials
         self.token = ''
         self.scopes = set()
+        self.device_id = ''
         self.cancelled = threading.Event()
         self._request = request
         # Bundle current public CA roots with the client. Windows' legacy roots
@@ -109,6 +110,7 @@ class Client:
         saved = self.credentials.load()
         if not saved or not saved.get('device_id'):
             raise ServerError('not_enrolled')
+        self.device_id = saved['device_id']
         self.token = ''
         ch = self.request('POST', '/v1/challenge', {'device_id': saved['device_id']})
         key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(saved['private_key']))
