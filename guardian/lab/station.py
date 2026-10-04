@@ -28,6 +28,17 @@ def plain(value):
     return str(value)
 
 
+def session_view(session):
+    if session is None:
+        return None
+    return {"state": session.state.value, "transport": session.payload_transport,
+            "profile_token": session.g2_profile_token,
+            "progress_bytes": session.payload_progress_bytes,
+            "wire_bytes": session.payload_wire_size,
+            "transfer_started_at": session.transfer_started_at,
+            "payload_sent_at": session.payload_sent_at, "error": session.error}
+
+
 def main(connection, root: str, expected_fingerprint: str, peer: str, channel: dict | None = None) -> None:
     # Set this BEFORE importing configuration or any production object. Each
     # spawned process gets its own module constants and native ARDOP singleton.
@@ -47,6 +58,7 @@ def main(connection, root: str, expected_fingerprint: str, peer: str, channel: d
     runtime = None
     workers = None
     active_id = None
+    live_message = None
     started = None
     completions = {}
     shutdown_lock = threading.Lock()
@@ -170,7 +182,9 @@ def main(connection, root: str, expected_fingerprint: str, peer: str, channel: d
                     original_event = operations.net.on_event
 
                     def observe(message, event):
+                        nonlocal live_message
                         original_event(message, event)
+                        live_message = message
                         if message.direction == "out" and message.state.value in {"delivered", "failed", "cancelled"}:
                             completions.setdefault(message.msg_id, time.monotonic())
                         emit("session", message_id=message.msg_id, state=message.state.value,
@@ -227,13 +241,7 @@ def main(connection, root: str, expected_fingerprint: str, peer: str, channel: d
                      sc_ftn=plain(operations.ofdm_status()), busy=operations.network_settings_busy(),
                      message_id=active_id, status=meta["status"] if meta else None,
                      elapsed=(completions.get(active_id, now)-started) if started else None,
-                     session=({"state": session.state.value, "transport": session.payload_transport,
-                         "profile_token": session.g2_profile_token,
-                         "progress_bytes": session.payload_progress_bytes,
-                         "wire_bytes": session.payload_wire_size,
-                         "transfer_started_at": session.transfer_started_at,
-                         "payload_sent_at": session.payload_sent_at,
-                         "error": session.error} if session else None))
+                     session=session_view(session), live_session=session_view(live_message))
             while not pending.empty():
                 connection.send(pending.get())
             closing.wait(0.02)
