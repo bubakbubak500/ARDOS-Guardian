@@ -54,6 +54,10 @@ The handheld firmwares are optional. Guardian also supports Hamlib, serial PTT a
 
 Guard Mesh is a **local Bluetooth companion** to the PC application. A message composed on a supported Guard Mesh device is queued in Guardian's normal Outbox; Guardian applies its usual radio delivery rules. The Guard Mesh project also has its own MeshCore radio functions. Connecting the two does not make their radio networks interchangeable or create an automatic gateway between them.
 
+## Production LAB
+
+Open **Tools → Production LAB** to run two isolated Guardian stations on one PC, compare SC-FTN, VARA and ARDOP, and watch live measurements. The LAB uses this release's production runtime and control protocols. It also provides a local HTTP API and CLI for repeatable campaigns. See the [LAB setup, measurement and maintenance guide (Czech)](docs/GUARDIAN_LAB_CS.md).
+
 ## What Guardian does
 
 - **Direct messaging:** address text and attachments to another station by callsign.

@@ -16,6 +16,9 @@ root = Path(SPECPATH).resolve()
 datas = []
 binaries = []
 hiddenimports = []
+datas.append((str(root / "guardian" / "lab" / "dashboard.html"), "guardian/lab"))
+datas.append((str(root / "build" / "guardian-build.json"), "."))
+hiddenimports += collect_submodules("guardian.lab")
 
 ardop_root = root / "native" / "ardop"
 ardop_dll = ardop_root / "bin" / "guardian_ardop.dll"

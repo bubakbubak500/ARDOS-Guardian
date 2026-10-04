@@ -23,3 +23,17 @@ foreach ($test in @("qt", "compression", "ardop")) {
         throw "Frozen $test self-test failed (exit $($process.ExitCode))."
     }
 }
+$labReport = Join-Path $ReportDirectory ("lab-" + [guid]::NewGuid().ToString("N") + ".json")
+$labProcess = Start-Process -FilePath $Executable -ArgumentList @(
+    "--lab", "self-test", "--output", ('"' + $labReport + '"')
+) -WindowStyle Hidden -PassThru
+if (-not $labProcess.WaitForExit(180000)) {
+    Stop-Process -Id $labProcess.Id -ErrorAction SilentlyContinue
+    throw "Frozen LAB parity self-test timed out."
+}
+if (-not (Test-Path -LiteralPath $labReport)) { throw "Missing frozen LAB parity report." }
+$labResult = Get-Content -LiteralPath $labReport -Raw | ConvertFrom-Json
+if ($labProcess.ExitCode -ne 0 -or -not $labResult.passed -or $labResult.rf_started) {
+    throw "Frozen LAB parity self-test failed."
+}
+Write-Host "PASS LAB: two isolated production processes, matching runtime identity, no RF."

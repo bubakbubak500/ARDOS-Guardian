@@ -265,6 +265,9 @@ class GuardianMainWindow(QMainWindow):
         readiness = QAction(tr("menu.readiness"), self)
         readiness.triggered.connect(self._show_readiness)
         tools_menu.addAction(readiness)
+        production_lab = QAction(dual("Production LAB (two stations)", "Produkční LAB (dvě stanice)"), self)
+        production_lab.triggered.connect(self._open_production_lab)
+        tools_menu.addAction(production_lab)
         diagnostics = QAction(tr("menu.diagnostics"), self)
         diagnostics.triggered.connect(self._show_diagnostics)
         diagnostics_menu = tools_menu.addMenu(tr("menu.diagnostics"))
@@ -813,6 +816,13 @@ class GuardianMainWindow(QMainWindow):
         workspace = getattr(self, "workspace_names", {}).get("log")
         if workspace is not None:
             workspace.invalidate_format()
+
+    def _open_production_lab(self) -> None:
+        from ..lab.cli import launch_dashboard
+        try:
+            launch_dashboard()
+        except Exception as exc:
+            QMessageBox.warning(self, "Guardian LAB", str(exc))
 
     def show_spectrum(self) -> None:
         self.spectrum_window.show()

@@ -57,6 +57,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Application icon generation failed." }
     & $python tools\write_version_info.py --output $versionInfo
     if ($LASTEXITCODE -ne 0) { throw "Version metadata generation failed." }
+    & $python tools\write_build_identity.py
+    if ($LASTEXITCODE -ne 0) { throw "Build identity generation failed." }
 
     Write-Host "Building Guardian application..." -ForegroundColor Cyan
     & $python -m PyInstaller --noconfirm --clean $spec

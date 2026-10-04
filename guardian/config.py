@@ -31,8 +31,10 @@ def config_dir() -> Path:
 
     Uses %APPDATA%\\Guardian on Windows, falling back to ~/.guardian.
     """
+    isolated = os.environ.get("GUARDIAN_STATE_DIR")
     appdata = os.environ.get("APPDATA")
-    base = Path(appdata) / "Guardian" if appdata else Path.home() / ".guardian"
+    base = (Path(isolated).expanduser().resolve() if isolated else
+            Path(appdata) / "Guardian" if appdata else Path.home() / ".guardian")
     base.mkdir(parents=True, exist_ok=True)
     return base
 

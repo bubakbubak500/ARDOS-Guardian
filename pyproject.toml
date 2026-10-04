@@ -31,6 +31,12 @@ dev = [
 [project.gui-scripts]
 guardian = "guardian.app:main"
 
+[project.scripts]
+guardian-lab = "guardian.lab.cli:main"
+
+[tool.setuptools.package-data]
+"guardian.lab" = ["dashboard.html"]
+
 [project.urls]
 Homepage = "https://github.com/bubakbubak500/ARDOS-Guardian"
 Documentation = "https://github.com/bubakbubak500/ARDOS-Guardian#readme"

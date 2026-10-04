@@ -16,6 +16,11 @@ def _set_app_user_model_id() -> None:
 
 
 def main() -> None:
+    import sys
+    if "--lab" in sys.argv:
+        from .lab.cli import main as lab_main
+        lab_main(sys.argv[sys.argv.index("--lab") + 1:])
+        return
     _set_app_user_model_id()
     from .qt.app import main as qt_main
 
