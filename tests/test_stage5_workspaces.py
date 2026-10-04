@@ -362,6 +362,7 @@ def test_network_pages_are_flat_with_live_topology_last() -> None:
             tr("network.heard"),
             tr("network.topology"),
             tr("network.discovery"),
+            "ARDOS CZ",
             tr("network.live_topology"),
         ]
         # No page hides a second row of tabs inside itself.

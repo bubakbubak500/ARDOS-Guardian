@@ -77,14 +77,14 @@ class NetworkWorkspace(QWidget):
         title.setObjectName("PanelHeader")
         outer.addWidget(title)
         self.tabs = QTabWidget()
-        # Five pages of Czech labels can outgrow a narrow window. Eliding keeps
+        # Czech page labels can outgrow a narrow window. Eliding keeps
         # every page one click away; scroll buttons would hide the last one,
         # which is exactly the page an operator is least likely to go looking
         # for.
         self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
         self.tabs.tabBar().setUsesScrollButtons(False)
         # Planned network first, then what is actually on the air, followed by
-        # discovery and live topology. Nothing here nests a second row of tabs
+        # discovery, the server transport and live topology. Nothing here nests a second row of tabs
         # inside a tab.
         self.tabs.addTab(
             self._scrollable_page(self._routes_page()),
@@ -102,12 +102,12 @@ class NetworkWorkspace(QWidget):
             self._scrollable_page(self._discovery_page()),
             tr("network.discovery"),
         )
+        from .ardos_cz_panel import ArdosPanel
+        self.tabs.addTab(self._scrollable_page(ArdosPanel(runtime)), "ARDOS CZ")
         self.tabs.addTab(
             self._scrollable_page(self._live_topology_page()),
             tr("network.live_topology"),
         )
-        from .ardos_cz_panel import ArdosPanel
-        self.tabs.addTab(ArdosPanel(runtime), "ARDOS CZ")
         outer.addWidget(self.tabs, 1)
         self.refresh()
 
