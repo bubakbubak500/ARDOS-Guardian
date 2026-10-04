@@ -1,8 +1,8 @@
 # ARDOS CZ v Guardianu
 
 Volitelný internetový transport pro přímé PC stanice a autorizované RF relaye.
-Přímé stanice jsou součástí 1.1.21; níže popsaný RF bridge vyžaduje novější
-klientský kód i server. Již vydaný instalátor 1.1.21 bridge neobsahuje.
+Přímé stanice jsou součástí 1.1.21; níže popsaný RF bridge vyžaduje
+klienta 1.1.22 a aktualizovaný server. Instalátor 1.1.21 bridge neobsahuje.
 Výchozí stav je vypnuto.
 Klient je součástí tohoto veřejného repozitáře. Implementace serveru,
 administrace a provozní tajemství patří do samostatného privátního repozitáře.
