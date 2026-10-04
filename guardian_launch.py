@@ -92,6 +92,42 @@ def _run_ardop_self_test() -> None:
     _write_report(report_path, report)
 
 
+def _run_ardos_cz_self_test() -> None:
+    report_path = _self_test_report_path(sys.argv, "--ardos-cz-self-test-report")
+    try:
+        import ssl
+        import urllib.request
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from guardian.ardos_cz.client import Client
+        from guardian.ardos_cz.credentials import WindowsCredentials
+        from guardian.ardos_cz.protocol import inspect_bundle
+        from guardian.message import MailMessage
+
+        key = Ed25519PrivateKey.generate()
+        proof = b"ARDOS-CZ frozen build verification"
+        key.public_key().verify(key.sign(proof), proof)
+        client = Client("https://example.test", "SELFTEST", None)
+        handler = next(h for h in client._opener.handlers
+                       if isinstance(h, urllib.request.HTTPSHandler))
+        assert handler._context.verify_mode == ssl.CERT_REQUIRED
+        assert handler._context.check_hostname
+        assert handler._context.cert_store_stats()['x509_ca'] > 0
+        assert WindowsCredentials(client.url, 'SELFTEST', 'selftest').target
+        bundle = MailMessage(msg_id=1, source='SELFTEST', final_dest='TESTDEST',
+                             subject='Test', body='Frozen build').to_bundle()
+        assert inspect_bundle(bundle)['content_hash']
+        report = "PASS\nARDOS CZ: Ed25519, trusted CA roots, hostname verification, ZIP contract.\n"
+        if "--ardos-cz-self-test-url" in sys.argv:
+            url = sys.argv[sys.argv.index("--ardos-cz-self-test-url") + 1]
+            ready = Client(url, 'SELFTEST', None).request('GET', '/readyz')
+            assert ready.get('ok') is True and ready.get('protocol') == 1
+            report += "Live HTTPS readiness verified.\n"
+    except BaseException:
+        _write_report(report_path, traceback.format_exc())
+        raise
+    _write_report(report_path, report)
+
+
 def _run_qt_self_test() -> None:
     report_path = _self_test_report_path(sys.argv, "--qt-self-test-report")
     try:
@@ -142,6 +178,8 @@ if __name__ == "__main__":
         _run_ardop_self_test()
     elif "--qt-self-test" in sys.argv:
         _run_qt_self_test()
+    elif "--ardos-cz-self-test" in sys.argv:
+        _run_ardos_cz_self_test()
     else:
         from guardian.app import main
 
