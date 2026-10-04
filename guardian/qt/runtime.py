@@ -58,6 +58,9 @@ class ShellRuntime:
         )
         self.radio_coordinator = RadioCoordinator(self.operations)
         self.configure_second_radio()
+        from ..ardos_cz.service import ArdosService
+        self.ardos_cz = ArdosService(self.operations)
+        self.operations.ardos_cz = self.ardos_cz
         self.refresh()
         self.request_dependency_refresh()
         self.events.publish(
@@ -96,6 +99,7 @@ class ShellRuntime:
             radio.workers.drain()
 
     def tick(self) -> None:
+        self.ardos_cz.tick()
         if not hasattr(self, "warships"):
             from ..warships.service import WarshipsService
             self.warships = WarshipsService(self.operations)
@@ -331,6 +335,7 @@ class ShellRuntime:
         )
 
     def close(self) -> None:
+        self.ardos_cz.close()
         for radio in self.radio_coordinator.radios[1:]:
             radio.close()
             radio.workers.close(wait=False)

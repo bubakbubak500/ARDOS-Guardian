@@ -105,7 +105,14 @@ class RadioCoordinator:
             return next((r for r in self.radios if r.audio_transport is not None), None)
         return None
 
-    def send_queued(self, message_id, *, automatic=False):
+    def send_queued(self, message_id, *, automatic=False, _skip_server=False):
+        server = getattr(self.radios[0], "ardos_cz", None)
+        if server is not None and not _skip_server:
+            result = server.send(message_id)
+            if result is not None:
+                return result
+        if self.mailstore.server_path(message_id).get("state") in {"uploading", "unknown", "accepted"}:
+            return False
         lock = self.radios[0]._mail_mutation_lock
         if not lock.acquire(blocking=False):
             return False
@@ -128,7 +135,7 @@ class RadioCoordinator:
                                     "Připojte VARA tohoto rádia; zpráva zůstává ve frontě."), source="mail")
                 return False
             self.mailstore.radio_path(message_id, outbound_radio=radio.radio_id)
-            return radio.send_queued(message_id, _selected=True)
+            return radio.send_queued(message_id, _selected=True, _skip_server=True)
         finally:
             lock.release()
 

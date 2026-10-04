@@ -57,7 +57,10 @@ class MessageStore:
             }
             pending = self.index_path.with_suffix(".json.pending")
             try:
-                pending.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                with pending.open("w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(payload, indent=2))
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 os.replace(pending, self.index_path)
             finally:
                 try:
@@ -81,7 +84,7 @@ class MessageStore:
         # Rebuilding an entry (for example when a relay re-stores a bundle)
         # must not erase times already learned locally.
         previous = self._index.get(mail.msg_id, {})
-        for key in ("received_at", "sent_at", "radio_path", "remote_request"):
+        for key in ("received_at", "sent_at", "radio_path", "remote_request", "server_path"):
             if key in previous:
                 meta[key] = previous[key]
         return meta
@@ -110,7 +113,14 @@ class MessageStore:
     ) -> None:
         bundle = mail.to_bundle()
         with self._lock:
-            self._bundle_path(mail.msg_id).write_bytes(bundle)
+            previous = self._index.get(mail.msg_id)
+            path = self._bundle_path(mail.msg_id)
+            pending = path.with_suffix(".bundle.pending")
+            with pending.open("wb") as handle:
+                handle.write(bundle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(pending, path)
             meta = self._meta(mail, len(bundle))
             if remote_request is not None:
                 meta["remote_request"] = dict(remote_request)
@@ -122,7 +132,14 @@ class MessageStore:
             if sent_at is not None and not meta.get("sent_at"):
                 meta["sent_at"] = float(sent_at)
             self._index[mail.msg_id] = meta
-            self._save_index()
+            try:
+                self._save_index()
+            except Exception:
+                if previous is None:
+                    self._index.pop(mail.msg_id, None)
+                else:
+                    self._index[mail.msg_id] = previous
+                raise
 
     def list(self, folder: str | None = None) -> list[dict]:
         with self._lock:
@@ -261,6 +278,64 @@ class MessageStore:
                 self._save_index()
             return value
 
+    def server_path(self, msg_id: int, **updates) -> dict:
+        """Durable internet custody, kept separate from RF provenance."""
+        with self._lock:
+            old = self._index.get(msg_id)
+            if old is None:
+                return {}
+            value = dict(old.get("server_path", {}))
+            if updates:
+                value.update(updates)
+                self._index[msg_id] = {**old, "server_path": value}
+                try:
+                    self._save_index()
+                except Exception:
+                    self._index[msg_id] = old
+                    raise
+            return value
+
+    def import_server(self, bundle: bytes, my_callsign: str, receipt: dict) -> MailMessage:
+        """ACK is allowed only after bundle and index have both been flushed.
+
+        The legacy RF index remains keyed by msg_id. A conflicting identity is
+        retained by the server, never overwritten or ACKed locally. This is the
+        v1 migration boundary until RF supports a larger identity namespace.
+        """
+        from ..ardos_cz.protocol import inspect_bundle
+        info = inspect_bundle(bundle)
+        if info["final_dest"] != my_callsign.strip().upper():
+            raise ValueError("wrong_destination")
+        if info["content_hash"] != receipt["content_hash"]:
+            raise ValueError("content_hash_mismatch")
+        with self._lock:
+            old = self._index.get(info["msg_id"])
+            if old is not None:
+                existing = self.get(info["msg_id"])
+                identity = inspect_bundle(existing.to_bundle())
+                if identity["content_hash"] != info["content_hash"]:
+                    raise ValueError("local_message_id_conflict")
+                self.server_path(info["msg_id"], **receipt, state="received")
+                return existing
+            mail = MailMessage.from_bundle(bundle)
+            mail.folder, mail.status, mail.read = Folder.INBOX, Status.RECEIVED, False
+            path = self._bundle_path(mail.msg_id)
+            pending = path.with_suffix(".bundle.pending")
+            with pending.open("wb") as handle:
+                handle.write(bundle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(pending, path)
+            meta = self._meta(mail, len(bundle))
+            meta.update(received_at=time.time(), server_path={**receipt, "state": "received"})
+            self._index[mail.msg_id] = meta
+            try:
+                self._save_index()
+            except Exception:
+                self._index.pop(mail.msg_id, None)
+                raise
+            return mail
+
     def delete(self, msg_id: int, *, folder: str | None = None) -> bool:
         with self._lock:
             indexed = self._index.get(msg_id)
@@ -309,12 +384,23 @@ class MessageStore:
     def store_incoming(self, bundle: bytes, my_callsign: str, *, via: str = "") -> MailMessage:
         """Persist a received bundle into Inbox (for me) or Transit (to relay)."""
         mail = MailMessage.from_bundle(bundle)
-        if via and via not in mail.hops:
-            mail.hops.append(via)
-        mail.read = False   # incoming starts unread
-        if mail.final_dest.strip().upper() == my_callsign.strip().upper():
-            mail.folder, mail.status = Folder.INBOX, Status.RECEIVED
-        else:
-            mail.folder, mail.status = Folder.TRANSIT, Status.WAITING_PICKUP
-        self.add(mail, received_at=time.time())
-        return mail
+        with self._lock:
+            existing = self._index.get(mail.msg_id)
+            if existing and (existing.get("source") != mail.source or existing.get("final_dest") != mail.final_dest):
+                raise ValueError("local_message_id_conflict")
+            if existing and existing.get("server_path"):
+                from ..ardos_cz.protocol import inspect_bundle
+                previous = self.get(mail.msg_id)
+                if (inspect_bundle(previous.to_bundle())["content_hash"]
+                        != inspect_bundle(mail.to_bundle())["content_hash"]):
+                    raise ValueError("local_message_id_conflict")
+                return previous
+            if via and via not in mail.hops:
+                mail.hops.append(via)
+            mail.read = False   # incoming starts unread
+            if mail.final_dest.strip().upper() == my_callsign.strip().upper():
+                mail.folder, mail.status = Folder.INBOX, Status.RECEIVED
+            else:
+                mail.folder, mail.status = Folder.TRANSIT, Status.WAITING_PICKUP
+            self.add(mail, received_at=time.time())
+            return mail

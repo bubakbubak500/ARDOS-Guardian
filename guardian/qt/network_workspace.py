@@ -106,6 +106,8 @@ class NetworkWorkspace(QWidget):
             self._scrollable_page(self._live_topology_page()),
             tr("network.live_topology"),
         )
+        from .ardos_cz_panel import ArdosPanel
+        self.tabs.addTab(ArdosPanel(runtime), "ARDOS CZ")
         outer.addWidget(self.tabs, 1)
         self.refresh()
 

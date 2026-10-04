@@ -377,6 +377,7 @@ class Orchestrator:
         self.transport.on_frame = self._on_frame
         self.routes = routes
         self.on_event = on_event
+        self.accept_payload = None  # optional durable-import gate before any receipt
         self.auto_complete = auto_complete
         self.begin_transfer = begin_transfer
         self.payload = payload  # PayloadBackend | None
@@ -800,6 +801,17 @@ class Orchestrator:
             msg.error = "payload CRC failed"
             self._emit(msg, "payload failed — sent CANCEL")
             return
+        if self.accept_payload is not None:
+            try:
+                accepted = self.accept_payload(msg)
+            except Exception:
+                accepted = False
+            if not accepted:
+                self._send(FrameType.CANCEL, msg)
+                self._enter(msg, SessionState.FAILED)
+                msg.error = "local import failed"
+                self._emit(msg, "local import failed — no delivery receipt sent")
+                return
         self._send(FrameType.RECEIVED, msg)
         if self.callsign == msg.final_dest:
             self._send_delivery_receipt(msg, msg.source)

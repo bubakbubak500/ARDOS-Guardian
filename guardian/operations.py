@@ -16,7 +16,7 @@ import numpy as np
 from .config import G2_MAX_TX_SCALE, StationConfig, config_dir
 from .install.dependencies import find_vara_fm, find_vara_hf
 from .i18n import dual
-from .message import Folder, MessageStore, Status
+from .message import Folder, MailMessage, MessageStore, Status
 from .modem import make_modem
 from .modem.audio import (
     PTT_LEAD_SECONDS,
@@ -424,6 +424,7 @@ class Operations:
             clock=time.monotonic if isinstance(transport, AudioControlTransport) else None,
         )
         net.on_alert = self._on_alert
+        net.accept_payload = self._accept_incoming_payload
         net.on_discovery_event = self._on_discovery_event
         net.channel_frequency = self.current_frequency
         net.ptt_delay_request = self._vara_keying_delay_request
@@ -3643,9 +3644,16 @@ class Operations:
             source="mail",
         )
 
-    def send_queued(self, message_id: int, *, _selected: bool = False) -> bool:
+    def send_queued(self, message_id: int, *, _selected: bool = False, _skip_server: bool = False) -> bool:
+        server = getattr(self, "ardos_cz", None)
+        if server is not None and not _skip_server:
+            result = server.send(message_id)
+            if result is not None:
+                return result
+        if self.mailstore.server_path(message_id).get("state") in {"uploading", "unknown", "accepted"}:
+            return False
         if not _selected and self.coordinator is not None and len(self.coordinator.radios) > 1:
-            return self.coordinator.send_queued(message_id)
+            return self.coordinator.send_queued(message_id, _skip_server=True)
         if self.audio_transport is None:
             self._log(
                 dual(
@@ -4458,6 +4466,26 @@ class Operations:
                     LogLevel.ERROR,
                     source="mail",
                 )
+
+    def _accept_incoming_payload(self, message) -> bool:
+        """Persist and check local identity before the RF engine emits an ACK."""
+        if not message.payload_bytes:
+            return True  # protocol-only simulation / text control traffic
+        try:
+            with self._mail_mutation_lock:
+                parsed = MailMessage.from_bundle(message.payload_bytes)
+                if parsed.msg_id != message.msg_id or parsed.final_dest != message.final_dest:
+                    raise ValueError("bundle/session identity mismatch")
+                stored = self.mailstore.store_incoming(message.payload_bytes, self.config.callsign, via=message.source)
+                message.payload_bytes = stored.to_bundle()
+                self._stored_inbound.add(message.msg_id)
+                if self.coordinator is not None and len(self.coordinator.radios) > 1:
+                    self.mailstore.radio_path(message.msg_id, inbound_radio=self.radio_id,
+                                              previous_hop=message.source, ttl=message.ttl - 1)
+            return True
+        except Exception:
+            self._log(f"Incoming #{message.msg_id}: local import failed; no ACK.", LogLevel.ERROR, source="mail")
+            return False
 
     def _on_vara_notification(self, text: str) -> None:
         # BUFFER can change many times per second during a transfer. Its latest

@@ -31,7 +31,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..i18n import language, tr
+from ..i18n import dual, language, tr
+from .ardos_cz_panel import server_status
 from ..message import (
     Attachment,
     Folder,
@@ -491,6 +492,9 @@ class MailWorkspace(QWidget):
         actions.addWidget(self.reply_button)
         actions.addWidget(self.forward_button)
         actions.addWidget(self.send_button)
+        self.leave_button = QPushButton(dual("Leave a message", "Zanechat zprávu"))
+        self.leave_button.clicked.connect(self.leave_selected)
+        actions.addWidget(self.leave_button)
         actions.addStretch()
         actions.addWidget(self.delete_button)
         reader_layout.addLayout(actions)
@@ -516,6 +520,7 @@ class MailWorkspace(QWidget):
         self.reply_button.setText(tr("mail.reply"))
         self.forward_button.setText(tr("mail.forward"))
         self.send_button.setText(tr("mail.send_queued"))
+        self.leave_button.setText(dual("Leave a message", "Zanechat zprávu"))
         self.delete_button.setText(tr("mail.delete"))
         self._reader_signature = None
         self.refresh()
@@ -559,6 +564,7 @@ class MailWorkspace(QWidget):
             metadata.get("final_dest"),
             metadata.get("subject"),
             metadata.get("status"),
+            metadata.get("server_path", {}).get("state"),
             metadata.get("folder"),
             metadata.get("size"),
             metadata.get("att"),
@@ -781,7 +787,7 @@ class MailWorkspace(QWidget):
                 values = (
                     peer,
                     metadata.get("subject") or tr("mail.no_subject"),
-                    tr(f"status.{metadata.get('status', '')}"),
+                    server_status(metadata.get("server_path", {})) or tr(f"status.{metadata.get('status', '')}"),
                     str(metadata.get("att", 0)),
                     f"{metadata.get('size', 0)} B",
                     self._format_local_time(timestamp),
@@ -918,7 +924,7 @@ class MailWorkspace(QWidget):
                 source=message.source,
                 dest=message.final_dest,
                 subject=message.subject,
-                status=tr(f"status.{message.status}"),
+                status=server_status(self.runtime.mailstore.server_path(message.msg_id)) or tr(f"status.{message.status}"),
                 route=route,
                 attachments=attachments,
                 line="-" * 52,
@@ -1008,6 +1014,12 @@ class MailWorkspace(QWidget):
     def send_selected(self) -> None:
         if self.selected_id is None or len(self.selected_ids) != 1:
             return
+        server = getattr(self.runtime, "ardos_cz", None)
+        if server is not None:
+            result = server.send(self.selected_id)
+            if result is not None:
+                self.refresh()
+                return
         # `send_queued()` can also return False because an operator cancelled
         # a required manual no-CAT QSY. Do not misreport that deliberate safety
         # stop as a missing control channel.
@@ -1033,3 +1045,18 @@ class MailWorkspace(QWidget):
             return
         self.runtime.refresh()
         self.refresh()
+
+    def leave_selected(self) -> None:
+        if self.selected_id is None or len(self.selected_ids) != 1:
+            return
+        answer = QMessageBox.question(self, "ARDOS CZ", dual(
+            "Store this message on the server until the recipient imports it or retention expires? This is not immediate delivery.",
+            "Uložit zprávu na server do vyzvednutí adresátem nebo do vypršení úložní doby? Nejde o okamžité doručení."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            server = getattr(self.runtime, "ardos_cz", None)
+            if server is None or not server.send(self.selected_id, leave=True):
+                QMessageBox.information(self, "ARDOS CZ", dual(
+                    "Enable and register ARDOS CZ; select your own queued message and wait for the current operation.",
+                    "Zapněte a registrujte ARDOS CZ; vyberte vlastní zprávu k odeslání a vyčkejte na dokončení operace."))
+            self.refresh()

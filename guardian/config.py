@@ -120,6 +120,11 @@ class StationConfig:
     callsign: str = "NOCALL"
     operator_name: str = ""
 
+    # Opt-in internet transport. Device secrets live in Credential Manager.
+    ardos_cz_enabled: bool = False
+    ardos_cz_url: str = ""
+    ardos_cz_preference: str = "server_first"  # server_first | rf_only
+
     # Radio 1 retains the historical flat profile. Radio 2 only overrides
     # hardware/channel fields; identity and mailbox policy remain shared.
     dual_radio_enabled: bool = False

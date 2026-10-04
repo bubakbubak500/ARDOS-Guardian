@@ -1322,6 +1322,19 @@ class SettingsDialog(QDialog):
                 "nemění kódování přenášeného obsahu.",
             ),
         )
+        self.ardos_cz_enabled = QCheckBox(dual("Enable ARDOS CZ", "Zapnout ARDOS CZ"))
+        self.ardos_cz_enabled.setChecked(self.config.ardos_cz_enabled)
+        self.ardos_cz_url = QLineEdit(self.config.ardos_cz_url)
+        self.ardos_cz_url.setPlaceholderText("https://server.tailnet.ts.net")
+        self.ardos_cz_preference = QComboBox()
+        self.ardos_cz_preference.addItem(dual("Prefer server, RF fallback", "Přednostně server, jinak RF"), "server_first")
+        self.ardos_cz_preference.addItem(dual("RF; explicit server deposit only", "RF; pouze výslovný depozit na server"), "rf_only")
+        self.ardos_cz_preference.setCurrentIndex(max(0, self.ardos_cz_preference.findData(self.config.ardos_cz_preference)))
+        form.addRow(self.ardos_cz_enabled)
+        form.addRow("ARDOS CZ URL", self.ardos_cz_url)
+        form.addRow(dual("Transport preference", "Preference přenosu"), self.ardos_cz_preference)
+        form.addRow(QLabel(dual("Register and connect in Network → ARDOS CZ.",
+                               "Registrace a připojení: Síť → ARDOS CZ.")))
         self.default_ttl = _spin(1, 32, self.config.default_ttl)
         self.separate_working_channels = QCheckBox(
             tr("settings.separate_working_channels")
@@ -1397,6 +1410,9 @@ class SettingsDialog(QDialog):
         operations = self.operations
         if operations is None:
             return None
+        server = getattr(operations, "ardos_cz", None)
+        if server is not None and server._active:
+            return dual("Wait for the current ARDOS CZ request.", "Počkejte na dokončení požadavku ARDOS CZ.")
         coordinator = getattr(operations, "coordinator", None)
         if coordinator is not None and coordinator.busy():
             return dual("Wait for both radios to finish their current operations.",
@@ -1449,6 +1465,12 @@ class SettingsDialog(QDialog):
 
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
+        if self.ardos_cz_enabled.isChecked():
+            from ..ardos_cz.client import server_url
+            try:
+                server_url(self.ardos_cz_url.text())
+            except ValueError as exc:
+                errors.append(str(exc))
         callsign = self.callsign.text().strip().upper()
         if self.payload_backend.currentData() == "ardop":
             try:
@@ -1620,6 +1642,9 @@ class SettingsDialog(QDialog):
         cfg.morse_id_after_ack = self.morse_id_after_ack.isChecked()
         cfg.apply_vara_mode(self.vara_mode.currentText())
         cfg.default_ttl = self.default_ttl.value()
+        cfg.ardos_cz_enabled = self.ardos_cz_enabled.isChecked()
+        cfg.ardos_cz_url = self.ardos_cz_url.text().strip().rstrip("/")
+        cfg.ardos_cz_preference = self.ardos_cz_preference.currentData()
         cfg.auto_route = True
         cfg.auto_relay = True
         cfg.auto_deliver = True
