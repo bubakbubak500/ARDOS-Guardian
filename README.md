@@ -12,6 +12,8 @@
 
 [Download Guardian](../../releases/latest) · [Explore the ecosystem](#one-ecosystem-several-ways-to-communicate) · [Project status](STATUS.md)
 
+☕ **Like Guardian?** If you find the project useful and want to support its continued development, you can [buy me a coffee on Ko-fi](https://ko-fi.com/bubakbubak500).
+
 </div>
 
 <p align="center">
