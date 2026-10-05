@@ -114,7 +114,8 @@ def transmit_waveform(sd, samples, *, device, sample_rate: int,
                       tail_seconds: float = PTT_TAIL_SECONDS,
                       guard_seconds: float = TX_GUARD_SECONDS,
                       write_chunk_frames: int = 0,
-                      before_play=None, after_release=None) -> float:
+                      before_play=None, after_release=None,
+                      output_stream=None) -> float:
     """Key the radio, play a waveform, unkey. Returns the seconds it aired.
 
     The single place this discipline is written down. Three callers need it -- the
@@ -145,10 +146,13 @@ def transmit_waveform(sd, samples, *, device, sample_rate: int,
     guard = np.zeros(int(max(0.0, guard_seconds) * rate))
     waveform = np.concatenate([np.asarray(samples, dtype=np.float64), guard])
     chunk_frames = max(0, int(write_chunk_frames))
-    stream = _open_output_stream(
-        sd, device=device, sample_rate=rate,
-        blocksize=chunk_frames,
-    )
+    stream = output_stream
+    owns_stream = stream is None
+    if owns_stream:
+        stream = _open_output_stream(
+            sd, device=device, sample_rate=rate,
+            blocksize=chunk_frames,
+        )
     stream_started = False
     try:
         if before_play is not None:
@@ -192,7 +196,7 @@ def transmit_waveform(sd, samples, *, device, sample_rate: int,
                     if after_release is not None:
                         after_release()
                 finally:
-                    if stream is not None:
+                    if stream is not None and owns_stream:
                         stream.close()
     return len(waveform) / rate
 
@@ -704,6 +708,8 @@ SNR_MAX_DB = 40.0
 
 
 class AudioControlTransport(ControlTransport):
+    supports_tx_completion = True
+
     def _modem_airtime(self, payload_bytes: int) -> float:
         """Longest frame this modem puts on air, or 0 for a modem without one."""
         airtime = getattr(self.modem, "airtime", None)
@@ -775,6 +781,7 @@ class AudioControlTransport(ControlTransport):
         self._tx_suspended = False
         self._stopped = False
         self._deferred_tx: list[tuple[str, object]] = []
+        self._deferred_completions: dict[int, tuple[object, object]] = {}
         self._post_tx_pending = 0
         self._peer_ready_at = 0.0
         self._acquisition_ready_at = 0.0
@@ -893,8 +900,12 @@ class AudioControlTransport(ControlTransport):
             self._stopped = True
             self._tx_suspended = False
             self._deferred_tx.clear()
+            callbacks = list(self._deferred_completions.values())
+            self._deferred_completions.clear()
             self._cancelled_tx.update(self._pending_frames)
             self._tx_condition.notify_all()
+        for complete, _ in callbacks:
+            complete(False)
         self._stop_rx()
 
     def _stop_rx(self) -> None:
@@ -930,9 +941,11 @@ class AudioControlTransport(ControlTransport):
         with self._tx_condition:
             self._tx_suspended = False
             held, self._deferred_tx = self._deferred_tx, []
+            completions, self._deferred_completions = self._deferred_completions, {}
         for kind, value in held:
             if kind == "frame":
-                self.send(value)
+                complete, allowed = completions.get(id(value), (None, None))
+                self.send(value, on_complete=complete, allowed=allowed)
             else:
                 text, wpm = value
                 self.send_morse_after_pending(text, wpm=wpm)
@@ -956,16 +969,23 @@ class AudioControlTransport(ControlTransport):
             )
 
         with self._tx_condition:
+            discarded = [value for kind, value in self._deferred_tx
+                         if kind == "frame" and cancelled(value)]
             self._deferred_tx = [
                 (kind, value) for kind, value in self._deferred_tx
                 if kind != "frame" or not cancelled(value)
             ]
+            callbacks = [self._deferred_completions.pop(id(frame), (None, None))[0]
+                         for frame in discarded]
             # A request can already have a worker yet still be waiting for a
             # busy channel. Cancel that admission too, without cancelling its
             # final receipts or a later, independently admitted request.
             self._cancelled_tx.update(token for token, frame in self._pending_frames.items()
                                       if frame is not None and cancelled(frame))
             self._tx_condition.notify_all()
+        for complete in callbacks:
+            if complete is not None:
+                complete(False)
 
     # ------------------------------------------------------------------ #
     #  Transmit                                                           #
@@ -978,12 +998,14 @@ class AudioControlTransport(ControlTransport):
                     on_complete(False)
                 return
             if self._tx_suspended:
-                if on_complete:
+                if on_complete and frame.type not in {FrameType.HAVE_MSG, FrameType.START_VARA}:
                     on_complete(False)
                     return
                 item = ("frame", frame)
                 if item not in self._deferred_tx:
                     self._deferred_tx.append(item)
+                if on_complete:
+                    self._deferred_completions[id(frame)] = (on_complete, allowed)
                 return
             if not self._pending_tx:
                 self._tx_failed = False

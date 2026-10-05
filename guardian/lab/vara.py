@@ -13,7 +13,7 @@ import time
 from .identity import sha256
 
 
-def listeners() -> dict[int, int]:
+def tcp_owners(*, established: bool = False) -> dict[int, int]:
     if sys.platform != "win32":
         raise RuntimeError("Owned VARA processes currently require Windows")
     class Row(ctypes.Structure):
@@ -21,16 +21,23 @@ def listeners() -> dict[int, int]:
                     ("state", "local_addr", "local_port", "remote_addr", "remote_port", "pid")]
     size = ctypes.c_ulong(0)
     api = ctypes.windll.iphlpapi.GetExtendedTcpTable
-    result = api(None, ctypes.byref(size), False, socket.AF_INET, 3, 0)
+    table_class = 5 if established else 3  # OWNER_PID_ALL / OWNER_PID_LISTENER
+    result = api(None, ctypes.byref(size), False, socket.AF_INET, table_class, 0)
     if result not in (0, 122):
         raise OSError(result, "Cannot query TCP ownership")
     buf = ctypes.create_string_buffer(size.value)
-    result = api(buf, ctypes.byref(size), False, socket.AF_INET, 3, 0)
+    result = api(buf, ctypes.byref(size), False, socket.AF_INET, table_class, 0)
     if result:
         raise OSError(result, "Cannot query TCP ownership")
     count = ctypes.c_ulong.from_buffer(buf).value
     rows = (Row * count).from_buffer(buf, ctypes.sizeof(ctypes.c_ulong))
-    return {socket.ntohs(row.local_port & 0xffff): int(row.pid) for row in rows if row.state == 2}
+    allowed = {2, 5} if established else {2}  # LISTEN / ESTABLISHED
+    return {socket.ntohs(row.local_port & 0xffff): int(row.pid)
+            for row in rows if row.state in allowed}
+
+
+def listeners() -> dict[int, int]:
+    return tcp_owners()
 
 
 def read_ini(path: Path):
@@ -77,7 +84,7 @@ def prepare(endpoint: dict, config: dict, destination: Path) -> dict:
         raise ValueError("LAB VARA ports are already owned by another process")
     destination.mkdir(parents=True, exist_ok=False)
     for item in source.iterdir():
-        if item.is_file() and item.suffix.lower() in {".exe", ".dll", ".ocx", ".ini", ".wav"}:
+        if item.is_file() and item.suffix.lower() in {".exe", ".dll", ".ocx", ".ini", ".wav", ".dat"}:
             shutil.copy2(item, destination / item.name)
     parser.set("Setup", "TCP Command Port", str(base))
     parser.set("Setup", "TCP Scan Port", str(base+2))
@@ -134,10 +141,12 @@ class OwnedVara:
             raise RuntimeError("Owned VARA process is no longer running")
         if sha256(Path(self.report["executable"])) != self.report["sha256"]:
             raise RuntimeError("VARA executable changed during the campaign")
-        found = listeners()
+        found = tcp_owners(established=True)
         if any(found.get(self.report[key]) != self.process.pid
                for key in ("command_port", "data_port")):
-            raise RuntimeError("VARA TCP ownership changed")
+            observed = {key: found.get(self.report[key])
+                        for key in ("command_port", "data_port")}
+            raise RuntimeError(f"VARA TCP ownership changed: {observed}")
 
     def close(self):
         if self.process is not None and self.process.poll() is None:

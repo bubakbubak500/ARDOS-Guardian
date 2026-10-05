@@ -36,7 +36,7 @@ import numpy as np
 
 from ..config import G2_MAX_TX_SCALE
 from ..modem.audio import (PTT_LEAD_SECONDS, PTT_TAIL_SECONDS,
-                           _import_sounddevice, resolve_device,
+                           _import_sounddevice, _open_output_stream, resolve_device,
                            transmit_waveform)
 from ..ofdm import OfdmLink, OfdmStatus, PhyHeader
 from ..ofdm.adaptation import AdaptationConfig, LinkAdaptationController
@@ -212,6 +212,7 @@ class RadioAudioPipe:
 
         self._sd = None
         self._stream = None
+        self._output_stream = None
         # Guards the transmitter: half duplex means never keying while the
         # receive side is being read, and never two transmissions at once.
         self._tx_lock = threading.Lock()
@@ -272,6 +273,18 @@ class RadioAudioPipe:
             blocksize=int(rate * 0.05), callback=self._on_audio,
         )
         self._stream.start()
+        # Keep an inactive output endpoint through the DATA/ACK exchange.
+        # Opening a Windows USB audio stream on every burst costs hundreds of
+        # milliseconds before PTT. A host API that cannot hold both endpoints
+        # still uses the original per-burst open/close path.
+        try:
+            self._output_stream = _open_output_stream(
+                self._sd, device=self.output_device, sample_rate=rate,
+                blocksize=self.tx_write_chunk_frames,
+            )
+        except Exception as exc:
+            self._output_stream = None
+            self.on_log(f"OFDM VHF: reusable TX stream unavailable: {exc}")
         self._stopped.clear()
         self.on_log(f"OFDM VHF: listening at {rate} Hz on device {self.input_device}")
 
@@ -283,6 +296,12 @@ class RadioAudioPipe:
             try:
                 stream.stop()
                 stream.close()
+            except Exception:  # noqa: BLE001 - closing is best-effort
+                pass
+        output, self._output_stream = self._output_stream, None
+        if output is not None:
+            try:
+                output.close()
             except Exception:  # noqa: BLE001 - closing is best-effort
                 pass
 
@@ -783,18 +802,30 @@ class RadioAudioPipe:
         tail = self._tail_seconds()
         started = time.monotonic()
         with self._tx_lock:
-            transmit_waveform(
-                self._sd, np.asarray(samples, dtype=np.float64) * self.tx_scale,
-                device=self.output_device,
-                sample_rate=self.profile.sample_rate,
-                ptt=self.ptt,
-                lead_seconds=lead,
-                tail_seconds=tail,
-                guard_seconds=self.tx_guard,
-                write_chunk_frames=self.tx_write_chunk_frames,
-                before_play=clear_receive_buffer,
-                after_release=clear_receive_buffer,
-            )
+            try:
+                transmit_waveform(
+                    self._sd, np.asarray(samples, dtype=np.float64) * self.tx_scale,
+                    device=self.output_device,
+                    sample_rate=self.profile.sample_rate,
+                    ptt=self.ptt,
+                    lead_seconds=lead,
+                    tail_seconds=tail,
+                    guard_seconds=self.tx_guard,
+                    write_chunk_frames=self.tx_write_chunk_frames,
+                    before_play=clear_receive_buffer,
+                    after_release=clear_receive_buffer,
+                    output_stream=self._output_stream,
+                )
+            except Exception:
+                # A cached endpoint can be invalidated by a USB disconnect.
+                # The next ARQ attempt reopens it using the ordinary path.
+                output, self._output_stream = self._output_stream, None
+                if output is not None:
+                    try:
+                        output.close()
+                    except Exception:
+                        pass
+                raise
         return TxTiming(
             lead=lead,
             waveform=len(samples) / self.profile.sample_rate,

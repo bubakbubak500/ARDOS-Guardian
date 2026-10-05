@@ -132,7 +132,8 @@ def test_selective_repeat_link_uses_sc_codec_end_to_end() -> None:
 @pytest.mark.parametrize(
     ("bandwidth", "backend", "model", "expected"),
     [
-        ("2K7", "", "", (1, 19, FecProfile.LDPC_1_2, 512, 512, 256, 1, 14.5, 60, 0.0)),
+        ("2K7", "", "", (1, 19, FecProfile.LDPC_1_2, 512, 512, 256, 1, 18.0, 60, 0.0)),
+        ("2K7", "guardian_k5", "", (1, 19, FecProfile.LDPC_1_2, 512, 512, 256, 1, 14.5, 60, 0.0)),
         ("4K5", "guardian_k5", "", (1, 19, FecProfile.LDPC_1_2, 512, 512, 256, 1, 7.5, 200, 0.8)),
         ("4K5", "vox", "Quansheng UV-K5", (1, 19, FecProfile.LDPC_1_2, 512, 512, 256, 1, 7.5, 200, 0.0)),
         ("10K", "vox", "IC-705", (1, 19, FecProfile.LDPC_1_2, 2048, 2048, 2048, 1, 18.0, 140, 0.0)),

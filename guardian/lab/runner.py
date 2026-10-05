@@ -104,9 +104,9 @@ class Lab:
                 except (OSError, EOFError):
                     pass
             for _ in range(1000):
-                if not pipe.poll():
-                    break
                 try:
+                    if not pipe.poll():
+                        break
                     event = pipe.recv()
                 except (EOFError, OSError):
                     break
@@ -193,6 +193,21 @@ class Lab:
 
     def _close_pair(self):
         errors = []
+        def drain(label, child):
+            pipe = child["pipe"]
+            while True:
+                try:
+                    if not pipe.poll():
+                        return
+                    event = pipe.recv()
+                except (EOFError, OSError):
+                    # Windows closes a multiprocessing pipe as soon as its
+                    # worker exits; poll() itself can then raise WinError 109.
+                    return
+                self.emit("station", endpoint=label, event=event)
+                if event.get("kind") == "stopped":
+                    child["latest"]["stopped"] = event
+
         for child in self.children.values():
             try:
                 child["pipe"].send({"op": "stop"})
@@ -201,15 +216,7 @@ class Lab:
         deadline = time.monotonic() + 20
         while any(c["process"].is_alive() for c in self.children.values()) and time.monotonic() < deadline:
             for label, child in self.children.items():
-                pipe = child["pipe"]
-                while pipe.poll():
-                    try:
-                        event = pipe.recv()
-                    except (OSError, EOFError):
-                        break
-                    self.emit("station", endpoint=label, event=event)
-                    if event.get("kind") == "stopped":
-                        child["latest"]["stopped"] = event
+                drain(label, child)
             time.sleep(0.05)
         for label, child in self.children.items():
             process = child["process"]
@@ -217,14 +224,7 @@ class Lab:
                 process.terminate()
                 errors.append(f"Station {label} needed forced termination; inspect radio PTT")
             process.join(timeout=5)
-            while child["pipe"].poll():
-                try:
-                    event = child["pipe"].recv()
-                except (OSError, EOFError):
-                    break
-                self.emit("station", endpoint=label, event=event)
-                if event.get("kind") == "stopped":
-                    child["latest"]["stopped"] = event
+            drain(label, child)
             stopped = child["latest"].get("stopped", {})
             errors.extend(stopped.get("shutdown_errors", []))
             if stopped.get("fingerprint") != self.build["fingerprint"]:

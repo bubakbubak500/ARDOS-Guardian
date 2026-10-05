@@ -161,6 +161,11 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         for key, expected in expected_changes.items():
             assert current[key] == expected, key
             current[key] = reference[key]
+        if width == "2K7" and current["backend"] == "generic" and current["model"] != "UV-K5":
+            # A generic soundcard can use a longer clean DATA window than the
+            # narrow hardware exception; the PHY geometry remains identical.
+            assert current["maximum_train_seconds"] == 18.0
+            current["maximum_train_seconds"] = reference["maximum_train_seconds"]
     assert g1 == g2
 
 

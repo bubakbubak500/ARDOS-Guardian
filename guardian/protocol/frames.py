@@ -48,9 +48,9 @@ class FrameError(Exception):
     """Raised when a buffer cannot be parsed as a valid control frame."""
 
 
-# Upper bound on an encoded control frame. The largest Guardian emits is 43
-# bytes (HAVE_MSG with three 9-character callsigns); the headroom covers a
-# field being widened. The audio transport sizes its RX window from this and
+# Upper bound on an encoded control frame. HAVE_MSG/ACK_HAVE with three
+# 9-character callsigns and a four-byte SC profile hint reaches 48 bytes.
+# The audio transport sizes its RX window from this and
 # the session layer sizes its timeouts, so a frame that exceeded it would stop
 # being received at all -- test_frames asserts every type stays under.
 MAX_CONTROL_FRAME_BYTES = 48
@@ -203,6 +203,10 @@ class ControlFrame:
     priority: Priority = Priority.ROUTINE
     ttl: int = 5
     flags: Flags = Flags.NONE
+    # Optional four-byte profile hint on HAVE_MSG/ACK_HAVE. Legacy decoders
+    # ignore bytes after the three address fields, so an older peer still uses
+    # the explicit G2_PROFILE_OFFER/ACK exchange.
+    profile_token: str = ""
 
     def encode(self) -> bytes:
         """Serialise to the on-air binary form (with trailing CRC)."""
@@ -219,7 +223,16 @@ class ControlFrame:
         body += _enc_call(self.source)
         body += _enc_call(self.destination)
         body += _enc_call(self.next_hop)
+        if self.profile_token:
+            if self.type not in (FrameType.HAVE_MSG, FrameType.ACK_HAVE):
+                raise FrameError("profile hint is only valid on HAVE_MSG/ACK_HAVE")
+            token = self.profile_token.encode("ascii")
+            if len(token) != 4 or not token.isalnum() or token != token.upper():
+                raise FrameError("profile hint must be four uppercase ASCII characters")
+            body += token
         body += _CRC.pack(crc16(bytes(body)))
+        if self.profile_token and len(body) > MAX_CONTROL_FRAME_BYTES:
+            raise FrameError("control frame exceeds maximum length")
         return bytes(body)
 
     @classmethod
@@ -257,6 +270,16 @@ class ControlFrame:
         except ValueError as exc:
             raise FrameError(f"unknown frame type {ftype}") from exc
 
+        extra = buf[pos:-_CRC.size]
+        profile_token = ""
+        if ftype_e in (FrameType.HAVE_MSG, FrameType.ACK_HAVE) and len(extra) == 4:
+            try:
+                hint = extra.decode("ascii")
+            except UnicodeDecodeError:
+                hint = ""
+            if len(hint) == 4 and hint.isalnum() and hint == hint.upper():
+                profile_token = hint
+
         return cls(
             type=ftype_e,
             source=calls[0],
@@ -266,6 +289,7 @@ class ControlFrame:
             priority=Priority(prio) if prio in Priority._value2member_map_ else Priority.ROUTINE,
             ttl=ttl,
             flags=Flags(flags),
+            profile_token=profile_token,
         )
 
     def summary(self) -> str:

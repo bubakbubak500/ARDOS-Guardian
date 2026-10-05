@@ -221,6 +221,26 @@ def test_live_route_cancels_an_rreq_waiting_in_audio_queue():
     assert [frame.type for kind, frame in transport._deferred_tx] == [FrameType.HAVE_MSG]
 
 
+def test_suspended_audio_keeps_control_completion_until_resumed():
+    from guardian.modem.audio import AudioControlTransport
+    transport = AudioControlTransport()
+    transport._tx_suspended = True
+    frame = ControlFrame(FrameType.HAVE_MSG, source="A", destination="B",
+                         next_hop="B", message_id=11813)
+    completed = []
+    on_complete = completed.append
+    transport.send(frame, on_complete=on_complete, allowed=lambda: True)
+    assert completed == []
+    assert transport._deferred_tx == [("frame", frame)]
+
+    resumed = []
+    transport.send = lambda value, **kwargs: resumed.append((value, kwargs))
+    transport._resume_queued_tx()
+    assert resumed[0][0] is frame
+    assert resumed[0][1]["on_complete"] is on_complete
+    assert resumed[0][1]["allowed"]()
+
+
 def test_lost_custody_receipt_is_repeated_while_b_is_transferring_to_c():
     lost = []
     def drop(sender, receiver, frame):

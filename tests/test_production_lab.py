@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import threading
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 import zipfile
@@ -235,6 +236,7 @@ def test_vara_private_copy_preserves_separate_license_and_exact_binary(tmp_path,
         "TCP Command Port=8300\nTCP Scan Port=8427\nEnable KISS=1\nUpdates=1\nFM Mode=1\n"
         "[Soundcard]\nInput Device Name=RX a\nOutput Device Name=TX a\nALC Drive Level=-5\n"
         "[PTT]\nVia=3\n", encoding="ascii")
+    (source / "VARAFMNarrow.dat").write_bytes(b"modem data")
     monkeypatch.setattr(dependencies, "find_vara_fm", lambda _: str(exe))
     monkeypatch.setattr(vara, "listeners", lambda: {})
     endpoint = plan()["endpoints"]["a"]
@@ -248,8 +250,24 @@ def test_vara_private_copy_preserves_separate_license_and_exact_binary(tmp_path,
     assert copied["Setup"]["Registration Code"] == "PRIVATE-CODE"
     assert copied["Setup"]["TCP Command Port"] == "18300"
     assert copied["Soundcard"]["ALC Drive Level"] == "-5"
+    assert (destination / "VARAFMNarrow.dat").read_bytes() == b"modem data"
     assert "TCP Command Port=8300" in (source / "VARAFM.ini").read_text()
     assert cfg["vara_fm_path"] == str(destination / "VARAFM.exe")
+
+
+def test_vara_ownership_accepts_connected_data_port(tmp_path, monkeypatch):
+    from guardian.lab import vara
+    executable = tmp_path / "VARAFM.exe"
+    executable.write_bytes(b"vendor fixture")
+    report = {"executable": str(executable), "sha256": sha256(executable),
+              "command_port": 18300, "data_port": 18301}
+    owned = vara.OwnedVara(report)
+    owned.process = SimpleNamespace(pid=1234, poll=lambda: None)
+    def owners(*, established=False):
+        assert established
+        return {18300: 1234, 18301: 1234}
+    monkeypatch.setattr(vara, "tcp_owners", owners)
+    owned.verify()
 
 
 def test_vara_rejects_different_revision_before_copy(tmp_path, monkeypatch):
@@ -328,3 +346,37 @@ def test_csv_preserves_invalid_measurement_and_build_identity(tmp_path):
     assert row["valid_measurement"] == "False"
     assert row["modem"] == "SC-FTN" and row["bandwidth"] == "4K5"
     assert row["build_fingerprint"] == lab.build["fingerprint"]
+
+
+def test_close_pair_accepts_windows_pipe_closed_after_stopped(tmp_path):
+    lab = Lab(tmp_path)
+    lab.run_dir = tmp_path
+    lab.build = lab.runtime_identity
+
+    class Pipe:
+        def __init__(self):
+            self.pending = True
+        def send(self, command):
+            assert command == {"op": "stop"}
+        def poll(self):
+            if self.pending:
+                return True
+            raise OSError(109, "pipe closed")
+        def recv(self):
+            self.pending = False
+            return {"kind": "stopped", "fingerprint": lab.build["fingerprint"],
+                    "shutdown_errors": []}
+        def close(self):
+            pass
+
+    class Process:
+        exitcode = 0
+        def is_alive(self):
+            return False
+        def join(self, timeout):
+            pass
+
+    lab.children = {"a": {"process": Process(), "pipe": Pipe(), "latest": {}},
+                    "b": {"process": Process(), "pipe": Pipe(), "latest": {}}}
+    lab._close_pair()
+    assert lab.children == {}

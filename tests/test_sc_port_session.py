@@ -56,7 +56,7 @@ def test_g2_profile_token_is_exact_for_all_sc_widths() -> None:
         g2_profile_token("sc_fde_ftn", "2K7", 1)
 
 
-def test_exact_profile_pair_enters_sc_payload_after_offer_ack() -> None:
+def test_exact_profile_pair_enters_sc_payload_from_have_ack_hints() -> None:
     wire: list[ControlFrame] = []
     bus = LoopbackBus(monitor=lambda _sender, frame: wire.append(frame))
     sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
@@ -78,10 +78,68 @@ def test_exact_profile_pair_enters_sc_payload_after_offer_ack() -> None:
     have = next(frame for frame in wire if frame.type is FrameType.HAVE_MSG)
     assert decode_g2_profile_capable(have.flags)
     assert not decode_ofdm_capable(have.flags)
+    assert have.profile_token == token
+    ack = next(frame for frame in wire if frame.type is FrameType.ACK_HAVE)
+    assert ack.profile_token == token
     offers = [frame for frame in wire if frame.type is FrameType.G2_PROFILE_OFFER]
     acks = [frame for frame in wire if frame.type is FrameType.G2_PROFILE_ACK]
-    assert offers and offers[0].destination == token
-    assert acks and acks[0].destination == token
+    assert not offers and not acks
+
+
+def test_profile_hint_roundtrips_at_control_frame_size_limit() -> None:
+    frame = ControlFrame(
+        FrameType.HAVE_MSG, source="OK1234567", destination="OK7654321",
+        next_hop="OK7654321", message_id=44, profile_token="G1T2",
+    )
+    encoded = frame.encode()
+    assert len(encoded) <= 48
+    assert ControlFrame.decode(encoded).profile_token == "G1T2"
+
+
+def test_peer_without_profile_hint_uses_explicit_offer_ack() -> None:
+    sent: list[ControlFrame] = []
+
+    class Transport:
+        on_frame = None
+
+        def send(self, frame: ControlFrame) -> None:
+            sent.append(frame)
+
+    station = Orchestrator("OK7PS", Transport(), auto_route=False)
+    station.ofdm_payload_request = lambda: True
+    station.g2_profile = lambda: "G1T2"
+    message = station.send_message("OK2IPW", "hello", 45, next_hop="OK2IPW")
+    assert sent[0].profile_token == "G1T2"
+    station._on_frame(ControlFrame(
+        FrameType.ACK_HAVE, source="OK2IPW", destination="OK2IPW",
+        next_hop="OK2IPW", message_id=45,
+        flags=encode_g2_profile_capable(encode_ofdm_capable(Flags.NONE, True), True),
+    ))
+    assert message.state is SessionState.NEGOTIATING_PROFILE
+    assert sent[-1].type is FrameType.G2_PROFILE_OFFER
+    assert sent[-1].destination == "G1T2"
+
+
+def test_mismatched_profile_hints_use_explicit_fallback() -> None:
+    wire: list[ControlFrame] = []
+    bus = LoopbackBus(monitor=lambda _sender, frame: wire.append(frame))
+    sender = Orchestrator("OK7PS", bus.endpoint("sender"), auto_route=False)
+    receiver = Orchestrator(
+        "OK2IPW", bus.endpoint("receiver"), auto_complete=True, auto_route=False,
+    )
+    sender.ofdm_payload_request = receiver.ofdm_payload_request = lambda: True
+    sender.g2_profile = lambda: "G1T2"
+    receiver.g2_profile = lambda: "G1T4"
+
+    message = sender.send_message("OK2IPW", "hello", 46, next_hop="OK2IPW")
+    _drain(bus, sender, receiver)
+
+    assert message.state is SessionState.DELIVERED
+    assert message.payload_transport == "vara_p2p"
+    assert receiver.sessions[46].payload_transport == "vara_p2p"
+    assert any(frame.type is FrameType.G2_PROFILE_OFFER for frame in wire)
+    assert any(frame.type is FrameType.G2_PROFILE_ACK
+               and frame.destination == "=" for frame in wire)
 
 
 def test_legacy_one_bit_claim_cannot_enter_sc_payload() -> None:

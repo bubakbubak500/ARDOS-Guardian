@@ -90,3 +90,26 @@ def test_failure_before_playback_stops_and_closes_without_masking_error(failure)
             lead_seconds=0, tail_seconds=0, guard_seconds=0,
         )
     assert events[-3:] == ["stop", "release", "close"]
+
+
+def test_reused_output_stream_is_drained_but_closed_by_its_owner(monkeypatch):
+    events = []
+
+    class Stream:
+        def start(self): events.append("start")
+        def write(self, samples):
+            events.append("write")
+            return False
+        def stop(self, **kwargs): events.append("stop")
+        def close(self): events.append("close")
+
+    monkeypatch.setattr("guardian.modem.audio.time.sleep", lambda _: None)
+    stream = Stream()
+    for _ in range(2):
+        transmit_waveform(SimpleNamespace(), np.ones(32), device=1,
+                          sample_rate=48000, ptt=lambda on: events.append("on" if on else "off"),
+                          lead_seconds=0, tail_seconds=0, guard_seconds=0,
+                          output_stream=stream)
+    assert events == ["on", "start", "write", "stop", "off"] * 2
+    stream.close()
+    assert events[-1] == "close"

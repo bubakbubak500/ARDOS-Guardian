@@ -112,7 +112,10 @@ def automatic_g2_policy(waveform: str | None, bandwidth: str | None, *,
         maximum_retries=1,
         rescue_mcs=0,
         # Retain hardware keying/watchdog timing independently of capacity.
-        maximum_train_seconds=(14.5 if width == "2K7" else 7.5 if k5_hardware else 18.0),
+        # Keep a two-second margin under the LAB's 20 s PTT watchdog while
+        # avoiding an extra DATA/ACK turn on a clean 2K7 path.
+        maximum_train_seconds=(14.5 if k5_hardware and width == "2K7"
+                               else 7.5 if k5_hardware else 18.0),
         tx_guard_ms=60 if width == "2K7" else 200 if k5_hardware else 140,
         # The retained SC-FTN 2K7 geometry is a PHY setting, not calibration.
         center_hz=1779.4117647058824 if proven_2k7 else None,

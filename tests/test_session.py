@@ -598,6 +598,88 @@ def test_a_vouched_hop_keeps_all_three_announces() -> None:
     assert len(announces) == 3
 
 
+def test_audio_announce_timeout_starts_after_its_frame_finishes() -> None:
+    class DeferredControl:
+        supports_tx_completion = True
+        on_frame = None
+
+        def __init__(self):
+            self.sent = []
+
+        def send(self, frame, *, on_complete=None, allowed=None):
+            self.sent.append((frame, on_complete, allowed))
+
+    clock = [100.0]
+    transport = DeferredControl()
+    station = Orchestrator(
+        "OK7PS", transport, auto_route=False, clock=lambda: clock[0],
+    )
+    station.tick(clock[0])
+    message = station.send_message("OK2IPW", "hello", msg_id=304)
+    assert len(transport.sent) == 1
+
+    # The first TX can remain queued beyond the old state-entry deadline.
+    clock[0] = 109.0
+    station.tick(clock[0])
+    assert len(transport.sent) == 1
+    assert transport.sent[0][2]()
+
+    clock[0] = 110.0
+    transport.sent[0][1](True)
+    clock[0] = 117.9
+    station.tick(clock[0])
+    assert len(transport.sent) == 1
+    clock[0] = 118.1
+    station.tick(clock[0])
+    assert len(transport.sent) == 2
+    assert message.attempts == 2
+    assert not transport.sent[0][2]()
+    assert transport.sent[1][2]()
+
+    # A callback from the old attempt must not change the new deadline.
+    clock[0] = 119.0
+    transport.sent[0][1](True)
+    assert message.announce_tx_pending
+
+    # A worker that never completes must still use the bounded retry budget.
+    clock[0] = 149.0
+    station.tick(clock[0])
+    assert len(transport.sent) == 3
+    assert message.attempts == 3
+    assert not transport.sent[1][2]()
+
+
+def test_audio_start_frame_finishes_before_payload_takes_soundcard() -> None:
+    class DeferredControl:
+        supports_tx_completion = True
+        on_frame = None
+
+        def __init__(self):
+            self.sent = []
+
+        def send(self, frame, *, on_complete=None, allowed=None):
+            self.sent.append((frame, on_complete, allowed))
+
+    transport = DeferredControl()
+    station = Orchestrator("OK7PS", transport, auto_route=False)
+    started = []
+    station.begin_transfer = lambda msg: started.append(msg.msg_id)
+    message = station.send_message("OK2IPW", "hello", msg_id=305, next_hop="OK2IPW")
+    station._start_payload(message, "OK2IPW")
+
+    frame, complete, allowed = transport.sent[-1]
+    assert frame.type is FrameType.START_VARA
+    assert allowed()
+    assert message.state is SessionState.STARTING_VARA
+    assert started == []
+
+    complete(True)
+    assert message.state is SessionState.TRANSFERRING
+    assert started == [305]
+    complete(True)
+    assert started == [305]
+
+
 def test_any_backup_enters_route_discovery_after_primary_fails() -> None:
     bus = LoopbackBus()
     routes = RouteTable([Route("OK9ZZZ", "OK2IPW", "ANY")])

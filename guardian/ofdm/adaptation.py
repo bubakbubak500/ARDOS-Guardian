@@ -119,9 +119,11 @@ class LinkAdaptationController:
     capacity_probe_next: str = "mcs"
     capacity_probe_profile: TxProfile | None = None
     capacity_probe_quality: tuple[float, float] | None = None
-    capacity_fallback_profile: TxProfile | None = None
     capacity_rejections: dict[tuple[int, int, int, int], tuple[float, float]] = field(default_factory=dict)
     capacity_quality: dict[tuple[int, int], tuple[float, float]] = field(default_factory=dict)
+    capacity_window_ceiling: dict[tuple[int, int], tuple[int, tuple[float, float]]] = field(default_factory=dict)
+    capacity_ceiling_clean_streak: dict[tuple[int, int], int] = field(default_factory=dict)
+    capacity_loss_cooldown: int = 0
     _next_upgrade: str = "fec"
 
     def __post_init__(self) -> None:
@@ -150,6 +152,15 @@ class LinkAdaptationController:
         if self.fec_probe_from is not None or self.mcs_probe_from is not None:
             burst = min(burst, max(2048, self.config.arq_block_bytes))
         return TxProfile(self.mcs_index, fec, burst, self.config.arq_block_bytes)
+
+    def warm_start_burst_bytes(self) -> int:
+        """Validate a learned path with useful data before a long window."""
+        initial = (self.config.initial_burst_bytes
+                   or self.config.min_burst_bytes)
+        if ((self.mcs_index, int(self.current_fec)) not in self.capacity_quality
+                or self.capacity_probe_profile is not None):
+            return initial
+        return max(initial, min(self.current_burst_bytes, 4096))
 
     def fec_for_retry(self, attempt: int) -> FecProfile:
         """One stronger profile per retry, never below the mother code."""
@@ -180,7 +191,8 @@ class LinkAdaptationController:
                               unique_bytes: int, elapsed_seconds: float,
                               remote_snr_db: float | None,
                               remote_evm_rms: float | None,
-                              mcs_index: int) -> None:
+                              mcs_index: int,
+                              remaining_bytes: int | None = None) -> None:
         """Explore this directed path, one bounded profile trial per ACK.
 
         SNR/EVM can select the first short probe. Thereafter one clean DATA
@@ -202,7 +214,6 @@ class LinkAdaptationController:
         current = self.profile
         baseline = self.capacity_probe_profile
         quality = (remote_snr_db, remote_evm_rms)
-
         def measured(pair):
             return (pair[0] is not None and pair[1] is not None
                     and math.isfinite(pair[0]) and math.isfinite(pair[1])
@@ -212,7 +223,92 @@ class LinkAdaptationController:
             return (target.mcs_index, int(target.fec), source.mcs_index, int(source.fec))
 
         if acked_blocks < sent_blocks:
-            fallback = baseline or self.capacity_fallback_profile
+            recent_loss = self.capacity_loss_cooldown > 0
+            self.capacity_loss_cooldown = 2
+            if (baseline is not None
+                    and current.mcs_index == baseline.mcs_index
+                    and current.fec != baseline.fec and sent_blocks >= 4):
+                candidate_density = (sc_mcs(current.mcs_index).bits_per_symbol
+                                     * fec_spec(current.fec).rate)
+                baseline_density = (sc_mcs(baseline.mcs_index).bits_per_symbol
+                                    * fec_spec(baseline.fec).rate)
+                if (acked_blocks * candidate_density
+                        >= sent_blocks * baseline_density * 1.25):
+                    # A sparse CRC loss can still make the faster code clearly
+                    # more productive than its proven baseline. Selectively
+                    # repair the missing block and confirm it with a bounded
+                    # window rather than sending the entire remainder at 1/2.
+                    self.current_burst_bytes = min(
+                        self.config.max_burst_bytes,
+                        max(self.config.min_burst_bytes,
+                            2 * current.burst_bytes),
+                    )
+                    self.fec_probe_from = self.mcs_probe_from = None
+                    self.capacity_probe_profile = self.capacity_probe_quality = None
+                    return
+            if baseline is None and measured(quality):
+                required_snr = (sc_mcs(current.mcs_index).min_snr_db
+                                + fec_snr_margin_db(current.fec))
+                position = next((i for i, item in enumerate(mcs_ladder)
+                                 if item.index == current.mcs_index), 0)
+                if (position > 0
+                        and sc_mcs(current.mcs_index).bits_per_symbol >= 7
+                        and remote_snr_db < required_snr - 1.0):
+                    # CRC loss with insufficient measured margin is evidence
+                    # against the constellation, not only the code rate.
+                    self.mcs_index = mcs_ladder[position - 1].index
+                    self.current_burst_bytes = max(
+                        self.config.min_burst_bytes,
+                        min(current.burst_bytes // 2, self.current_burst_bytes),
+                    )
+                    return
+            if (baseline is None and current.fec != FecProfile.LDPC_1_2
+                    and sent_blocks >= 16 and acked_blocks * 8 >= sent_blocks * 7
+                    and not recent_loss
+                    and current.burst_bytes > self.config.min_burst_bytes):
+                # A short FEC trial can pass while a larger frame loses a few
+                # blocks. Keep the working code rate, selectively repair those
+                # blocks and bound the next DATA window. One missing block can
+                # retain the observed window; multiple misses halve it.
+                # Repeated loss at the minimum takes the FEC fallback below.
+                observed = sent_blocks * current.arq_block_bytes
+                target = (observed if sent_blocks - acked_blocks == 1
+                          else math.ceil(observed / 2))
+                shorter = next((size for size in self._allowed_bursts()
+                                if size >= target), self.config.max_burst_bytes)
+                self.current_burst_bytes = max(
+                    self.config.min_burst_bytes,
+                    min(current.burst_bytes, shorter),
+                )
+                if measured(quality):
+                    ceiling_key = (current.mcs_index, int(current.fec))
+                    self.capacity_window_ceiling[ceiling_key] = (
+                        self.current_burst_bytes, quality,
+                    )
+                    self.capacity_ceiling_clean_streak[ceiling_key] = 0
+                return
+            # A failed *trial* returns to its known baseline. Once that trial
+            # has succeeded, the next ordinary DATA loss must step down the
+            # physical ladder instead of jumping all the way back to the
+            # robust profile that preceded initial acquisition.
+            fallback = baseline
+            partial_probe = False
+            if (baseline is not None and current.mcs_index != baseline.mcs_index
+                    and sent_blocks >= 4 and acked_blocks * 4 >= sent_blocks * 3):
+                # A bounded probe with only sparse CRC loss is evidence that
+                # the path is close to the candidate. If acquisition skipped
+                # several densities, keep the delivered blocks and retreat
+                # one real modulation step instead of sending the remainder
+                # at the original robust bootstrap rate.
+                position = next((i for i, item in enumerate(mcs_ladder)
+                                 if item.index == current.mcs_index), 0)
+                previous = mcs_ladder[max(0, position - 1)].index
+                if previous != baseline.mcs_index:
+                    fallback = TxProfile(
+                        previous, current.fec, self.current_burst_bytes,
+                        current.arq_block_bytes,
+                    )
+                    partial_probe = True
             if fallback is None or (fallback.mcs_index, fallback.fec) == (current.mcs_index, current.fec):
                 fecs = (self._fec_ladder() if self.config.adaptive_fec
                         else [current.fec])
@@ -223,14 +319,12 @@ class LinkAdaptationController:
                     fecs[max(0, fecs.index(current.fec) - 1)],
                     self.current_burst_bytes, current.arq_block_bytes,
                 )
-            failed_quality = (self.capacity_probe_quality if baseline is not None
+            failed_quality = (quality if partial_probe
+                              else self.capacity_probe_quality if baseline is not None
                               else self.capacity_quality.get((fallback.mcs_index, int(fallback.fec))))
             if failed_quality is not None and measured(failed_quality):
                 self.capacity_rejections[key(current, fallback)] = failed_quality
             self.mcs_index, self.current_fec = fallback.mcs_index, fallback.fec
-            # Repeated loss must continue toward a stronger profile, never
-            # resurrect the stale fallback from an earlier, faster state.
-            self.capacity_fallback_profile = None
             self.fec_probe_from = self.mcs_probe_from = None
             self.capacity_probe_profile = self.capacity_probe_quality = None
             # At the robust floor, reduce exposure as well as retaining ARQ.
@@ -239,19 +333,80 @@ class LinkAdaptationController:
             return
 
         if baseline is not None:
-            self.capacity_fallback_profile = baseline
             self.fec_probe_from = self.mcs_probe_from = None
             self.capacity_probe_profile = self.capacity_probe_quality = None
         if not measured(quality):
             return
         self.capacity_quality[(current.mcs_index, int(current.fec))] = quality
         if self.config.adaptive_burst and unique_bytes >= 512:
-            self.current_burst_bytes = self.config.max_burst_bytes
+            if baseline is not None and baseline.fec != current.fec:
+                # First grow a newly confirmed FEC to only twice its proven
+                # trial size. A successful 2 KiB frame is not evidence that a
+                # 16 KiB window survives the same path.
+                desired = max(self.config.min_burst_bytes, 2 * unique_bytes)
+            elif current.fec == FecProfile.LDPC_1_2:
+                desired = self.config.max_burst_bytes
+            else:
+                desired = max(self.config.min_burst_bytes,
+                              2 * self.current_burst_bytes)
+            ceiling_key = (current.mcs_index, int(current.fec))
+            ceiling = self.capacity_window_ceiling.get(ceiling_key)
+            if ceiling is not None:
+                limit, failed_quality = ceiling
+                if (remote_snr_db >= failed_quality[0] + 1.5
+                        or remote_evm_rms <= failed_quality[1] * 0.85):
+                    del self.capacity_window_ceiling[ceiling_key]
+                    self.capacity_ceiling_clean_streak.pop(ceiling_key, None)
+                else:
+                    clean = self.capacity_ceiling_clean_streak.get(ceiling_key, 0)
+                    if unique_bytes >= limit:
+                        clean += 1
+                    self.capacity_ceiling_clean_streak[ceiling_key] = clean
+                    if (clean >= 2 and remaining_bytes is not None
+                            and remaining_bytes >= 2 * limit):
+                        del self.capacity_window_ceiling[ceiling_key]
+                        del self.capacity_ceiling_clean_streak[ceiling_key]
+                    else:
+                        desired = min(desired, limit)
+            self.current_burst_bytes = min(
+                self.config.max_burst_bytes,
+                next((size for size in self._allowed_bursts()
+                      if size >= desired), self.config.max_burst_bytes),
+            )
         current = self.profile
+        if self.capacity_loss_cooldown:
+            self.capacity_loss_cooldown -= 1
+            return
+        # A confirmed short modulation trial must not spend nearly the entire
+        # message at rate 1/2 before trying a faster code. This is a bounded
+        # DATA/CRC experiment, based on the measured path rather than radio ID.
+        # Requiring enough payload left lets the extra DATA/ACK turn pay back.
+        short_fec_opportunity = (
+            baseline is not None
+            and baseline.mcs_index != current.mcs_index
+            and current.fec == FecProfile.LDPC_1_2
+            and sc_mcs(current.mcs_index).bits_per_symbol >= 4
+            and unique_bytes >= max(2048, 8 * current.arq_block_bytes)
+            and remaining_bytes is not None and remaining_bytes >= 6144
+            and remote_snr_db >= sc_mcs(current.mcs_index).min_snr_db + 2.5
+            and remote_evm_rms <= 0.13
+        )
+        if (remaining_bytes is not None
+                and remaining_bytes <= max(8192, 32 * current.arq_block_bytes)
+                and not short_fec_opportunity):
+            # A late bounded probe costs another turn and cannot pay for itself
+            # before this message ends. Preserve the already proven profile.
+            return
         position = next((i for i, item in enumerate(mcs_ladder)
                          if item.index == self.mcs_index), 0)
         if unique_bytes < max(512, current.arq_block_bytes):
             return
+        # A short confirmed MCS trial may earn one more bounded trial while
+        # substantial data remains. Other short trials still need a full window
+        # before an ungated promotion, to avoid a ladder of costly probes.
+        blind_probe_allowed = (baseline is None or
+                               unique_bytes >= max(4096, 16 * current.arq_block_bytes)
+                               or short_fec_opportunity)
         candidates = {"mcs": [], "fec": []}
         fecs = (self._fec_ladder() if self.config.adaptive_fec
                 else [current.fec])
@@ -260,10 +415,20 @@ class LinkAdaptationController:
         higher_mcs = mcs_ladder[position + 1:]
         # Quality may justify skipping rungs, but is not a permanent veto on
         # the next rung. All choices still have to pass a bounded CRC trial.
-        admitted = [item for item in higher_mcs
-                    if remote_snr_db >= item.min_snr_db + 1.5 + fec_snr_margin_db(current.fec)]
+        def mcs_admitted(item) -> bool:
+            margin = 0.5 + fec_snr_margin_db(current.fec)
+            if (sc_mcs(current.mcs_index).bits_per_symbol == 2
+                    and item.bits_per_symbol >= 7):
+                # QPSK quality can overpredict a dense constellation. Demand
+                # both SNR and EVM headroom for a direct first-window jump.
+                margin = max(margin, 2.0)
+                return (remote_snr_db >= item.min_snr_db + margin
+                        and remote_evm_rms <= 10 ** (-(item.min_snr_db + margin) / 20.0))
+            return remote_snr_db >= item.min_snr_db + margin
+
+        admitted = [item for item in higher_mcs if mcs_admitted(item)]
         targets = list(reversed(admitted))
-        if higher_mcs and higher_mcs[0] not in targets:
+        if blind_probe_allowed and higher_mcs and higher_mcs[0] not in targets:
             targets.append(higher_mcs[0])
         for item in targets:
             # A higher constellation may need stronger FEC. Excluding these
@@ -277,13 +442,35 @@ class LinkAdaptationController:
             higher_fec = fecs[fec_index + 1:]
             admitted_fec = [fec for fec in higher_fec if self._fec_upgrade_allowed(fec)]
             ordered_fec = list(reversed(admitted_fec))
-            if higher_fec[0] not in ordered_fec:
+            if short_fec_opportunity:
+                # On a measured strong path, one bounded 4/5 trial can pay
+                # back before a medium message ends. Marginal 15–17 dB links
+                # repeatedly lost even 2/3 or 3/4 trial blocks on RF, so
+                # their clean 1/2 MCS trial is not enough evidence to spend
+                # another DATA/ACK turn immediately.
+                preferred = FecProfile.LDPC_4_5
+                ordered_fec = [preferred] + [fec for fec in ordered_fec
+                                              if fec != preferred]
+            if blind_probe_allowed and higher_fec[0] not in ordered_fec:
                 ordered_fec.append(higher_fec[0])
             candidates["fec"] = [TxProfile(current.mcs_index, fec,
                 current.burst_bytes, current.arq_block_bytes) for fec in ordered_fec]
         order = (self.capacity_probe_next, "mcs" if self.capacity_probe_next == "fec" else "fec")
         for dimension in order:
             for target in candidates[dimension]:
+                if (remaining_bytes is not None and elapsed_seconds > 0.0
+                        and unique_bytes > 0):
+                    target_density = (float(sc_mcs(target.mcs_index).bits_per_symbol)
+                                      * fec_spec(target.fec).rate)
+                    saved_seconds = (
+                        elapsed_seconds * remaining_bytes / unique_bytes
+                        * (1.0 - current_density / target_density)
+                    )
+                    # A bounded trial is another radio turn. Use the measured
+                    # window cost so slower PTT/audio paths require more data
+                    # to pay for exploration; longer messages still can probe.
+                    if saved_seconds < max(1.5, elapsed_seconds):
+                        continue
                 # Failure at this constellation also rejects weaker protection
                 # at it. Compare quality only at the same source constellation.
                 rejected = [quality for (mcs, fec, source_mcs, _), quality

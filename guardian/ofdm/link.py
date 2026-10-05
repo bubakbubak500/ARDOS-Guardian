@@ -232,6 +232,7 @@ class OfdmLink:
     _train_clean_streak: int = 0
     _mcs_clean_streak: int = 0
     _maximum_mcs_index: int = 0
+    _tx_wall_overhead: float = 0.0
     _soft_cache: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -418,7 +419,14 @@ class OfdmLink:
             remote_snr_db=remote_snr_db, remote_evm_rms=remote_evm_rms,
         )
         if self.superframe and self.adaptive_mcs and self.controller.config.rapid_acquisition:
-            self.controller.report_capacity_burst(mcs_ladder=self._mcs_ladder(), **feedback)
+            self.controller.report_capacity_burst(
+                mcs_ladder=self._mcs_ladder(),
+                remaining_bytes=(
+                    max(0, self.status.total_bytes - self.status.tx_bytes)
+                    if self.status.total_bytes > 0 else None
+                ),
+                **feedback,
+            )
             self.mcs_index = self.controller.mcs_index
         else:
             self._report_mcs_feedback(sent, received, remote_snr_db, remote_evm_rms,
@@ -534,6 +542,13 @@ class OfdmLink:
         timing = self.pipe.send(waveform)
         airtime = len(waveform) / self.profile.sample_rate
         if isinstance(timing, TxTiming):
+            self._tx_wall_overhead = max(self._tx_wall_overhead, timing.wall_clock - airtime)
+            self._log(
+                f"OFDM {header.frame_type.label} TX TIMING #{header.block_seq}: "
+                f"wave={airtime:.3f} s, lead={timing.lead:.3f} s, "
+                f"guard={timing.guard:.3f} s, tail={timing.tail:.3f} s, "
+                f"wall={timing.wall_clock:.3f} s"
+            )
             occupied = timing.wall_clock + self.ptt_turnaround
             self.status.tx_lead_seconds += timing.lead
             self.status.tx_guard_seconds += timing.guard
@@ -777,13 +792,12 @@ class OfdmLink:
         if (self.controller.config.rapid_acquisition
                 and self.controller.config.adaptive_burst):
             # The same callsign and USB cable can now lead to another radio.
-            # Keep a recent learned modulation as a short warm-start hint, but
-            # require fresh delivery/quality feedback before long aggregation.
-            # Starting the controller at the minimum also prevents a failed
-            # probe from inheriting a large window after its rescue succeeds.
+            # Keep a recent learned modulation and a bounded useful window,
+            # then require fresh delivery feedback before long aggregation.
+            # An unproven profile still starts at the minimum.
             self.controller.current_burst_bytes = (
-                self.controller.config.initial_burst_bytes
-                or self.controller.config.min_burst_bytes)
+                self.controller.warm_start_burst_bytes()
+            )
         selected = self.controller.profile
         blocks_list = split_blocks(payload, selected.arq_block_bytes)
         if len(blocks_list) > 0xFFFF:
@@ -1104,6 +1118,11 @@ class OfdmLink:
             mcs_index=mcs_index).version
         frame_limit = (MAX_CAPACITY_SUBBLOCKS if version == CAPACITY_FRAME_VERSION else
                        MAX_SUPERFRAME_SUBBLOCKS if version == SUPERFRAME_VERSION else MAX_SUBBLOCKS)
+        duration_limit = self.max_train_seconds
+        if self.controller.config.rapid_acquisition:
+            # Let measured audio/PTT overhead reduce the waveform cap before
+            # it can consume the 20 s watchdog margin on a slower radio.
+            duration_limit = min(duration_limit, max(1.0, 19.5 - self._tx_wall_overhead))
         while remaining:
             batch: list[int] = []
             for sequence in remaining:
@@ -1119,7 +1138,7 @@ class OfdmLink:
                 )
                 lengths = [len(state.blocks[value]) for value in candidate]
                 duration = self._burst_duration(header, lengths)
-                if batch and duration > self.max_train_seconds:
+                if batch and duration > duration_limit:
                     break
                 batch = candidate
             batches.append(batch)
@@ -1258,6 +1277,13 @@ class OfdmLink:
         timing = self.pipe.send(waveform)
         airtime = len(waveform) / self.profile.sample_rate
         if isinstance(timing, TxTiming):
+            self._tx_wall_overhead = max(self._tx_wall_overhead, timing.wall_clock - airtime)
+            self._log(
+                f"OFDM DATA TX TIMING #{headers[0].block_seq}: "
+                f"wave={airtime:.3f} s, lead={timing.lead:.3f} s, "
+                f"guard={timing.guard:.3f} s, tail={timing.tail:.3f} s, "
+                f"wall={timing.wall_clock:.3f} s"
+            )
             occupied = timing.wall_clock + self.ptt_turnaround
             self.status.tx_lead_seconds += timing.lead
             self.status.tx_guard_seconds += timing.guard
@@ -1282,7 +1308,10 @@ class OfdmLink:
     def _await_bitmap(self, msg_id: int, burst_id: int,
                       total_blocks: int,
                       extra_timeout: float = 0.0) -> AckBitmap | None:
-        deadline = (time.monotonic() + self.reply_timeout(total_blocks)
+        started = time.monotonic()
+        receive_wall = 0.0
+        decode_wall = 0.0
+        deadline = (started + self.reply_timeout(total_blocks)
                     + max(0.0, float(extra_timeout)))
         heard = 0
         why = ""
@@ -1293,11 +1322,15 @@ class OfdmLink:
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 break
+            capture_started = time.monotonic()
             samples = self._receive_reply(remaining, total_blocks)
+            receive_wall += time.monotonic() - capture_started
             if samples is None:
                 break
             heard += 1
+            decode_started = time.monotonic()
             decoded = self._decode_burst(samples)
+            decode_wall += time.monotonic() - decode_started
             self._record(decoded)
             header = decoded.header
             if header is None or not decoded.ok:
@@ -1333,7 +1366,15 @@ class OfdmLink:
             # Guard every valid bitmap, not only a fully successful one: sparse
             # retries are prepared so quickly that the missing guard after a
             # NACK made them collide with the peer's own acknowledgement.
+            guard_started = time.monotonic()
             self._guard_peer_receiver()
+            guard_wall = time.monotonic() - guard_started
+            self._log(
+                f"OFDM ACK TIMING #{burst_id}: "
+                f"receive={receive_wall:.3f} s, decode={decode_wall:.3f} s, "
+                f"guard={guard_wall:.3f} s, "
+                f"reply_total={time.monotonic() - started:.3f} s"
+            )
             return bitmap
         self.last_reply_reason = (
             f"{heard} burst(s) heard, none usable: {why}" if heard

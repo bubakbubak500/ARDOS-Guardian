@@ -220,6 +220,12 @@ def main(connection, root: str, expected_fingerprint: str, peer: str, channel: d
                          started=started)
                     if not operations.send_queued(active_id):
                         raise RuntimeError("Production send_queued rejected the message")
+                elif op == "calibrate_start":
+                    if not running or operations.network_settings_busy():
+                        raise RuntimeError("Station is not ready for Auto Tune")
+                    if not operations.start_station_calibration(peer, "quick"):
+                        raise RuntimeError(f"Auto Tune rejected: {operations.station_lab.error}")
+                    emit("calibration_started", station_lab=plain(operations.station_lab))
                 elif op == "inspect":
                     message = store.get(int(command["message_id"]))
                     emit("mail", message_id=command["message_id"],
@@ -239,6 +245,7 @@ def main(connection, root: str, expected_fingerprint: str, peer: str, channel: d
                 meta = next((item for item in store.list() if item["msg_id"] == active_id), None) if active_id else None
                 emit("snapshot", station=asdict(snapshots.read()),
                      sc_ftn=plain(operations.ofdm_status()), busy=operations.network_settings_busy(),
+                     station_lab=plain(operations.station_lab),
                      message_id=active_id, status=meta["status"] if meta else None,
                      elapsed=(completions.get(active_id, now)-started) if started else None,
                      session=session_view(session), live_session=session_view(live_message))

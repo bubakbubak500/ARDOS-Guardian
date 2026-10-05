@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import time
 from typing import Callable
 
 from ..protocol import (
@@ -289,6 +290,9 @@ class Message:
     tried_backup: bool = False
     failed_hops: set[str] = field(default_factory=set)
     t_state: float = 0.0           # monotonic time the state was entered
+    announce_tx_queued_at: float | None = None
+    announce_tx_done_at: float | None = None
+    announce_tx_pending: bool = False
     # Payload workers only publish monotonic byte counts.  The session thread
     # observes them in tick(), refreshes its own clock on real progress, and
     # retains an independent hard cap against an endless marginal link.
@@ -933,8 +937,18 @@ class Orchestrator:
                     msg.payload_progress_seen = progress
                     msg.t_state = now
             elapsed = now - msg.t_state
-            if msg.state is SessionState.ANNOUNCING and elapsed > self.ack_timeout:
-                self._announce_timeout(msg)
+            if msg.state is SessionState.ANNOUNCING:
+                if msg.announce_tx_pending:
+                    # A busy audio channel may delay the actual HAVE_MSG well
+                    # beyond the state-entry time. Bound a stuck TX worker,
+                    # but do not queue another frame while it is still pending.
+                    queued = (msg.announce_tx_queued_at if msg.announce_tx_queued_at is not None
+                              else msg.t_state)
+                    if now - queued > max(30.0, 3.0 * self.ack_timeout):
+                        self._announce_timeout(msg)
+                elif now - (msg.announce_tx_done_at if msg.announce_tx_done_at is not None
+                            else msg.t_state) > self.ack_timeout:
+                    self._announce_timeout(msg)
             elif msg.state is SessionState.WAITING_BUSY and elapsed > BUSY_BACKOFF:
                 self._enter(msg, SessionState.ANNOUNCING)
                 msg.attempts = 1
@@ -1355,6 +1369,10 @@ class Orchestrator:
         )
         msg.ptt_delay_ms = negotiated
         msg.payload_transport = "ofdm_vhf" if agreed_ofdm else "vara_p2p"
+        if (agreed_ofdm and local_profile is not None
+                and _is_sc_ftn_profile_token(local_profile)
+                and f.profile_token == local_profile):
+            msg.g2_profile_token = local_profile or ""
         self.sessions[f.message_id] = msg
         self._enter(msg, SessionState.HEARD)
         if local_profile == "A500" and not agreed_ofdm:
@@ -1385,6 +1403,12 @@ class Orchestrator:
                 and self._own_g2_profile() is not None
             )
             msg.payload_transport = "ofdm_vhf" if agreed_ofdm else "vara_p2p"
+            if (agreed_ofdm and _is_sc_ftn_profile_token(f.profile_token)
+                    and f.profile_token == self._own_g2_profile()):
+                # Both endpoints advertised the exact same profile in the
+                # existing HAVE/ACK exchange. An older peer omits the hint
+                # and continues through the explicit offer/ack below.
+                msg.g2_profile_token = f.profile_token
             if self._own_g2_profile() == "A500" and not agreed_ofdm:
                 self._send(FrameType.CANCEL, msg)
                 self._fail(msg, "peer does not support Guardian ARDOP 500 Hz")
@@ -1429,13 +1453,25 @@ class Orchestrator:
 
     def _start_payload(self, msg: Message, peer: str) -> None:
         self._enter(msg, SessionState.STARTING_VARA)
-        self._send(FrameType.START_VARA, msg)
         self._emit(msg, f"{peer} ready — starting {self._payload_label(msg)}")
-        self._enter(msg, SessionState.TRANSFERRING)
-        if self.begin_transfer:
-            self.begin_transfer(msg)
-        if self.payload is not None:
-            self.payload.start_send(msg, lambda ok, m=msg: self._on_send_done(m, ok))
+
+        def start_after_control(success: bool) -> None:
+            if (self.sessions.get(msg.msg_id) is not msg
+                    or msg.state is not SessionState.STARTING_VARA):
+                return
+            if not success:
+                # An audio transport can reject this frame while shutting
+                # down. Let the ordinary session tick report the failure;
+                # its callback may run under the transport's TX lock.
+                msg.t_state = self._now - self.start_timeout - 1.0
+                return
+            self._enter(msg, SessionState.TRANSFERRING)
+            if self.begin_transfer:
+                self.begin_transfer(msg)
+            if self.payload is not None:
+                self.payload.start_send(msg, lambda ok, m=msg: self._on_send_done(m, ok))
+
+        self._send(FrameType.START_VARA, msg, on_complete=start_after_control)
 
     def _negotiate_g2_profile_or_start(self, msg: Message, peer: str) -> None:
         if msg.payload_transport != "ofdm_vhf":
@@ -1444,6 +1480,9 @@ class Orchestrator:
         token = self._own_g2_profile()
         if token is None:
             msg.payload_transport = "vara_p2p"
+            self._start_payload(msg, peer)
+            return
+        if _is_sc_ftn_profile_token(token) and msg.g2_profile_token == token:
             self._start_payload(msg, peer)
             return
         msg.g2_profile_token = token
@@ -1750,13 +1789,59 @@ class Orchestrator:
         self._stop_message_work(msg)
         self._emit(msg, f"failed: {reason}")
 
-    def _send(self, ftype: FrameType, msg: Message) -> None:
+    def _send(self, ftype: FrameType, msg: Message,
+              *, on_complete: Callable[[bool], None] | None = None) -> None:
         frame = ControlFrame(
             type=ftype, source=self.callsign, destination=msg.final_dest,
             next_hop=msg.next_hop, message_id=msg.msg_id,
             priority=msg.priority, ttl=msg.ttl, flags=msg.flags,
+            profile_token=(
+                (self._own_g2_profile() or "") if ftype is FrameType.HAVE_MSG
+                and decode_g2_profile_capable(msg.flags)
+                and _is_sc_ftn_profile_token(self._own_g2_profile() or "")
+                else msg.g2_profile_token if ftype is FrameType.ACK_HAVE
+                else ""
+            ),
         )
-        self.transport.send(frame)
+        if on_complete is not None:
+            if getattr(self.transport, "supports_tx_completion", False):
+                self.transport.send(
+                    frame, on_complete=on_complete,
+                    allowed=lambda: (self.sessions.get(msg.msg_id) is msg
+                                     and msg.state is SessionState.STARTING_VARA),
+                )
+            else:
+                self.transport.send(frame)
+                on_complete(True)
+            return
+        if (ftype is FrameType.HAVE_MSG
+                and msg.state is SessionState.ANNOUNCING
+                and getattr(self.transport, "supports_tx_completion", False)):
+            attempt = msg.attempts
+            msg.announce_tx_queued_at = (
+                self._clock() if self._clock is not None else time.monotonic()
+            )
+            msg.announce_tx_done_at = None
+            msg.announce_tx_pending = True
+
+            def current() -> bool:
+                return msg.state is SessionState.ANNOUNCING and msg.attempts == attempt
+
+            def complete(success: bool) -> None:
+                if not current():
+                    return
+                finished = self._clock() if self._clock is not None else time.monotonic()
+                msg.announce_tx_done_at = (finished if success
+                                           else finished - self.ack_timeout - 1.0)
+                msg.announce_tx_pending = False
+
+            self.transport.send(frame, on_complete=complete, allowed=current)
+        else:
+            if ftype is FrameType.HAVE_MSG and msg.state is SessionState.ANNOUNCING:
+                msg.announce_tx_queued_at = None
+                msg.announce_tx_done_at = None
+                msg.announce_tx_pending = False
+            self.transport.send(frame)
 
     def _send_delivery_receipt(
         self,
