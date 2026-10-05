@@ -9,6 +9,7 @@
 [![Latest release](https://img.shields.io/github/v/release/bubakbubak500/ARDOS-Guardian?label=release)](../../releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![Radio](https://img.shields.io/badge/radio-HF%20%7C%20VHF%20%7C%20UHF-orange)
+[![Downloads](https://img.shields.io/github/downloads/bubakbubak500/ARDOS-Guardian/total?label=downloads)](../../releases)
 
 [Download Guardian](../../releases/latest) · [Explore the ecosystem](#one-ecosystem-several-ways-to-communicate) · [Project status](STATUS.md)
 
