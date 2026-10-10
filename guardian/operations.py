@@ -3061,11 +3061,11 @@ class Operations:
 
     def _make_payload_backend(self):
         """Build the next-session payload backend from the current settings."""
+        if not VARA_AVAILABLE and self.config.payload_backend == "vara_p2p":
+            raise RuntimeError("VARA is unavailable in the Linux edition")
         deps = self._payload_dependencies()
         primary = make_backend(self.config.payload_backend, **deps)
         if not VARA_AVAILABLE:
-            if self.config.payload_backend == "vara_p2p":
-                raise RuntimeError("VARA is unavailable in the Linux edition")
             return NegotiatedPayload(default=primary, backends={primary.name: primary},
                                      ignore_unavailable_cancel=True)
         if self.config.payload_backend == "vara_p2p":

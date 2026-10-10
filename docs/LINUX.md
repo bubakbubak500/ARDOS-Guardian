@@ -44,11 +44,13 @@ Uživatelská data zůstávají mimo složku aplikace.
 
 ## Sestavení ze zdrojů
 
-Na Linuxu nainstalujte C kompilátor, Python 3.12, `libjxl-tools`,
+Na Linuxu nainstalujte C kompilátor, CMake, Ninja, Git, Python 3.12,
+`libpng-dev`, `libjpeg-dev`,
 `libportaudio2` a výše uvedené knihovny Qt. V samostatném Python prostředí:
 
 ```sh
 python -m pip install -e '.[dev]'
+bash tools/build_jpegxl_linux.sh
 bash build_linux.sh
 ```
 

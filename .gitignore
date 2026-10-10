@@ -45,6 +45,9 @@ artifacts/
 release/*.exe
 release/*.zip
 release/SHA256SUMS.txt
+release/*.tar.gz
+release/SHA256SUMS-linux-x64.txt
+release/release-manifest-linux-x64.json
 
 # Vendor documentation kept locally: third-party copyright, not ours to publish.
 VARA Doc/

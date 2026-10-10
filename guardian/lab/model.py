@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import fields, asdict
 from pathlib import Path
 
+from ..platform_support import VARA_AVAILABLE
 from ..radio.presets import DUMMY_MODEL
 
 MODES = {"SC-FTN": "ofdm_vhf", "VARA FM": "vara_p2p",
@@ -21,12 +22,15 @@ def template() -> dict:
         station.update(callsign=call, rigctld_port=14532 if name == "a" else 14533)
         endpoints[name] = {"config": station, "vara_directory": "",
                            "vara_command_port": port, "license_label": name.upper()}
-    return {"schema_version": 1, "name": "Guardian production comparison",
+    result = {"schema_version": 1, "name": "Guardian production comparison",
             "endpoints": endpoints, "cases": [{"modem": "SC-FTN", "bandwidth": "2K7",
             "bytes": 10240, "repetitions": 3, "directions": ["a-to-b", "b-to-a"]}],
             "learning": "sequence", "timeout_seconds": 300, "settle_seconds": 2,
             "stop_on_failure": True, "notes": "",
             "available_profiles": list(profile_names())}
+    if not VARA_AVAILABLE:
+        result["available_modems"] = ["SC-FTN", "ARDOP"]
+    return result
 
 
 def validate(plan: dict) -> dict:
@@ -94,6 +98,8 @@ def validate(plan: dict) -> dict:
     for case in cases:
         if not isinstance(case, dict):
             raise ValueError("Each case must be an object")
+        if not VARA_AVAILABLE and case.get("modem") in {"VARA FM", "VARA HF"}:
+            raise ValueError("VARA is unavailable on Linux. Use SC-FTN or ARDOP.")
         if case.get("modem") not in MODES:
             raise ValueError("Unknown modem; use SC-FTN, VARA FM, VARA HF or ARDOP")
         if case["modem"] == "SC-FTN":

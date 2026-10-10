@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+from ..platform_support import LINUX
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -31,7 +33,10 @@ def identity() -> dict:
         root = Path(sys._MEIPASS)
         # The frozen EXE owns Python code; the bundle owns native dependencies.
         for path in sorted(root.rglob("*")):
-            if path.is_file() and path.suffix.lower() in {".exe", ".dll", ".pyd", ".pyz", ".html"}:
+            selected = path.suffix.lower() in {".exe", ".dll", ".pyd", ".pyz", ".html"}
+            if LINUX and (path.suffix.lower() == ".so" or ".so." in path.name):
+                selected = True
+            if path.is_file() and selected:
                 files[f"bundle/{path.relative_to(root).as_posix()}"] = sha256(path)
         manifest_path = root / "guardian-build.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

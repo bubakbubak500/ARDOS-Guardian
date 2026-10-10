@@ -217,6 +217,7 @@ def _run_linux_shell_self_test() -> None:
         assert dialog.payload_backend.model().item(2).isEnabled()
         assert not dialog.vara_host.isEnabled()
         assert not dialog.vara_mode.isEnabled()
+        assert not dialog.validation_errors(), dialog.validation_errors()
         if report_path:
             window.grab().save(str(report_path.with_suffix(".png")))
         _write_report(report_path, "PASS\nLinux frozen shell: SC-FTN default, ARDOP available, VARA grey, fallback disabled.\n")

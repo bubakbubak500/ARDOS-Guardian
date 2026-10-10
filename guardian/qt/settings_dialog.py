@@ -1538,7 +1538,11 @@ class SettingsDialog(QDialog):
                                       ("VARA HF", self.vara_hf_path)))
         for label, field in executable_fields:
             value = field.text()
-            if value and (LINUX or Path(value).suffix.lower() == ".exe") and not Path(value).is_file():
+            missing = (
+                self.radio_backend.currentData() == "hamlib" and not existing_rigctld(value)
+                if LINUX else Path(value).suffix.lower() == ".exe" and not Path(value).is_file()
+            )
+            if value and missing:
                 errors.append(
                     dual(
                         f"{label} executable does not exist: {value}",

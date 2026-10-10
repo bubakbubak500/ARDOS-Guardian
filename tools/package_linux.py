@@ -23,6 +23,12 @@ def main():
         bundle.add(ROOT / "dist/Guardian", arcname=name)
     with archive.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    source = release / f"Guardian-{__version__}-linux-source.zip"
+    subprocess.run(["git", "archive", "--format=zip",
+                    f"--prefix=Guardian-{__version__}-linux-source/", "HEAD",
+                    "-o", str(source)], check=True, cwd=ROOT)
+    with source.open("rb") as stream:
+        source_digest = hashlib.file_digest(stream, "sha256").hexdigest()
     url = "https://github.com/bubakbubak500/ARDOS-Guardian/releases"
     manifest = {"version": __version__, "platform": "linux-x64",
         "installer_url": f"{url}/download/v{__version__}/{archive.name}",
@@ -30,7 +36,7 @@ def main():
     (release / "release-manifest-linux-x64.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     (release / "SHA256SUMS-linux-x64.txt").write_text(
-        f"{digest}  {archive.name}\n", encoding="ascii")
+        f"{digest}  {archive.name}\n{source_digest}  {source.name}\n", encoding="ascii")
     print(archive)
     print("Source revision:", subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip())

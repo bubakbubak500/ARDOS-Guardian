@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import tempfile
 
+from ..platform_support import LINUX
+
 
 def probe(connection, root):
     os.environ["GUARDIAN_STATE_DIR"] = root
@@ -15,7 +17,7 @@ def probe(connection, root):
         from guardian.modem import make_modem
         from .identity import identity
         contracts = []
-        for name in ("vara_p2p", "ofdm_vhf", "ardop"):
+        for name in (("ofdm_vhf", "ardop") if LINUX else ("vara_p2p", "ofdm_vhf", "ardop")):
             cfg = StationConfig(callsign="OK1LAB", payload_backend=name).enforce_production_policy()
             cfg.save(Path(root) / "config.json")
             runtime = ShellRuntime()

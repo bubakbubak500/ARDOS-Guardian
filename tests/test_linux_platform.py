@@ -76,6 +76,12 @@ def test_linux_settings_grey_vara_and_ignore_its_validation(monkeypatch, tmp_pat
         dialog.vara_fm_cmd.setValue(8300)
         dialog.vara_fm_data.setValue(8300)
         assert not any("VARA" in error for error in dialog.validation_errors())
+        assert not dialog.validation_errors()
+        dialog.radio_backend.setCurrentIndex(dialog.radio_backend.findData("hamlib"))
+        dialog.radio_model.addItem("Dummy", 1)
+        dialog.radio_model.setCurrentIndex(dialog.radio_model.count() - 1)
+        monkeypatch.setattr(settings_module, "existing_rigctld", lambda value: "/usr/bin/rigctld")
+        assert not any("rigctld" in error for error in dialog.validation_errors())
     finally:
         dialog.close()
         dialog.deleteLater()

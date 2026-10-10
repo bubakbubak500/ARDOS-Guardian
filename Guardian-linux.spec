@@ -24,9 +24,10 @@ for package in ("sounddevice", "zopfli", "bleak", "keyring", "secretstorage", "j
     binaries += package_binaries
     hiddenimports += package_imports
 for tool in ("cjxl", "djxl"):
-    path = shutil.which(tool)
+    bundled = root / "codecs/vendor/jpegxl/bin" / tool
+    path = str(bundled) if bundled.is_file() else shutil.which(tool)
     if path is None:
-        raise FileNotFoundError("Install libjxl-tools before freezing")
+        raise FileNotFoundError("Run tools/build_jpegxl_linux.sh before freezing")
     binaries.append((path, "jpegxl"))
 portaudio = Path("/usr/lib/x86_64-linux-gnu/libportaudio.so.2")
 if not portaudio.is_file():
@@ -36,6 +37,9 @@ for package in ("libjxl-tools", "libjxl0.7", "libportaudio2"):
     license_path = Path("/usr/share/doc") / package / "copyright"
     if license_path.is_file():
         datas.append((str(license_path), "licenses/" + package))
+jxl_licenses = root / "codecs/vendor/jpegxl/licenses"
+if jxl_licenses.is_dir():
+    datas.append((str(jxl_licenses), "jpegxl/licenses"))
 
 analysis = Analysis([str(root / "guardian_launch.py")], pathex=[str(root)],
     binaries=binaries, datas=datas, hiddenimports=hiddenimports,
