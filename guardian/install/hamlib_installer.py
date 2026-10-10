@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -23,6 +24,7 @@ from urllib.parse import urlparse
 from ..i18n import dual
 
 from ..config import config_dir
+from ..platform_support import LINUX
 from ..radio.presets import find_executable
 
 GITHUB_API = "https://api.github.com/repos/Hamlib/Hamlib/releases/latest"
@@ -43,6 +45,19 @@ def install_dir() -> Path:
 
 def existing_rigctld(explicit: str = "rigctld") -> str | None:
     """Return a usable rigctld path if Hamlib is already available."""
+    if LINUX:
+        candidate = Path(explicit).expanduser() if explicit else None
+        if candidate is None or not candidate.is_file():
+            found = shutil.which(explicit or "rigctld")
+            candidate = Path(found) if found else None
+        if (
+            candidate is not None
+            and candidate.is_file()
+            and candidate.suffix.lower() != ".exe"
+            and os.access(candidate, os.X_OK)
+        ):
+            return str(candidate.resolve())
+        return None
     return find_executable("rigctld", explicit)
 
 
@@ -147,6 +162,15 @@ def install(progress=None, force: bool = False) -> str:
     log = progress or (lambda *_: None)
 
     existing = existing_rigctld()
+    if LINUX:
+        if existing:
+            return existing
+        raise FileNotFoundError(dual(
+            "Install native Hamlib using your package manager "
+            "(Debian/Ubuntu: sudo apt install libhamlib-utils), then locate rigctld.",
+            "Nainstalujte nativní Hamlib správcem balíčků "
+            "(Debian/Ubuntu: sudo apt install libhamlib-utils) a vyberte rigctld.",
+        ))
     if existing and not force:
         log(dual(
             f"Hamlib already available: {existing}",

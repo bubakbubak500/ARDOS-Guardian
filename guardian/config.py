@@ -25,6 +25,8 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .platform_support import DEFAULT_PAYLOAD_BACKEND, VARA_AVAILABLE
+
 
 def config_dir() -> Path:
     """Return the directory where Guardian keeps per-station state.
@@ -219,7 +221,7 @@ class StationConfig:
     # was dropped in 0.6.26; a config still holding it is coerced on load.
     # VARA remains the default; ofdm_vhf is the internal transport name for the
     # SC-FTN Guardian modem.
-    payload_backend: str = "vara_p2p"  # "vara_p2p" | "ofdm_vhf" | "ardop"
+    payload_backend: str = DEFAULT_PAYLOAD_BACKEND  # "vara_p2p" | "ofdm_vhf" | "ardop"
     ardop_tx_percent: int = 100
 
     # Guardian SC-FTN modem settings.  The ``ofdm_*`` names are retained for
@@ -370,6 +372,8 @@ class StationConfig:
         The application calls this method while loading, saving, and applying
         the user-facing settings profile.
         """
+        if not VARA_AVAILABLE and self.payload_backend not in ("ofdm_vhf", "ardop"):
+            self.payload_backend = "ofdm_vhf"
         for name in PRODUCTION_FIXED_TRUE_FIELDS:
             setattr(self, name, True)
         try:
@@ -407,7 +411,7 @@ class StationConfig:
         # The manual Winlink hand-off was removed in 0.6.26; a station whose
         # config still selects it must not be left without a transport.
         if clean.get("payload_backend") not in PAYLOAD_BACKENDS:
-            clean["payload_backend"] = "vara_p2p"
+            clean["payload_backend"] = DEFAULT_PAYLOAD_BACKEND
         # A hand-edited or truncated file must not leave the profile picker
         # holding something that is not a profile.
         profiles = clean.get("radio_profiles")

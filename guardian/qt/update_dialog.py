@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..i18n import dual, tr
+from ..platform_support import LINUX
 from ..services import TaskResult
 from ..updates import UpdateInfo
 from .runtime import ShellRuntime
@@ -50,6 +51,14 @@ class UpdateDialog(QDialog):
         detail = QLabel(dual(
             f"Installed: {__version__}\n"
             "Guardian downloads only after confirmation and verifies the "
+            "archive SHA-256 checksum. Extract the archive and run Guardian "
+            "from the extracted folder.",
+            f"Nainstalováno: {__version__}\n"
+            "Guardian začne stahovat až po potvrzení a ověří kontrolní součet "
+            "SHA-256 archivu. Rozbalte archiv a spusťte Guardian z rozbalené složky.",
+        ) if LINUX else dual(
+            f"Installed: {__version__}\n"
+            "Guardian downloads only after confirmation and verifies the "
             "installer SHA-256 checksum before it can be launched.",
             f"Nainstalováno: {__version__}\n"
             "Guardian začne stahovat až po potvrzení a před spuštěním ověří "
@@ -65,6 +74,8 @@ class UpdateDialog(QDialog):
             )
             outer.addWidget(notes)
         self.download = QPushButton(dual(
+            "Download verified archive", "Stáhnout ověřený archiv"
+        ) if LINUX else dual(
             "Download verified installer", "Stáhnout ověřený instalátor"
         ))
         self.download.setObjectName("primaryAction")
@@ -105,6 +116,9 @@ class UpdateDialog(QDialog):
         self.progress.setRange(0, 0)
         self.progress.show()
         self.status.setText(dual(
+            "Downloading and verifying archive…",
+            "Stahuji a ověřuji archiv…",
+        ) if LINUX else dual(
             "Downloading and verifying installer…",
             "Stahuji a ověřuji instalátor…",
         ))
@@ -124,6 +138,24 @@ class UpdateDialog(QDialog):
             path = result.value
             self.progress.setRange(0, 100)
             self.progress.setValue(100)
+            if LINUX:
+                self.status.setText(dual(
+                    f"Verified archive: {path}\n"
+                    "Extract the archive and run Guardian from the extracted folder.",
+                    f"Ověřený archiv: {path}\n"
+                    "Rozbalte archiv a spusťte Guardian z rozbalené složky.",
+                ))
+                show_folder = QMessageBox.question(
+                    self,
+                    dual("Update downloaded", "Aktualizace stažena"),
+                    dual(
+                        "Open the folder containing the verified archive?",
+                        "Otevřít složku s ověřeným archivem?",
+                    ),
+                )
+                if show_folder == QMessageBox.StandardButton.Yes:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+                return
             self.status.setText(dual(
                 f"Verified installer: {path}",
                 f"Ověřený instalátor: {path}",

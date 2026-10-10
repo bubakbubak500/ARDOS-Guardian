@@ -17,6 +17,7 @@ from .ardos_cz import HELD_STATES
 from .config import G2_MAX_TX_SCALE, StationConfig, config_dir
 from .install.dependencies import find_vara_fm, find_vara_hf
 from .i18n import dual
+from .platform_support import VARA_AVAILABLE
 from .message import Folder, MailMessage, MessageStore, Status
 from .modem import make_modem
 from .modem.audio import (
@@ -422,6 +423,7 @@ class Operations:
             routes=self.routes,
             on_event=self._session_event,
             payload=self._make_payload_backend(),
+            allow_vara_fallback=VARA_AVAILABLE,
             heard=self.heard,
             auto_route=self.config.auto_route,
             relay=self.config.auto_relay,
@@ -3061,6 +3063,11 @@ class Operations:
         """Build the next-session payload backend from the current settings."""
         deps = self._payload_dependencies()
         primary = make_backend(self.config.payload_backend, **deps)
+        if not VARA_AVAILABLE:
+            if self.config.payload_backend == "vara_p2p":
+                raise RuntimeError("VARA is unavailable in the Linux edition")
+            return NegotiatedPayload(default=primary, backends={primary.name: primary},
+                                     ignore_unavailable_cancel=True)
         if self.config.payload_backend == "vara_p2p":
             return primary
         # SC-FTN is negotiated per hop.  A peer that only has the established
@@ -3369,6 +3376,10 @@ class Operations:
         return self.workers.submit("radio-control", operation, completed)
 
     def connect_vara(self) -> bool:
+        if not VARA_AVAILABLE:
+            self._log(dual("VARA is unavailable on Linux.", "VARA není na Linuxu dostupná."),
+                      source="vara")
+            return False
         def operation() -> str | None:
             self.vara.host = self.config.vara_host
             self.vara.cmd_port = self.config.vara_cmd_port

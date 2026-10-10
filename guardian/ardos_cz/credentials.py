@@ -1,4 +1,4 @@
-"""Device secrets live in Windows Credential Manager, never in station JSON."""
+"""Device secrets live in the desktop credential store, never in station JSON."""
 from __future__ import annotations
 
 import ctypes
@@ -12,6 +12,25 @@ class WindowsCredentials:
     def __init__(self, server: str, station: str, profile: str):
         identity = f"{server}\n{station}\n{profile}".encode()
         self.target = 'Guardian/ARDOS-CZ/' + hashlib.sha256(identity).hexdigest()
+
+    @staticmethod
+    def _secret_service_error() -> RuntimeError:
+        from ..i18n import dual
+
+        return RuntimeError(dual(
+            'ARDOS CZ requires an unlocked desktop Secret Service. Install and '
+            'unlock GNOME Keyring or another Secret Service provider, then retry.',
+            'ARDOS CZ vyžaduje odemčené úložiště Secret Service. Nainstalujte a '
+            'odemkněte GNOME Keyring nebo jiného poskytovatele Secret Service '
+            'a zkuste to znovu.'))
+
+    @staticmethod
+    def _secret_service():
+        # Select this backend explicitly: a user-installed keyring fallback
+        # must never redirect device secrets to a plaintext file.
+        from keyring.backends.SecretService import Keyring
+
+        return Keyring()
 
     def _api(self):
         if sys.platform != 'win32':
@@ -33,6 +52,13 @@ class WindowsCredentials:
         return api, Credential
 
     def load(self) -> dict | None:
+        if sys.platform.startswith('linux'):
+            try:
+                value = self._secret_service().get_password(
+                    self.target, 'Guardian ARDOS CZ')
+            except Exception:
+                raise self._secret_service_error() from None
+            return json.loads(value) if value is not None else None
         api, cls = self._api()
         pointer = ctypes.POINTER(cls)()
         if not api.CredReadW(self.target, 1, 0, ctypes.byref(pointer)):
@@ -47,6 +73,14 @@ class WindowsCredentials:
             api.CredFree(pointer)
 
     def save(self, value: dict) -> None:
+        if sys.platform.startswith('linux'):
+            data = json.dumps(value)
+            try:
+                self._secret_service().set_password(
+                    self.target, 'Guardian ARDOS CZ', data)
+            except Exception:
+                raise self._secret_service_error() from None
+            return
         api, cls = self._api()
         data = json.dumps(value).encode()
         blob = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)

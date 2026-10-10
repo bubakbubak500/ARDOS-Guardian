@@ -135,16 +135,30 @@ def _run_qt_self_test() -> None:
         from PySide6 import QtCore, QtGui, QtWidgets
         import importlib
 
-        # Keep this an import-only smoke test.  It verifies that the two
-        # consent-gated WinRT projections are present in the frozen bundle
-        # without touching location services or requesting user consent.
-        geolocation = importlib.import_module(
-            "winrt.windows.devices.geolocation"
-        )
-        foundation = importlib.import_module("winrt.windows.foundation")
-        # Import the real BLE backends without scanning or requesting pairing.
-        ble_client = importlib.import_module("bleak.backends.winrt.client")
-        ble_scanner = importlib.import_module("bleak.backends.winrt.scanner")
+        if sys.platform.startswith("linux"):
+            from PySide6 import QtMultimedia
+
+            # Import native dependencies without accessing the desktop store,
+            # starting an audio stream, scanning, or requesting pairing.
+            importlib.import_module("keyring.backends.SecretService")
+            ble_client = importlib.import_module("bleak.backends.bluezdbus.client")
+            ble_scanner = importlib.import_module("bleak.backends.bluezdbus.scanner")
+            platform_report = f"QtMultimedia module={QtMultimedia.__name__}\n"
+        else:
+            # Keep this an import-only smoke test.  It verifies that the two
+            # consent-gated WinRT projections are present in the frozen bundle
+            # without touching location services or requesting user consent.
+            geolocation = importlib.import_module(
+                "winrt.windows.devices.geolocation"
+            )
+            foundation = importlib.import_module("winrt.windows.foundation")
+            # Import the real BLE backends without scanning or requesting pairing.
+            ble_client = importlib.import_module("bleak.backends.winrt.client")
+            ble_scanner = importlib.import_module("bleak.backends.winrt.scanner")
+            platform_report = (
+                f"WinRT geolocation={geolocation.__name__}\n"
+                f"WinRT foundation={foundation.__name__}\n"
+            )
         from guardian.guard_mesh import GuardianStatus
         assert len(GuardianStatus().encode(0)) == 20
 
@@ -155,8 +169,7 @@ def _run_qt_self_test() -> None:
             f"Qt {QtCore.qVersion()}\n"
             f"QtGui QColor valid={QtGui.QColor('black').isValid()}\n"
             f"QtWidgets module={QtWidgets.__name__}\n"
-            f"WinRT geolocation={geolocation.__name__}\n"
-            f"WinRT foundation={foundation.__name__}\n"
+            f"{platform_report}"
             f"BLE client={ble_client.__name__}\n"
             f"BLE scanner={ble_scanner.__name__}\n"
         )
@@ -165,6 +178,57 @@ def _run_qt_self_test() -> None:
         _write_report(report_path, report)
         raise
     _write_report(report_path, report)
+
+
+def _run_linux_shell_self_test() -> None:
+    """Verify the frozen Linux UI without opening a radio or network."""
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("This self-test requires the Linux edition")
+    report_path = _self_test_report_path(sys.argv, "--linux-shell-self-test-report")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+    from guardian.config import config_dir
+    from guardian.qt.runtime import ShellRuntime
+    from guardian.qt.shell import GuardianMainWindow
+    from guardian.qt.settings_dialog import SettingsDialog
+    from guardian.qt.theme import ThemePreference
+
+    application = QApplication.instance() or QApplication([])
+    application.setApplicationName("Guardian")
+    application.setOrganizationName("ARDOS")
+    ShellRuntime.request_dependency_refresh = lambda self: False
+    ShellRuntime.request_update_check = lambda self, on_complete=None: False
+    settings = QSettings(str(config_dir() / "selftest.ini"), QSettings.Format.IniFormat)
+    settings.setValue("onboarding/completed", True)
+    runtime = ShellRuntime()
+    window = None
+    dialog = None
+    try:
+        assert runtime.config.payload_backend == "ofdm_vhf"
+        assert not runtime.operations.net.allow_vara_fallback
+        window = GuardianMainWindow(runtime, settings)
+        window.resize(1280, 800)
+        window.show()
+        application.processEvents()
+        assert not window.vara_button.isEnabled()
+        dialog = SettingsDialog(runtime.config, ThemePreference.SYSTEM, settings=settings)
+        assert not dialog.payload_backend.model().item(0).isEnabled()
+        assert dialog.payload_backend.model().item(1).isEnabled()
+        assert dialog.payload_backend.model().item(2).isEnabled()
+        assert not dialog.vara_host.isEnabled()
+        assert not dialog.vara_mode.isEnabled()
+        if report_path:
+            window.grab().save(str(report_path.with_suffix(".png")))
+        _write_report(report_path, "PASS\nLinux frozen shell: SC-FTN default, ARDOP available, VARA grey, fallback disabled.\n")
+    except BaseException:
+        _write_report(report_path, traceback.format_exc())
+        raise
+    finally:
+        if dialog:
+            dialog.close()
+        if window:
+            window.close()
+        runtime.close()
 
 
 if __name__ == "__main__":
@@ -180,6 +244,8 @@ if __name__ == "__main__":
         _run_qt_self_test()
     elif "--ardos-cz-self-test" in sys.argv:
         _run_ardos_cz_self_test()
+    elif "--linux-shell-self-test" in sys.argv:
+        _run_linux_shell_self_test()
     else:
         from guardian.app import main
 

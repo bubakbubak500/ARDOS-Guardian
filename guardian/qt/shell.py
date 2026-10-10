@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..platform_support import VARA_AVAILABLE
+
 from PySide6.QtCore import QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QAction,
@@ -999,11 +1001,13 @@ class GuardianMainWindow(QMainWindow):
             if snapshot.vara.command_connected
             else tr("shell.connect_vara")
         )
-        self.vara_button.setEnabled(config.payload_backend != "ardop")
+        self.vara_button.setEnabled(VARA_AVAILABLE and config.payload_backend != "ardop")
         self.vara_button.setToolTip(dual(
             "ARDOP uses its own modem; VARA is unavailable for this backend.",
             "ARDOP používá vlastní modem; VARA není pro tento přenos dostupná.",
-        ) if config.payload_backend == "ardop" else "")
+        ) if config.payload_backend == "ardop" else
+            dual("VARA is unavailable on Linux.", "VARA není na Linuxu dostupná.")
+            if not VARA_AVAILABLE else "")
         self.control_button.setText(
             tr("shell.stop_control")
             if snapshot.network.control_channel_active

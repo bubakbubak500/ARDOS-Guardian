@@ -8,16 +8,18 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
 from . import __version__
 from .config import config_dir
 from .i18n import dual
+from .platform_support import LINUX
 
 DEFAULT_MANIFEST_URL = (
     "https://github.com/bubakbubak500/ARDOS-Guardian/"
-    "releases/latest/download/release-manifest.json"
+    "releases/latest/download/"
+    + ("release-manifest-linux-x64.json" if LINUX else "release-manifest.json")
 )
 ALLOWED_DOWNLOAD_HOSTS = {
     "github.com",
@@ -82,6 +84,14 @@ def _require_trusted_https(url: str, *, manifest: bool = False) -> None:
         ))
 
 
+def _require_platform_download(url: str) -> None:
+    if LINUX and not unquote(urlparse(url).path).lower().endswith(".tar.gz"):
+        raise UpdateError(dual(
+            "Linux updates must be a .tar.gz archive.",
+            "Aktualizace pro Linux musí být archiv .tar.gz.",
+        ))
+
+
 def check_for_update(
     manifest_url: str = DEFAULT_MANIFEST_URL,
     *,
@@ -125,6 +135,7 @@ def check_for_update(
             "Manifest aktualizace není úplný.",
         )) from exc
     _require_trusted_https(info.installer_url)
+    _require_platform_download(info.installer_url)
     if info.notes_url:
         _require_trusted_https(info.notes_url)
     if not re.fullmatch(r"[0-9a-f]{64}", info.sha256):
@@ -144,8 +155,12 @@ def download_installer(
     progress: Callable[[int, int | None], None] | None = None,
 ) -> Path:
     _require_trusted_https(info.installer_url)
+    _require_platform_download(info.installer_url)
     target = destination or (
-        config_dir() / "updates" / f"Guardian-{info.version}-setup-win-x64.exe"
+        config_dir() / "updates" / (
+            f"Guardian-{info.version}-linux-x64.tar.gz"
+            if LINUX else f"Guardian-{info.version}-setup-win-x64.exe"
+        )
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".part")

@@ -24,6 +24,7 @@ from ..config import SC_FTN_WAVEFORM, config_dir
 from ..i18n import dual, tr
 from ..install import DependencyKind, vara_installer
 from ..ofdm.automatic import automatic_g2_policy
+from ..platform_support import LINUX, VARA_AVAILABLE
 from ..services import TaskResult
 from ..waveforms.config import profile_for
 from .runtime import ShellRuntime
@@ -144,7 +145,7 @@ class ReadinessDialog(QDialog):
                 widget.deleteLater()
 
     def _detail(self, status) -> str:
-        if status.available:
+        if status.available or LINUX:
             return status.detail
         if status.kind == DependencyKind.HAMLIB:
             return dual(
@@ -172,22 +173,42 @@ class ReadinessDialog(QDialog):
             label.setObjectName("SectionLabel")
             self.grid.addWidget(label, 0, column)
         for row, status in enumerate(statuses, start=1):
-            self.grid.addWidget(QLabel(status.label), row, 0)
+            unsupported = not VARA_AVAILABLE and status.kind in (
+                DependencyKind.VARA_FM, DependencyKind.VARA_HF
+            )
+            label = QLabel(status.label)
+            label.setEnabled(not unsupported)
+            self.grid.addWidget(label, row, 0)
             state = QLabel(
+                dual("Unavailable on Linux", "Na Linuxu nedostupné")
+                if unsupported
+                else
                 ("● " + tr("common.ready"))
                 if status.available
                 else ("◆ " + tr("common.missing"))
             )
             state.setProperty(
-                "statusRole", "success" if status.available else "warning"
+                "statusRole", "info" if unsupported else (
+                    "success" if status.available else "warning"
+                )
             )
+            state.setEnabled(not unsupported)
             self.grid.addWidget(state, row, 1)
             detail = QLabel(self._detail(status))
             detail.setObjectName("Metadata")
             detail.setWordWrap(True)
+            detail.setEnabled(not unsupported)
             self.grid.addWidget(detail, row, 2)
             action = QPushButton()
-            if status.kind == DependencyKind.HAMLIB and not status.available:
+            if unsupported:
+                action.setText(dual("Unavailable", "Nedostupné"))
+                action.setEnabled(False)
+                self.grid.addWidget(action, row, 3)
+            elif (
+                status.kind == DependencyKind.HAMLIB
+                and not status.available
+                and status.can_install
+            ):
                 action.setText(
                     dual(
                         "Install verified Hamlib",
@@ -354,6 +375,8 @@ class ReadinessDialog(QDialog):
         )
 
     def _install_hamlib(self) -> None:
+        if LINUX:
+            return
         answer = QMessageBox.question(
             self,
             dual("Install Hamlib", "Instalace Hamlib"),
@@ -380,6 +403,8 @@ class ReadinessDialog(QDialog):
         self.runtime.install_hamlib(completed)
 
     def _download_vara(self, kind: DependencyKind) -> None:
+        if not VARA_AVAILABLE:
+            return
         package = vara_installer.package_for(kind)
         answer = QMessageBox.question(
             self,
@@ -496,8 +521,12 @@ class ReadinessDialog(QDialog):
             )
 
     def _locate(self, kind: DependencyKind) -> None:
+        if not VARA_AVAILABLE and kind != DependencyKind.HAMLIB:
+            return
         names = {
-            DependencyKind.HAMLIB: ("rigctld.exe", "rigctld.exe"),
+            DependencyKind.HAMLIB: (
+                ("rigctld", "rigctld") if LINUX else ("rigctld.exe", "rigctld.exe")
+            ),
             DependencyKind.VARA_FM: ("VARAFM.exe", "VARAFM.exe"),
             DependencyKind.VARA_HF: ("VARA.exe", "VARA.exe"),
         }
@@ -507,6 +536,9 @@ class ReadinessDialog(QDialog):
             dual(f"Locate {label}", f"Vyberte {label}"),
             "",
             dual(
+                "rigctld (rigctld);;All files (*)",
+                "rigctld (rigctld);;Všechny soubory (*)",
+            ) if LINUX else dual(
                 f"{label} ({pattern});;Executables (*.exe)",
                 f"{label} ({pattern});;Spustitelné soubory (*.exe)",
             ),

@@ -17,7 +17,9 @@ stays in the shack.
 from __future__ import annotations
 
 import time
+import sys
 from collections import deque
+from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QTimer, Qt
@@ -41,10 +43,19 @@ from ..protocol import Priority
 ALERT_ANNOUNCE_WINDOW = 900.0
 EMERGENCY_REPEAT_MS = 4_000
 
+# Keep the asynchronous Linux players alive after play_wav returns. Normal
+# operation uses just the notification and emergency WAVs.
+_linux_sounds: dict[str, object] = {}
+
 
 def default_output_device() -> str | None:
-    """Name of the Windows default output device, or None when unknowable."""
+    """Name of the chime's default output device, or None when unknowable."""
     try:
+        if sys.platform.startswith("linux"):
+            from PySide6.QtMultimedia import QMediaDevices
+
+            output = QMediaDevices.defaultAudioOutput()
+            return output.description() if not output.isNull() else None
         import sounddevice
 
         info = sounddevice.query_devices(kind="output")
@@ -56,6 +67,26 @@ def default_output_device() -> str | None:
 def play_wav(path) -> bool:
     """Asynchronously play a WAV on the system default output device."""
     try:
+        if sys.platform.startswith("linux"):
+            from PySide6.QtCore import QUrl
+            from PySide6.QtMultimedia import QMediaDevices, QSoundEffect
+
+            app = QApplication.instance()
+            output = QMediaDevices.defaultAudioOutput()
+            if app is None or output.isNull():
+                return False
+            filename = str(Path(path).resolve())
+            sound = _linux_sounds.get(filename)
+            if sound is None:
+                sound = QSoundEffect(app)
+                sound.setSource(QUrl.fromLocalFile(filename))
+                _linux_sounds[filename] = sound
+            # Use the same Qt device API as the transmitter-safety check.
+            sound.setAudioDevice(output)
+            if sound.status() == QSoundEffect.Status.Error:
+                return False
+            sound.play()
+            return True
         import winsound
 
         winsound.PlaySound(
@@ -93,6 +124,21 @@ class SoundPlayer:
             radio = (output or "").strip()
             if radio and match_device_name([default], radio) is not None:
                 return f"the system default output is the radio ({default})"
+            if radio and sys.platform.startswith("linux"):
+                # PortAudio and Qt may name the same USB endpoint differently.
+                # Only chime when the radio maps to a distinct Qt device.
+                try:
+                    from PySide6.QtMultimedia import QMediaDevices
+
+                    devices = QMediaDevices.audioOutputs()
+                    match = match_device_name([d.description() for d in devices], radio)
+                    if match is None:
+                        return "the radio output cannot be identified in the desktop audio devices"
+                    device = next(d for d in devices if d.description() == match)
+                    if device.id() == QMediaDevices.defaultAudioOutput().id():
+                        return f"the system default output is the radio ({default})"
+                except Exception:
+                    return "the desktop audio devices cannot be verified"
         return ""
 
     def play(self, kind: str) -> bool:

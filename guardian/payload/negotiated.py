@@ -24,10 +24,11 @@ class NegotiatedPayload(PayloadBackend):
 
     def __init__(self, default: PayloadBackend,
                  backends: dict[str, PayloadBackend] | None = None,
-                 on_log=None) -> None:
+                 on_log=None, *, ignore_unavailable_cancel: bool = False) -> None:
         self.default = default
         self.backends = dict(backends or {})
         self.on_log = on_log or (lambda message: None)
+        self.ignore_unavailable_cancel = ignore_unavailable_cancel
 
     def backend_for(self, msg) -> PayloadBackend:
         """Return the backend named by the completed hop negotiation.
@@ -54,7 +55,13 @@ class NegotiatedPayload(PayloadBackend):
         self.backend_for(msg).start_receive(msg, done)
 
     def cancel(self, msg) -> None:
-        self.backend_for(msg).cancel(msg)
+        try:
+            backend = self.backend_for(msg)
+        except ValueError:
+            if self.ignore_unavailable_cancel:
+                return  # Negotiation rejected a transport that was never started.
+            raise
+        backend.cancel(msg)
 
     def shutdown(self) -> None:
         """Stop every owned backend during Operations teardown."""

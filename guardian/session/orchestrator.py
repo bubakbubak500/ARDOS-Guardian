@@ -377,6 +377,7 @@ class Orchestrator:
         link_advert_interval: float = 900.0,
         discovery_channel_active: bool = True,
         link_advert_paused: bool = False,
+        allow_vara_fallback: bool = True,
     ):
         self.callsign = callsign.strip().upper()
         self.transport = transport
@@ -387,6 +388,7 @@ class Orchestrator:
         self.auto_complete = auto_complete
         self.begin_transfer = begin_transfer
         self.payload = payload  # PayloadBackend | None
+        self.allow_vara_fallback = bool(allow_vara_fallback)
         self.heard = heard if heard is not None else HeardStations()
         self.auto_route = auto_route
         # Scaled to the control modem once a real channel is up: a 34-byte
@@ -1391,6 +1393,10 @@ class Orchestrator:
             self._send(FrameType.CANCEL, msg)
             self._fail(msg, "peer does not support Guardian ARDOP 500 Hz")
             return
+        if not agreed_ofdm and self._reject_vara_fallback(
+            msg, "peer does not support the configured Guardian modem"
+        ):
+            return
         if self.busy:
             self._send(FrameType.BUSY, msg)
             self._fail(msg, "declined — station busy")
@@ -1424,6 +1430,10 @@ class Orchestrator:
             if self._own_g2_profile() == "A500" and not agreed_ofdm:
                 self._send(FrameType.CANCEL, msg)
                 self._fail(msg, "peer does not support Guardian ARDOP 500 Hz")
+                return
+            if not agreed_ofdm and self._reject_vara_fallback(
+                msg, "peer does not support the configured Guardian modem"
+            ):
                 return
             if not agreed_ofdm and self._own_ofdm_capable():
                 self._emit(
@@ -1464,6 +1474,10 @@ class Orchestrator:
         return {"ofdm_vhf": "OFDM VHF", "ardop": "ARDOP 500 Hz"}.get(msg.payload_transport, "VARA")
 
     def _start_payload(self, msg: Message, peer: str) -> None:
+        if msg.payload_transport == "vara_p2p" and self._reject_vara_fallback(
+            msg, "the transfer did not agree on a Guardian modem"
+        ):
+            return
         self._enter(msg, SessionState.STARTING_VARA)
         self._emit(msg, f"{peer} ready — starting {self._payload_label(msg)}")
 
@@ -1491,6 +1505,8 @@ class Orchestrator:
             return
         token = self._own_g2_profile()
         if token is None:
+            if self._reject_vara_fallback(msg, "the local Guardian modem profile is invalid"):
+                return
             msg.payload_transport = "vara_p2p"
             self._start_payload(msg, peer)
             return
@@ -1634,6 +1650,8 @@ class Orchestrator:
             if local == "A500":
                 msg.payload_transport = "ardop"
         else:
+            if self._reject_vara_fallback(msg, "the peer selected a different modem profile"):
+                return
             msg.payload_transport = "vara_p2p"
             msg.g2_profile_token = "="
         msg.t_state = self._now
@@ -1650,6 +1668,8 @@ class Orchestrator:
             if msg.g2_profile_token == "A500":
                 self._send(FrameType.CANCEL, msg)
                 self._fail(msg, "ARDOP 500 Hz profile not agreed")
+                return
+            if self._reject_vara_fallback(msg, "the peer selected a different modem profile"):
                 return
             msg.payload_transport = "vara_p2p"
             msg.g2_profile_token = ""
@@ -1669,6 +1689,10 @@ class Orchestrator:
         msg = self._mine(f, "in")
         addressed = f.next_hop == self.callsign or (not f.next_hop and f.destination == self.callsign)
         if msg and addressed and f.source == msg.source and msg.state is SessionState.ACKED:
+            if msg.payload_transport == "vara_p2p" and self._reject_vara_fallback(
+                msg, "the transfer did not agree on a Guardian modem"
+            ):
+                return
             self._enter(msg, SessionState.RECEIVING)
             self._emit(msg, f"receiving payload over {self._payload_label(msg)}")
             if self.payload is not None:
@@ -1824,6 +1848,18 @@ class Orchestrator:
         self._enter(msg, SessionState.FAILED)
         self._stop_message_work(msg)
         self._emit(msg, f"failed: {reason}")
+
+    def _reject_vara_fallback(self, msg: Message, reason: str) -> bool:
+        """Cancel an incompatible hop on stations without a VARA backend."""
+        if self.allow_vara_fallback:
+            return False
+        self._send(FrameType.CANCEL, msg)
+        self._fail(
+            msg,
+            f"{reason}; VARA is unavailable on this station. "
+            "Select the same SC-FTN or ARDOP profile on both stations.",
+        )
+        return True
 
     def _send(self, ftype: FrameType, msg: Message,
               *, on_complete: Callable[[bool], None] | None = None) -> None:

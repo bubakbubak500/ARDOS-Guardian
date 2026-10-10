@@ -2,6 +2,7 @@
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from ..i18n import dual
+from ..platform_support import VARA_AVAILABLE
 from .inputs import FrequencySpinBox
 
 
@@ -52,11 +53,13 @@ class SecondRadioPanel(QFrame):
                                   else dual("Connect radio 2", "Připojit rádio 2"))
         self.vara_button.setText(dual("Disconnect VARA 2", "Odpojit VARA 2") if radio.vara.connected
                                  else dual("Connect VARA 2", "Připojit VARA 2"))
-        self.vara_button.setEnabled(radio.config.payload_backend != "ardop")
+        self.vara_button.setEnabled(VARA_AVAILABLE and radio.config.payload_backend != "ardop")
         self.vara_button.setToolTip(dual(
             "ARDOP uses its own modem; VARA is unavailable for this backend.",
             "ARDOP používá vlastní modem; VARA není pro tento přenos dostupná.",
-        ) if radio.config.payload_backend == "ardop" else "")
+        ) if radio.config.payload_backend == "ardop" else
+            dual("VARA is unavailable on Linux.", "VARA není na Linuxu dostupná.")
+            if not VARA_AVAILABLE else "")
         self.control_button.setText(dual("Stop control 2", "Zastavit řízení 2") if radio.audio_transport is not None
                                     else dual("Start control 2", "Spustit řízení 2"))
         self.frequency.setVisible(not radio.has_frequency_control())

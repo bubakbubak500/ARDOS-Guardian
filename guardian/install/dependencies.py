@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ..config import StationConfig
 from ..i18n import dual
+from ..platform_support import LINUX, VARA_AVAILABLE
 from . import hamlib_installer
 
 VARA_OFFICIAL_URL = "https://downloads.winlink.org/VARA%20Products/"
@@ -54,6 +55,8 @@ def _windows_roots() -> tuple[Path, Path, Path]:
 
 
 def find_vara_fm(explicit: str = "") -> str | None:
+    if not VARA_AVAILABLE:
+        return None
     if explicit:
         return _existing_file(explicit)
     on_path = shutil.which("VARAFM.exe")
@@ -70,6 +73,8 @@ def find_vara_fm(explicit: str = "") -> str | None:
 
 
 def find_vara_hf(explicit: str = "") -> str | None:
+    if not VARA_AVAILABLE:
+        return None
     if explicit:
         return _existing_file(explicit)
     on_path = shutil.which("VARA.exe")
@@ -90,40 +95,49 @@ def inspect_dependencies(config: StationConfig) -> tuple[DependencyStatus, ...]:
     hamlib = hamlib_installer.existing_rigctld(config.rigctld_path)
     vara_fm = find_vara_fm(config.vara_fm_path)
     vara_hf = find_vara_hf(config.vara_hf_path)
+    vara_unavailable = dual(
+        "VARA is unavailable on Linux. Use SC-FTN or ARDOP.",
+        "VARA není na Linuxu dostupná. Použijte SC-FTN nebo ARDOP.",
+    )
     return (
         DependencyStatus(
             DependencyKind.HAMLIB,
             "Hamlib / rigctld",
             bool(hamlib),
             hamlib,
-            hamlib or dual(
+            hamlib or (dual(
+                "Not found. Install native Hamlib using your package manager "
+                "(Debian/Ubuntu: sudo apt install libhamlib-utils), then locate rigctld.",
+                "Nenalezeno. Nainstalujte nativní Hamlib správcem balíčků "
+                "(Debian/Ubuntu: sudo apt install libhamlib-utils) a vyberte rigctld.",
+            ) if LINUX else dual(
                 "Not found. Guardian can install a verified portable build.",
                 "Nenalezeno. Guardian může nainstalovat ověřenou přenosnou verzi.",
-            ),
-            can_install=True,
+            )),
+            can_install=not LINUX,
         ),
         DependencyStatus(
             DependencyKind.VARA_FM,
             "VARA FM",
             bool(vara_fm),
             vara_fm,
-            vara_fm or dual(
+            vara_fm or (dual(
                 "Not found. Guardian can download the pinned official archive.",
                 "Nenalezeno. Guardian může stáhnout připnutý oficiální archiv.",
-            ),
-            official_url=VARA_OFFICIAL_URL,
-            can_install=True,
+            ) if VARA_AVAILABLE else vara_unavailable),
+            official_url=VARA_OFFICIAL_URL if VARA_AVAILABLE else None,
+            can_install=VARA_AVAILABLE,
         ),
         DependencyStatus(
             DependencyKind.VARA_HF,
             "VARA HF",
             bool(vara_hf),
             vara_hf,
-            vara_hf or dual(
+            vara_hf or (dual(
                 "Not found. Guardian can download the pinned official archive.",
                 "Nenalezeno. Guardian může stáhnout připnutý oficiální archiv.",
-            ),
-            official_url=VARA_OFFICIAL_URL,
-            can_install=True,
+            ) if VARA_AVAILABLE else vara_unavailable),
+            official_url=VARA_OFFICIAL_URL if VARA_AVAILABLE else None,
+            can_install=VARA_AVAILABLE,
         ),
     )

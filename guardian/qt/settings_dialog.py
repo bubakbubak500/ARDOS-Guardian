@@ -37,6 +37,7 @@ from ..config import (
 from ..ofdm.automatic import automatic_g2_policy
 from ..waveforms.config import profile_for
 from ..i18n import Language, dual, language, set_language, tr
+from ..platform_support import LINUX, VARA_AVAILABLE
 from ..install.dependencies import find_vara_fm, find_vara_hf
 from ..install.hamlib_installer import existing_rigctld
 from ..modem.audio import match_device_name, scan_audio_devices
@@ -434,7 +435,7 @@ class SettingsDialog(QDialog):
         self.rigctld_port = _spin(1, 65_535, self.config.rigctld_port)
         self.rigctld_path = PathField(
             self.config.rigctld_path,
-            "rigctld.exe",
+            "rigctld" if LINUX else "rigctld.exe",
             detected=existing_rigctld(),
         )
         self.ptt_line = QComboBox()
@@ -1102,6 +1103,10 @@ class SettingsDialog(QDialog):
         self.payload_backend.addItem("Guardian VARA P2P", "vara_p2p")
         self.payload_backend.addItem("Guardian SC-FTN", "ofdm_vhf")
         self.payload_backend.addItem("Guardian ARDOP 500 Hz (experimental)", "ardop")
+        if not VARA_AVAILABLE:
+            item = self.payload_backend.model().item(0)
+            item.setEnabled(False)
+            item.setToolTip(dual("VARA is unavailable on Linux.", "VARA není na Linuxu dostupná."))
         self.ardop_tx_percent = _spin(1, 100, self.config.ardop_tx_percent)
         self.ardop_tx_percent.setSuffix(" %")
         self.ardop_summary = QLabel(dual(
@@ -1112,7 +1117,9 @@ class SettingsDialog(QDialog):
         ))
         self.ardop_summary.setWordWrap(True)
         self.payload_backend.setCurrentIndex(
-            max(0, self.payload_backend.findData(self.config.payload_backend))
+            max(0, self.payload_backend.findData(
+                "ofdm_vhf" if not VARA_AVAILABLE and self.config.payload_backend == "vara_p2p"
+                else self.config.payload_backend))
         )
         self.g2_waveform = QComboBox()
         self.g2_waveform.addItem("SC-FTN", SC_FTN_WAVEFORM)
@@ -1219,14 +1226,20 @@ class SettingsDialog(QDialog):
         """Show only the selected transport's waveform and bandwidth rows."""
         sc_selected = self.payload_backend.currentData() == "ofdm_vhf"
         ardop_selected = self.payload_backend.currentData() == "ardop"
-        self.vara_mode.setEnabled(not ardop_selected)
-        self._modem_form.labelForField(self.vara_mode).setEnabled(not ardop_selected)
+        self.vara_mode.setEnabled(VARA_AVAILABLE and not ardop_selected)
+        self._modem_form.labelForField(self.vara_mode).setEnabled(VARA_AVAILABLE and not ardop_selected)
         self._modem_form.setRowVisible(self.ardop_tx_percent, ardop_selected)
         self._modem_form.setRowVisible(self.ardop_summary, ardop_selected)
         for widget in (self.vara_host, self.vara_fm_cmd, self.vara_fm_data,
                        self.vara_fm_path, self.vara_hf_cmd, self.vara_hf_data,
                        self.vara_hf_path):
             self._modem_form.setRowVisible(widget, not ardop_selected)
+            if not VARA_AVAILABLE:
+                widget.setEnabled(False)
+                widget.setToolTip(dual("VARA is unavailable on Linux.", "VARA není na Linuxu dostupná."))
+                self._modem_form.labelForField(widget).setEnabled(False)
+        if not VARA_AVAILABLE:
+            self.vara_ptt_delay.setEnabled(False)
         self.control_modem.setEnabled(not ardop_selected)
         self.control_modem.setToolTip(dual(
             "ARDOP uses narrow control frames automatically. Both peers need Guardian 1.1.11 or newer.",
@@ -1478,7 +1491,7 @@ class SettingsDialog(QDialog):
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
         # SC-FTN can negotiate a VARA fallback; ARDOP cannot use VARA.
-        uses_vara = self.payload_backend.currentData() != "ardop"
+        uses_vara = VARA_AVAILABLE and self.payload_backend.currentData() != "ardop"
         if self.ardos_cz_enabled.isChecked():
             from ..ardos_cz.client import server_url
             try:
@@ -1525,7 +1538,7 @@ class SettingsDialog(QDialog):
                                       ("VARA HF", self.vara_hf_path)))
         for label, field in executable_fields:
             value = field.text()
-            if value and Path(value).suffix.lower() == ".exe" and not Path(value).is_file():
+            if value and (LINUX or Path(value).suffix.lower() == ".exe") and not Path(value).is_file():
                 errors.append(
                     dual(
                         f"{label} executable does not exist: {value}",
