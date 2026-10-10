@@ -20,7 +20,7 @@ cd Guardian-1.1.24-linux-x64
 Na Ubuntu/Debian jsou systémové knihovny pro zvuk a Qt dostupné přes:
 
 ```sh
-sudo apt install libportaudio2 libpulse0 libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0
+sudo apt install libportaudio2 libpulse0 libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-shape0 libxcb-keysyms1 libxcb-icccm4
 ```
 
 Pro CAT přes Hamlib nainstalujte `libhamlib-utils`; Guardian najde `rigctld`

@@ -28,7 +28,7 @@ jobs:
       - name: Install Linux libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build pkg-config libpng-dev libjpeg-dev libportaudio2 libpulse0 libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libhamlib-utils xvfb
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config libpng-dev libjpeg-dev libportaudio2 libpulse0 libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-shape0 libxcb-keysyms1 libxcb-icccm4 libhamlib-utils xvfb
       - name: Cache pinned native JPEG XL tools
         id: jxl
         uses: actions/cache/restore@v4
@@ -64,7 +64,7 @@ jobs:
           dist/Guardian/Guardian --ardop-self-test --ardop-self-test-report output/linux-frozen-ardop.txt
           dist/Guardian/Guardian --ardos-cz-self-test --ardos-cz-self-test-report output/linux-frozen-ardos-cz.txt
           python tools/verify_linux_bundle.py
-          xvfb-run -a env QT_QPA_PLATFORM=xcb dist/Guardian/Guardian --linux-shell-self-test --linux-shell-self-test-report output/linux-frozen-x11.txt
+          xvfb-run -a env QT_QPA_PLATFORM=xcb QT_DEBUG_PLUGINS=1 dist/Guardian/Guardian --linux-shell-self-test --linux-shell-self-test-report output/linux-frozen-x11.txt
       - name: Preserve build logs
         if: always()
         uses: actions/upload-artifact@v4
