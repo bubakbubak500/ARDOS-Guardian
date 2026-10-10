@@ -70,6 +70,10 @@ def test_linux_settings_grey_vara_and_ignore_its_validation(monkeypatch, tmp_pat
         assert dialog.payload_backend.model().item(1).isEnabled()
         assert dialog.payload_backend.model().item(2).isEnabled()
         assert not dialog.vara_mode.isEnabled()
+        assert dialog.sc_radio_mode.isEnabled()
+        dialog.sc_radio_mode.setCurrentIndex(dialog.sc_radio_mode.findData("HF"))
+        assert dialog.vara_mode.currentText() == "HF"
+        dialog.sc_radio_mode.setCurrentIndex(dialog.sc_radio_mode.findData("FM"))
         assert not dialog.vara_host.isEnabled()
         assert not dialog.vara_fm_path.isEnabled()
         dialog.vara_host.clear()

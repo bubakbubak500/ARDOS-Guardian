@@ -29,14 +29,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build pkg-config libpng-dev libjpeg-dev libportaudio2 libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libhamlib-utils xvfb
+      - name: Cache pinned native JPEG XL tools
+        id: jxl
+        uses: actions/cache@v4
+        with:
+          path: codecs/vendor/jpegxl
+          key: guardian-jxl-ubuntu22-x64-${{ hashFiles('tools/build_jpegxl_linux.sh') }}
       - name: Build pinned JPEG XL tools on Linux
+        if: steps.jxl.outputs.cache-hit != 'true'
+        run: bash tools/build_jpegxl_linux.sh
+      - name: Enable bundled JPEG XL tools
         run: |
-          bash tools/build_jpegxl_linux.sh
           echo "$GITHUB_WORKSPACE/codecs/vendor/jpegxl/bin" >> "$GITHUB_PATH"
       - name: Install Python dependencies
         run: python -m pip install -e '.[dev]'
       - name: Build native ARDOP and test Linux paths
         run: |
+          set -o pipefail
           python tools/build_ardop.py
           mkdir -p output
           python -m pytest tests/test_linux*.py tests/test_ardop.py tests/test_ardop_audio.py tests/test_sc_port_core.py tests/test_sc_port_payload.py tests/test_sc_port_session.py tests/test_sc_adaptive_capacity.py tests/test_afsk.py tests/test_mfsk.py tests/test_hamlib.py tests/test_radio_dummy_linux.py -rA | tee output/linux-tests.txt
@@ -49,6 +58,7 @@ jobs:
           dist/Guardian/Guardian --ardop-self-test --ardop-self-test-report output/linux-frozen-ardop.txt
           dist/Guardian/Guardian --ardos-cz-self-test --ardos-cz-self-test-report output/linux-frozen-ardos-cz.txt
           python tools/verify_linux_bundle.py
+          xvfb-run -a env QT_QPA_PLATFORM=xcb dist/Guardian/Guardian --linux-shell-self-test --linux-shell-self-test-report output/linux-frozen-x11.txt
       - name: Preserve build logs
         if: always()
         uses: actions/upload-artifact@v4

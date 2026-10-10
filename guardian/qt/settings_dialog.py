@@ -1084,8 +1084,11 @@ class SettingsDialog(QDialog):
 
     def _build_vara(self) -> None:
         form = self._page(
-            tr("settings.vara"),
+            dual("Radio modems", "Rádiové modemy") if LINUX else tr("settings.vara"),
             dual(
+                "Select SC-FTN or ARDOP. VARA is unavailable on Linux.",
+                "Zvolte SC-FTN nebo ARDOP. VARA není na Linuxu dostupná.",
+            ) if LINUX else dual(
                 "Select the active VARA flavor and its ports. An empty "
                 "executable field follows detection; the grey text is the path "
                 "Guardian uses.",
@@ -1096,6 +1099,16 @@ class SettingsDialog(QDialog):
         self.vara_mode = QComboBox()
         self.vara_mode.addItems(["FM", "HF"])
         self.vara_mode.setCurrentText(self.config.vara_mode)
+        if LINUX:
+            # FM/HF also selects the SC control waveform and compatible QSY
+            # modes; retain that radio setting independently of disabled VARA.
+            self.sc_radio_mode = QComboBox()
+            self.sc_radio_mode.addItem("FM", "FM")
+            self.sc_radio_mode.addItem("SSB", "HF")
+            self.sc_radio_mode.setCurrentIndex(
+                max(0, self.sc_radio_mode.findData(self.config.vara_mode)))
+            self.sc_radio_mode.currentIndexChanged.connect(
+                lambda _index: self.vara_mode.setCurrentText(self.sc_radio_mode.currentData()))
         # The manual Winlink hand-off was dropped in 0.6.26 once VARA P2P was
         # proven on air. The picker stays for the next transport rather than
         # being rebuilt from scratch.
@@ -1188,6 +1201,8 @@ class SettingsDialog(QDialog):
         ))
         form.addRow(dual("Active VARA mode", "Aktivní režim VARA"), self.vara_mode)
         form.addRow(dual("Payload workflow", "Způsob přenosu"), self.payload_backend)
+        if LINUX:
+            form.addRow(dual("SC-FTN radio mode", "Rádiový režim SC-FTN"), self.sc_radio_mode)
         form.addRow(dual("ARDOP audio level", "Hlasitost ARDOP"), self.ardop_tx_percent)
         form.addRow(self.ardop_summary)
         form.addRow(dual("Guardian waveform", "Vlna Guardian"), self.g2_waveform)
@@ -1226,6 +1241,8 @@ class SettingsDialog(QDialog):
         """Show only the selected transport's waveform and bandwidth rows."""
         sc_selected = self.payload_backend.currentData() == "ofdm_vhf"
         ardop_selected = self.payload_backend.currentData() == "ardop"
+        if LINUX:
+            self._modem_form.setRowVisible(self.sc_radio_mode, sc_selected)
         self.vara_mode.setEnabled(VARA_AVAILABLE and not ardop_selected)
         self._modem_form.labelForField(self.vara_mode).setEnabled(VARA_AVAILABLE and not ardop_selected)
         self._modem_form.setRowVisible(self.ardop_tx_percent, ardop_selected)
