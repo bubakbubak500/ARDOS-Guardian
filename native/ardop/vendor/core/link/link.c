@@ -126,6 +126,18 @@ static void arm_repeat(ardop_link *l, uint8_t frame_type, size_t len,
 	l->repeat_deadline = now + ARDOP_MS_TO_SAMPLES(l->repeat_interval_ms);
 }
 
+/* Begin DISC in our transmit slot, keeping its encoded bytes for retries. */
+static void begin_disconnect(ardop_link *l, uint64_t now,
+			     ardop_action *actions, size_t *n, size_t max)
+{
+	l->disconnect_pending = false;
+	notify_host(l, actions, n, max, "STATUS INITIATING ARQ DISCONNECT");
+	send_control(l, actions, n, max, ARDOP_FT_DISC);
+	l->disc_repeat_count = 1;
+	l->repeat_interval_ms = 2000;
+	arm_repeat(l, ARDOP_FT_DISC, 2, now);
+}
+
 /* Tear the machine back down to a clean disconnected state, keeping the session
  * id available (a late DISC can still be answered). */
 static void reset_to_disc(ardop_link *l)
@@ -137,6 +149,8 @@ static void reset_to_disc(ardop_link *l)
 	l->repeat_deadline = 0;
 	l->pending_deadline = 0;
 	l->stall_deadline = 0;
+	l->disc_repeat_count = 0;
+	l->disconnect_pending = false;
 }
 
 /* (Re)arm the silence deadline: rule 1.7. Called once a connection completes
@@ -944,6 +958,16 @@ static size_t step_irs_data_rx(ardop_link *l, const ardop_event *ev,
 	if (connected_teardown(l, ev, now, actions, &n, max))
 		return n;
 
+	/* The IRS may only answer after the ISS has finished its frame. A host
+	 * request made while we receive must use that reply slot rather than
+	 * colliding with the peer's next data/IDLE transmission. */
+	if (l->disconnect_pending && ev->kind == ARDOP_EV_FRAME_DECODED
+	    && (ev->frame_type == ARDOP_FT_IDLE
+		|| ardop_frame_is_data(ev->frame_type))) {
+		begin_disconnect(l, now, actions, &n, max);
+		return n;
+	}
+
 	/* The ISS is idle: if we have data queued and want the link, BREAK;
 	 * otherwise keep the link alive with an ACK. */
 	if (ev->kind == ARDOP_EV_FRAME_DECODED
@@ -1115,7 +1139,8 @@ static size_t step_host_send_data(ardop_link *l, const ardop_host_cmd *cmd,
 /*
  * Host DISCONNECT: from a connected state, begin a graceful disconnect -- send
  * DISC and repeat it (up to five tries in the timer service) until the peer
- * answers END. From DISC there is nothing to disconnect. Ported from
+ * answers END. The IRS first waits for a peer frame to obtain its reply slot.
+ * From DISC there is nothing to disconnect. Ported from
  * CheckForDisconnect.
  */
 static size_t step_host_disconnect(ardop_link *l, uint64_t now,
@@ -1128,11 +1153,13 @@ static size_t step_host_disconnect(ardop_link *l, uint64_t now,
 		return n;
 	}
 
-	notify_host(l, actions, &n, max, "STATUS INITIATING ARQ DISCONNECT");
-	send_control(l, actions, &n, max, ARDOP_FT_DISC);
-	l->disc_repeat_count = 1;
-	l->repeat_interval_ms = 2000;
-	arm_repeat(l, ARDOP_FT_DISC, 2, now);
+	if (l->state == ARDOP_LINK_IRS_DATA
+	    || l->state == ARDOP_LINK_IRS_FROM_ISS) {
+		l->disconnect_pending = true;
+		return n;
+	}
+
+	begin_disconnect(l, now, actions, &n, max);
 	return n;
 }
 
@@ -1387,6 +1414,17 @@ size_t ardop_link_step(ardop_link *l, const ardop_link_input *in,
 {
 	switch (in->kind) {
 	case ARDOP_IN_RX:
+		/* Once the host requests DISC, only teardown replies may change
+		 * the link. A peer that missed our first DISC can still send IDLE
+		 * or data; ACKing it would overwrite out_frame while the repeat
+		 * timer still describes DISC, so later retries have an ACK header. */
+		if (l->mode == ARDOP_MODE_ARQ && l->disc_repeat_count > 0) {
+			size_t n = 0;
+			connected_teardown(l, &in->as.rx, now_samples, actions,
+					   &n, max_actions);
+			return n;
+		}
+
 		/* Rule 1.7: any decoded frame heard while connected proves the
 		 * link is alive, however unproductive -- push the silence
 		 * deadline back out. Ahead of the mode/state dispatch below so

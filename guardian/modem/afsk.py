@@ -52,6 +52,27 @@ def _bits_to_bytes_lsb_first(bits: np.ndarray) -> bytes:
     return out.tobytes()
 
 
+def _extract_legacy_frames(bits: np.ndarray, max_sync_errors: int = 0) -> list[bytes]:
+    """Extract sync/length/payload frames with the caller's sync error limit."""
+    sync_bits = _bits_lsb_first(SYNC)
+    length = len(sync_bits)
+    results: list[bytes] = []
+    position = 0
+    limit = len(bits) - length
+    while position <= limit:
+        if int(np.sum(bits[position:position + length] != sync_bits)) <= max_sync_errors:
+            after = bits[position + length:]
+            if len(after) >= 8:
+                payload_length = _bits_to_bytes_lsb_first(after[:8])[0]
+                needed = 8 + payload_length * 8
+                if len(after) >= needed:
+                    results.append(_bits_to_bytes_lsb_first(after[8:needed]))
+                    position += length + needed
+                    continue
+        position += 1
+    return results
+
+
 class AFSKModem:
     name = "afsk1200"
 
@@ -205,10 +226,12 @@ class AFSKModem:
         sample_axis = np.arange(len(soft))
         candidates: list[tuple[float, float, bytes]] = []
         incomplete_bursts: list[float] = []
-        formats = (
-            (_bits_lsb_first(FEC_SYNC), True),
-            (_bits_lsb_first(LEGACY_SYNC), False),
-        )
+        formats = []
+        for sync_bytes, has_fec in ((FEC_SYNC, True), (LEGACY_SYNC, False)):
+            sync = _bits_lsb_first(sync_bytes)
+            acquisition = np.concatenate((preamble, sync))
+            formats.append((sync, has_fec, acquisition, acquisition * 2 - 1,
+                            acquisition.size - 2 * MAX_ACQUISITION_ERRORS))
 
         for clock_scale in CLOCK_SEARCH:
             step = self.sps * float(clock_scale)
@@ -221,16 +244,15 @@ class AFSKModem:
                 ) * step
                 confidence = np.interp(centers, sample_axis, soft)
                 bits = (confidence > 0.0).astype(np.int8)
-                for sync, has_fec in formats:
-                    acquisition = np.concatenate((preamble, sync))
+                bipolar_bits = bits * 2 - 1
+                for sync, has_fec, acquisition, reference, threshold in formats:
                     if bits.size < acquisition.size + 8:
                         continue
                     correlation = np.correlate(
-                        bits * 2 - 1,
-                        acquisition * 2 - 1,
+                        bipolar_bits,
+                        reference,
                         mode="valid",
                     )
-                    threshold = acquisition.size - 2 * MAX_ACQUISITION_ERRORS
                     for start in np.flatnonzero(correlation >= threshold):
                         observed = bits[start : start + acquisition.size]
                         sync_errors = int(np.sum(
@@ -338,22 +360,4 @@ class AFSKModem:
         return _bits_to_bytes_lsb_first(after[8:needed]), needed
 
     def _extract_frames(self, bits: np.ndarray, max_sync_errors: int = 1) -> list[bytes]:
-        sync_bits = _bits_lsb_first(SYNC)
-        L = len(sync_bits)
-        results: list[bytes] = []
-        i = 0
-        limit = len(bits) - L
-        while i <= limit:
-            # Tolerate a small number of bit errors in the sync word.
-            if int(np.sum(bits[i:i + L] != sync_bits)) <= max_sync_errors:
-                after = bits[i + L:]
-                if len(after) >= 8:
-                    length = _bits_to_bytes_lsb_first(after[:8])[0]
-                    need_bits = 8 + length * 8
-                    if len(after) >= need_bits:
-                        payload = _bits_to_bytes_lsb_first(after[8:need_bits])
-                        results.append(payload)
-                        i += L + need_bits
-                        continue
-            i += 1
-        return results
+        return _extract_legacy_frames(bits, max_sync_errors)

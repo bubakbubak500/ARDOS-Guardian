@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .ardos_cz import HELD_STATES
 from .config import G2_MAX_TX_SCALE, StationConfig, config_dir
 from .install.dependencies import find_vara_fm, find_vara_hf
 from .i18n import dual
@@ -116,6 +117,20 @@ class StationLabStatus:
     report_json: str = ""
     report_csv: str = ""
     error: str = ""
+
+
+@dataclass(frozen=True)
+class ArdopStatus:
+    """A coherent view of the active ARDOP message, independent of VARA."""
+
+    state: str
+    direction: str
+    total_bytes: int
+    progress_bytes: int
+    total_bytes_exact: bool
+    transfer_source: str
+    transfer_destination: str
+    transfer_via: str
 
 
 @dataclass
@@ -419,6 +434,7 @@ class Operations:
             discovery_denylist=set(self.config.discovery_denylist),
             discovery_auto_use=self.config.discovery_auto_use,
             link_advert_enabled=self.config.link_advert_enabled,
+            link_advert_paused=self.config.payload_backend == "ardop",
             link_advert_interval=self.config.link_advert_interval,
             discovery_channel_active=self.audio_transport is not None,
             clock=time.monotonic if isinstance(transport, AudioControlTransport) else None,
@@ -426,6 +442,7 @@ class Operations:
         net.on_alert = self._on_alert
         net.accept_payload = self._accept_incoming_payload
         net.on_discovery_event = self._on_discovery_event
+        net.link_advert_neighbors = self._link_advert_neighbors
         net.channel_frequency = self.current_frequency
         net.ptt_delay_request = self._vara_keying_delay_request
         net.ofdm_payload_request = self._native_payload_configured
@@ -444,6 +461,9 @@ class Operations:
         net.bridge_reachable = self._bridge_reachable
         net.discovery.bridge_reachable = net.bridge_reachable
         net.on_calibration_frame = self._on_calibration_frame
+        previous = getattr(self, "net", None)
+        if previous is not None:
+            net.discovery.retain_observations(previous.discovery)
         self._scale_session_timeouts(net, transport)
         return net
 
@@ -530,6 +550,7 @@ class Operations:
             denylist=set(self.config.discovery_denylist),
             auto_use=self.config.discovery_auto_use,
             link_advert_enabled=self.config.link_advert_enabled,
+            link_advert_paused=self.config.payload_backend == "ardop",
             link_advert_interval=self.config.link_advert_interval,
         )
         self.net.working_channel_offer = self._working_channel_offer
@@ -573,6 +594,35 @@ class Operations:
         self.net.discovery.clear_routes()
 
     def advertise_live_links(self) -> int:
+        if self.coordinator is not None and len(self.coordinator.radios) > 1:
+            return sum(radio._advertise_live_links_local()
+                       for radio in self.coordinator.radios)
+        return self._advertise_live_links_local()
+
+    def _link_advert_neighbors(self, now: float) -> list[tuple[str, float | None]]:
+        radios = (self.coordinator.radios if self.coordinator is not None
+                  and len(self.coordinator.radios) > 1 else [self])
+        neighbors = {}
+        for radio in radios:
+            if radio.audio_transport is None or radio._closing.is_set():
+                continue
+            for station in radio.heard.active(now):
+                previous = neighbors.get(station.callsign)
+                if previous is None or station.last_heard > previous.last_heard:
+                    neighbors[station.callsign] = station
+        return [(station.callsign, station.last_snr) for station in neighbors.values()]
+
+    def _advertise_live_links_local(self) -> int:
+        if self.net.discovery.link_advert_paused:
+            self._log(
+                dual(
+                    "Neighbour advertisements are paused while ARDOP is selected.",
+                    "Oznámení sousedů jsou při zvoleném ARDOP pozastavená.",
+                ),
+                level=LogLevel.WARNING,
+                source="discovery",
+            )
+            return 0
         if self.audio_transport is None:
             self._log(
                 dual(
@@ -585,10 +635,7 @@ class Operations:
             return 0
         now = getattr(self.net, "_now", time.monotonic())
         return self.net.discovery.advertise_neighbors(
-            [
-                (station.callsign, station.last_snr)
-                for station in self.heard.active(now)
-            ],
+            self._link_advert_neighbors(now),
             force=True,
         )
 
@@ -912,7 +959,7 @@ class Operations:
                 continue
             path = meta.get('server_path', {})
             if path.get('ingress') == 'rf_bridge' and (
-                path.get('state') in {'checking', 'uploading', 'unknown', 'accepted'}
+                path.get('state') in HELD_STATES
                 or path.get('rf_receipt_due') or meta.get('radio_path', {}).get('pending_receipt')
             ):
                 return dual('Relay mail is awaiting server delivery or a return RF receipt.',
@@ -1017,8 +1064,41 @@ class Operations:
         return removed
 
     def payload_active(self) -> bool:
-        """True while VARA owns the shared audio; the UI keeps quiet then."""
+        """True while a payload modem owns the shared audio."""
         return self._payload_active.is_set()
+
+    def ardop_status(self) -> ArdopStatus | None:
+        """Expose current message progress without reading stale VARA counters."""
+        if not self._payload_active.is_set():
+            return None
+        message = next(
+            (message for message in tuple(self.net.sessions.values())
+             if message.state in {SessionState.STARTING_VARA,
+                                  SessionState.TRANSFERRING, SessionState.RECEIVING}
+             and message.payload_transport == "ardop"),
+            None,
+        )
+        if message is None:
+            return None
+        from .payload.ardop import HEADER
+
+        sending = message.direction == "out"
+        wire_size = max(0, int(message.payload_wire_size))
+        total = max(0, wire_size - HEADER.size)
+        if sending and not wire_size:
+            total = (len(message.payload_bytes) if message.payload_bytes is not None
+                     else len(message.body.encode("utf-8")))
+        source, destination, via = self._ofdm_transfer_context(message)
+        return ArdopStatus(
+            state="sending" if sending else "receiving",
+            direction="send" if sending else "receive",
+            total_bytes=total,
+            progress_bytes=max(0, min(total, int(message.payload_progress_bytes))),
+            total_bytes_exact=sending or wire_size >= HEADER.size,
+            transfer_source=source,
+            transfer_destination=destination,
+            transfer_via=via,
+        )
 
     def network_settings_busy(self) -> bool:
         """Whether changing network, audio, or radio settings must wait.
@@ -1096,7 +1176,7 @@ class Operations:
             return status
 
     def _ofdm_transfer_context(self, message) -> tuple[str, str, str]:
-        """Return trusted identity for the active SC-FTN session leg.
+        """Return trusted identity for the active native payload session leg.
 
         An inbound control frame identifies only its immediate sender.  That
         station may be a relay, so it is shown as ``via`` while ``source`` stays
@@ -2380,20 +2460,6 @@ class Operations:
             + 1.0
         )
 
-    def _legacy_g2_calibration_key(
-        self, waveform: str | None = None, bandwidth: str | None = None
-    ) -> str:
-        return "|".join(
-            (
-                str(waveform or self.config.g2_waveform).strip().lower(),
-                str(bandwidth or self.config.g2_bandwidth).strip().upper(),
-                f"policy-{int(self.config.g2_policy_version)}",
-                str(self.config.radio).strip(),
-                str(self.config.audio_output).strip(),
-                str(self.config.vara_mode).strip().upper(),
-            )
-        )
-
     def _g2_calibration_key_v2(
         self, waveform: str | None = None, bandwidth: str | None = None
     ) -> str:
@@ -3642,9 +3708,7 @@ class Operations:
     ) -> None:
         # A server reconciliation may finish while RF compression is running.
         # Recheck durable custody before announcing a stale prepared bundle.
-        if self.mailstore.server_path(mail.msg_id).get('state') in {
-            'checking', 'uploading', 'unknown', 'accepted', 'delivered'
-        }:
+        if self.mailstore.server_path(mail.msg_id).get('state') in HELD_STATES | {'delivered'}:
             return
         path = self.mailstore.radio_path(mail.msg_id)
         self.net.send_message(
@@ -3673,7 +3737,7 @@ class Operations:
             result = server.send(message_id)
             if result is not None:
                 return result
-        if self.mailstore.server_path(message_id).get("state") in {"checking", "uploading", "unknown", "accepted"}:
+        if self.mailstore.server_path(message_id).get("state") in HELD_STATES:
             return False
         if not _selected and self.coordinator is not None and len(self.coordinator.radios) > 1:
             return self.coordinator.send_queued(message_id, _skip_server=True)
@@ -4101,7 +4165,12 @@ class Operations:
 
     def send_beacon_now(self) -> bool:
         """Queue one presence beacon, regardless of automatic beacon settings."""
-        return self._queue_beacon(time.monotonic(), manual=True)
+        now = time.monotonic()
+        if self.coordinator is not None and len(self.coordinator.radios) > 1:
+            queued = [radio._queue_beacon(now, manual=True)
+                      for radio in self.coordinator.radios]
+            return any(queued)
+        return self._queue_beacon(now, manual=True)
 
     def _tick_beacon(self, now: float) -> None:
         """Announce presence so peers can hear this station and route to it."""
@@ -4556,9 +4625,7 @@ class Operations:
         instead. Control bursts keep their normal timing; they are short and
         already carry their own tail guard.
         """
-        if not enabled and self._payload_ptt_delay_ms > 0:
-            time.sleep(self._payload_ptt_delay_ms / 1000.0)
-        self._radio_ptt(enabled)
+        self._payload_ptt(enabled)
 
     def payload_handoff_pending(self) -> bool:
         """Whether VARA still owns the radio while waiting for RF quiet."""

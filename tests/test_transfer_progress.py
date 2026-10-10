@@ -1,6 +1,8 @@
 import os
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
@@ -138,3 +140,71 @@ def test_transfer_panel_hides_redundant_direct_hop_marker() -> None:
     assert "From OK1AAA" in panel.detail.text()
     assert "To OK2BBB" in panel.detail.text()
     assert "@ OK2BBB" not in panel.detail.text()
+
+
+@pytest.mark.parametrize("direction,state_name", [
+    ("send", "sending"), ("receive", "receiving"),
+])
+def test_ardop_progress_uses_own_body_counts_and_route(
+    direction, state_name, monkeypatch
+) -> None:
+    from guardian import i18n
+
+    monkeypatch.setattr(i18n, "_language", i18n.Language.ENGLISH)
+    status = SimpleNamespace(
+        state=state_name, direction=direction, total_bytes=400,
+        progress_bytes=100, total_bytes_exact=True,
+        transfer_source="OK1AAA", transfer_destination="OK2BBB",
+        transfer_via="OK3CCC",
+    )
+    view = transfer_state(
+        _snapshot(written=9000, queued=0, direction="receive",
+                  received=8000, receive_total=9000, bitrate=9600,
+                  source="OLD1", destination="OLD2", via="OLD3"),
+        True, ardop_status=status, payload_backend="ardop",
+    )
+    assert view.active
+    assert view.transport == "ardop"
+    assert view.direction == direction
+    assert (view.sent_bytes, view.total_bytes, view.fraction) == (100, 400, 0.25)
+    assert view.total_bytes_exact
+    assert view.goodput_bps is None
+    assert (view.source, view.destination, view.via) == (
+        "OK1AAA", "OK2BBB", "OK3CCC",
+    )
+    _application()
+    panel = TransferPanel()
+    try:
+        panel.apply(view)
+        assert "ARDOP" in panel.title.text()
+        assert "VARA" not in panel.title.text()
+        assert "100 of 400 B" in panel.detail.text()
+        assert "@ OK3CCC" in panel.detail.text()
+        assert "OLD" not in panel.detail.text()
+    finally:
+        panel.close()
+
+
+def test_ardop_receive_waits_for_size_and_idle_clears_stale_vara() -> None:
+    # The ARDOP branch must not even need a VARA snapshot for an active RX.
+    status = SimpleNamespace(state="receiving", direction="receive",
+                             total_bytes=0, progress_bytes=0,
+                             total_bytes_exact=False)
+    view = transfer_state(SimpleNamespace(), True,
+                          ardop_status=status, payload_backend="ardop")
+    assert view.active and view.direction == "receive"
+    assert not view.total_bytes_exact
+    _application()
+    panel = TransferPanel()
+    try:
+        panel.apply(view)
+        assert not panel.isHidden()
+        idle = transfer_state(_snapshot(written=9000, queued=0), True,
+                              payload_backend="ardop")
+        assert not idle.active
+        panel.apply(idle)
+        assert panel.isHidden()
+        assert panel.bar.fraction == 0.0
+        assert not panel.detail.text()
+    finally:
+        panel.close()

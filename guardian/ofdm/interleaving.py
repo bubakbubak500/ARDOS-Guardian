@@ -43,7 +43,7 @@ import numpy as np
 _GOLDEN = (1.0 + 5.0 ** 0.5) / 2.0
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=64)
 def stride_for(length: int) -> int:
     """The interleaving stride for a block of `length` bits.
 
@@ -61,7 +61,7 @@ def stride_for(length: int) -> int:
     return stride
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=64)
 def _permutation(length: int) -> np.ndarray:
     """Destination index for each source index."""
     return (np.arange(length, dtype=np.int64) * stride_for(length)) % length

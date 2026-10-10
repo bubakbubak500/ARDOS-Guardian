@@ -1,8 +1,8 @@
 """Bounded multi-hop route discovery and volatile learned routes.
 
 The discovery plane deliberately stays separate from the operator's manual
-routes and the imported topology.  Its evidence expires, is discarded on a
-restart and cannot silently overwrite an operator decision.
+routes and the imported topology. Its evidence expires, is discarded on a
+process restart and cannot silently overwrite an operator decision.
 
 Wire use for the two discovery-only frame types keeps protocol version 1:
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
+import copy
 import time
 import zlib
 from typing import Callable
@@ -476,6 +477,7 @@ class DiscoveryEngine:
         denylist: set[str] | None = None,
         auto_use: bool = False,
         link_advert_enabled: bool = False,
+        link_advert_paused: bool = False,
         link_advert_interval: float = DEFAULT_LINK_ADVERT_INTERVAL,
         on_event: Callable[[DiscoveryEvent], None] | None = None,
         on_result: Callable[[DynamicRoute, PendingQuery], None] | None = None,
@@ -496,6 +498,7 @@ class DiscoveryEngine:
         self.denylist = {item.strip().upper() for item in (denylist or set()) if item.strip()}
         self.auto_use = bool(auto_use)
         self.link_advert_enabled = bool(link_advert_enabled)
+        self.link_advert_paused = bool(link_advert_paused)
         self.link_advert_interval = max(
             MIN_LINK_ADVERT_INTERVAL, float(link_advert_interval)
         )
@@ -516,6 +519,7 @@ class DiscoveryEngine:
         self._advert_seen: dict[tuple[str, int, str], float] = {}
         self._last_advert_at: float | None = None
         self._last_advert_neighbors: frozenset[str] | None = None
+        self._last_advert_peer: str | None = None
 
     @property
     def can_transmit(self) -> bool:
@@ -539,6 +543,7 @@ class DiscoveryEngine:
         denylist: set[str] | None = None,
         auto_use: bool | None = None,
         link_advert_enabled: bool | None = None,
+        link_advert_paused: bool | None = None,
         link_advert_interval: float | None = None,
     ) -> None:
         if callsign is not None:
@@ -594,6 +599,19 @@ class DiscoveryEngine:
             elif not previous_link_advert:
                 self._last_advert_at = None
                 self._last_advert_neighbors = None
+                self._last_advert_peer = None
+        if link_advert_paused is not None:
+            previous_pause = self.link_advert_paused
+            self.link_advert_paused = bool(link_advert_paused)
+            if self.link_advert_paused:
+                # A slow fallback modem retains the learned network, but must
+                # not replay floods that were scheduled on the faster modem.
+                self._scheduled = [
+                    item for item in self._scheduled if item.kind != "LINK-ADVERT"
+                ]
+            elif previous_pause:
+                self._last_advert_at = None
+                self._last_advert_neighbors = None
         if link_advert_interval is not None:
             self.link_advert_interval = max(
                 MIN_LINK_ADVERT_INTERVAL, float(link_advert_interval)
@@ -612,6 +630,26 @@ class DiscoveryEngine:
             elif route.auto_approved:
                 route.approved = False
                 route.auto_approved = False
+
+    def retain_observations(self, previous: "DiscoveryEngine") -> None:
+        """Keep learned evidence across an audio reopen, without replaying work."""
+        if previous.callsign != self.callsign:
+            return
+        route_lifetime = self.routes.lifetime
+        self.routes = copy.deepcopy(previous.routes)
+        self.live_topology = copy.deepcopy(previous.live_topology)
+        self.routes.lifetime = self.live_topology.lifetime = route_lifetime
+        self._advert_seen = previous._advert_seen.copy()
+        self._sent = previous._sent.copy()
+        self._counter = previous._counter
+        self._last_advert_peer = previous._last_advert_peer
+        self._now = max(self._now, previous._now)
+        if not self.link_advert_enabled:
+            self.live_topology.clear()
+            self.routes.replace_source("link-advert", [], self._now)
+            self._advert_seen.clear()
+        self._prune()
+        self._sync_auto_approvals()
 
     def start(
         self,
@@ -660,6 +698,7 @@ class DiscoveryEngine:
         self._advert_seen.clear()
         self._last_advert_at = None
         self._last_advert_neighbors = None
+        self._last_advert_peer = None
         self._event("links-cleared", self.callsign, "", "live topology cleared")
 
     def advertise_neighbors(
@@ -669,7 +708,7 @@ class DiscoveryEngine:
         force: bool = False,
     ) -> int:
         """Advertise fresh direct observations; return transmitted frame count."""
-        if not (self.link_advert_enabled and self.can_transmit):
+        if not (self.link_advert_enabled and self.can_transmit) or self.link_advert_paused:
             return 0
         clean: dict[str, float | None] = {}
         for callsign, snr in neighbors:
@@ -704,7 +743,14 @@ class DiscoveryEngine:
             self._last_advert_neighbors = neighbor_set
             self._event("advertised-presence", self.callsign, "", "one hop")
             return sent
-        for peer in sorted(clean):
+        peers = sorted(clean)
+        if self._last_advert_peer is not None:
+            # Continue after the last admitted advert. A shared two-radio
+            # neighbor list can exceed one minute's frame budget.
+            split = next((index for index, peer in enumerate(peers)
+                          if peer > self._last_advert_peer), 0)
+            peers = peers[split:] + peers[:split]
+        for peer in peers:
             penalty = snr_penalty(clean[peer])
             self.live_topology.record(
                 self.callsign,
@@ -727,6 +773,7 @@ class DiscoveryEngine:
             )
             if self._transmit(frame, "LINK-ADVERT"):
                 sent += 1
+                self._last_advert_peer = peer
         self._last_advert_at = self._now
         self._last_advert_neighbors = neighbor_set
         self._rebuild_live_routes()
@@ -833,6 +880,7 @@ class DiscoveryEngine:
         self._event("heard-link", owner, neighbor, f"via {sender}, TTL {frame.ttl}")
         if not (
             self.can_transmit
+            and not self.link_advert_paused
             and self.forward
             and self.relay_enabled
             and frame.ttl > 1
@@ -1038,6 +1086,11 @@ class DiscoveryEngine:
         )
 
     def _transmit(self, frame: ControlFrame, kind: str) -> bool:
+        if frame.type is FrameType.LINK_ADVERT and (
+            not self.link_advert_enabled or self.link_advert_paused
+        ):
+            self._event("suppressed", self.callsign, frame.destination, f"{kind} paused or disabled")
+            return False
         if not self.can_transmit:
             self._event("suppressed", self.callsign, frame.destination, f"{kind} in {self.mode} mode")
             return False

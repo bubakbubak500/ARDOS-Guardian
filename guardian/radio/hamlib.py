@@ -188,6 +188,8 @@ class HamlibRadio(RadioDriver):
                 st.frequency_hz = int(freq[0])
             if mode:
                 st.mode = mode[0].strip()
+                if len(mode) > 1 and _is_int(mode[1]):
+                    st.passband_hz = int(mode[1].strip())
             if ptt and ptt[0].strip() in ("0", "1"):
                 st.ptt = ptt[0].strip() == "1"
             if sig and _is_int(sig[0]):

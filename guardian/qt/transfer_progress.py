@@ -3,8 +3,9 @@
 VARA reports two numbers Guardian already carries in its snapshot: how many
 bytes were handed to the modem for this transfer, and how many are still
 sitting in its RF queue. SC-FTN reports acknowledged bytes and live ARQ
-measurements through the same small state object. Route identity remains common
-to both transports.
+measurements through the same small state object. ARDOP reports its message
+body size and confirmed progress through Operations. Route identity remains
+common to all transports.
 
 The meter is deliberately segmented rather than a smooth bar. On a 566 bps
 unregistered link a 256-byte envelope takes the better part of a minute, and a
@@ -59,7 +60,7 @@ class TransferState:
     goodput_bps: float | None = None
     # `source` is the original station when known.  For an inbound relayed
     # payload it stays empty until the bundle manifest has been read; `via`
-    # remains the immediate VARA peer so the two roles cannot be confused.
+    # remains the immediate peer so the two roles cannot be confused.
     source: str = ""
     destination: str = ""
     via: str = ""
@@ -71,7 +72,10 @@ class TransferState:
         return max(0.0, min(1.0, self.sent_bytes / self.total_bytes))
 
 
-def transfer_state(snapshot, payload_active: bool, sc_status=None) -> TransferState:
+def transfer_state(
+    snapshot, payload_active: bool, sc_status=None, *,
+    ardop_status=None, payload_backend: str | None = None,
+) -> TransferState:
     """Read a transfer state out of an application snapshot.
 
     ``data_bytes_written`` is reset by prepare_data_transfer(), so it is the
@@ -82,6 +86,33 @@ def transfer_state(snapshot, payload_active: bool, sc_status=None) -> TransferSt
     """
     if not payload_active:
         return TransferState()
+    # ARDOP owns its byte counts and route identity. Even while another radio
+    # is active, an idle ARDOP view must never reuse a previous VARA transfer.
+    if payload_backend == "ardop" or ardop_status is not None:
+        state = str(getattr(ardop_status, "state", "idle") or "idle").lower()
+        if state not in {"sending", "receiving"}:
+            return TransferState(transport="ardop")
+        total = max(0, int(getattr(ardop_status, "total_bytes", 0) or 0))
+        moved = int(getattr(ardop_status, "progress_bytes", 0) or 0)
+        direction = str(getattr(ardop_status, "direction", "") or "")
+        if direction not in {"send", "receive"}:
+            direction = "receive" if state == "receiving" else "send"
+        return TransferState(
+            active=True,
+            sent_bytes=max(0, min(total, moved)),
+            total_bytes=total,
+            total_bytes_exact=bool(
+                getattr(ardop_status, "total_bytes_exact", True)
+            ),
+            transport="ardop",
+            direction=direction,
+            profile="500 Hz",
+            source=str(getattr(ardop_status, "transfer_source", "") or "").strip(),
+            destination=str(
+                getattr(ardop_status, "transfer_destination", "") or ""
+            ).strip(),
+            via=str(getattr(ardop_status, "transfer_via", "") or "").strip(),
+        )
     vara = snapshot.vara
     # Operations exposes the active SC-FTN status through the negotiated
     # payload contract. The caller passes ``None`` for VARA, so an idle SC
@@ -251,7 +282,7 @@ class SegmentedBar(QWidget):
 
 
 class TransferPanel(QWidget):
-    """The segmented bar plus the byte counts VARA is working through."""
+    """The segmented bar plus the active transport's byte counts."""
 
     def __init__(self, tokens: ThemeTokens = DARK_TOKENS, parent=None) -> None:
         super().__init__(parent)
@@ -284,7 +315,7 @@ class TransferPanel(QWidget):
             f"From {source} → To {destination}",
             f"Od {source} → Komu {destination}",
         )
-        # `via` is the immediate VARA peer.  It is useful for a relayed leg,
+        # `via` is the immediate peer.  It is useful for a relayed leg,
         # while repeating the source on a direct link only adds noise.  If the
         # source is unknown, retain the peer marker so the operator can still
         # see who is on the other end of this leg.
@@ -304,7 +335,9 @@ class TransferPanel(QWidget):
             self.bar.set_fraction(0.0)
             self.detail.clear()
             return
-        transport = "SC-FTN" if state.transport == "sc_ftn" else "VARA"
+        transport = {
+            "sc_ftn": "SC-FTN", "ardop": "ARDOP",
+        }.get(state.transport, "VARA")
         self.title.setText(
             tr(
                 "transfer.title_receive"

@@ -56,6 +56,18 @@ PTT_TAIL_SECONDS = 0.25
 TX_GUARD_SECONDS = 0.4
 
 
+def close_audio_stream(stream) -> None:
+    """Best-effort teardown; a failed stop must still release the device."""
+    try:
+        stream.stop()
+    except Exception:
+        pass
+    try:
+        stream.close()
+    except Exception:
+        pass
+
+
 class _ControlTxCancelled(Exception):
     """An admitted control was stopped before it acquired the channel."""
 
@@ -862,7 +874,9 @@ class AudioControlTransport(ControlTransport):
             self._stream.start()
         except Exception:
             self._running = False
-            self._stream = None
+            stream, self._stream = self._stream, None
+            if stream is not None:
+                close_audio_stream(stream)
             raise
         opened_index = getattr(self._stream, "device", self.input_device)
         if isinstance(opened_index, (tuple, list)):
@@ -912,11 +926,7 @@ class AudioControlTransport(ControlTransport):
         self._running = False
         self._rx_stop.set()
         if self._stream is not None:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                pass
+            close_audio_stream(self._stream)
             self._stream = None
         if self._rx_thread is not None and self._rx_thread is not threading.current_thread():
             self._rx_thread.join(timeout=2.0)
@@ -998,7 +1008,10 @@ class AudioControlTransport(ControlTransport):
                     on_complete(False)
                 return
             if self._tx_suspended:
-                if on_complete and frame.type not in {FrameType.HAVE_MSG, FrameType.START_VARA}:
+                if on_complete and frame.type not in {
+                    FrameType.HAVE_MSG, FrameType.START_VARA,
+                    FrameType.G2_PROFILE_OFFER, FrameType.WORKING_OFFER,
+                }:
                     on_complete(False)
                     return
                 item = ("frame", frame)

@@ -122,8 +122,10 @@ class Topology:
         destination: str,
         *,
         blocked_first_hop: str = "",
+        adjacent: dict[str, list[tuple[str, Link]]] | None = None,
     ) -> tuple[tuple[str, ...], Link] | None:
-        adjacent = self._adjacency()
+        if adjacent is None:
+            adjacent = self._adjacency()
         serial = itertools.count()
         queue: list[tuple[float, int, tuple[str, ...], int, str, Link | None]] = [
             (0.0, 0, (start,), next(serial), start, None)
@@ -158,11 +160,15 @@ class Topology:
     def derive_routes(self, own_callsign: str) -> list[Route]:
         """Build effective routes from ``own_callsign`` using cost then hops."""
         own = (own_callsign or "").strip().upper()
-        if not own or own not in self.nodes:
+        if not own:
             return []
+        nodes = self.nodes
+        if own not in nodes:
+            return []
+        adjacent = self._adjacency()
         routes: list[Route] = []
-        for destination in sorted(self.nodes - {own}):
-            primary = self._shortest_path(own, destination)
+        for destination in sorted(nodes - {own}):
+            primary = self._shortest_path(own, destination, adjacent=adjacent)
             if primary is None:
                 continue
             path, first_link = primary
@@ -171,6 +177,7 @@ class Topology:
                 own,
                 destination,
                 blocked_first_hop=first_hop,
+                adjacent=adjacent,
             )
             backup = alternate[0][1] if alternate is not None else ""
             routes.append(

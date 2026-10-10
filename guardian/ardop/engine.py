@@ -88,7 +88,7 @@ class Engine:
         n = self.lib.ga_read(self._handle(), buffer, len(buffer))
         if n < 0:
             raise RuntimeError('ARDOP receive overflow')
-        return buffer.raw[:n]
+        return C.string_at(buffer, n)
 
     def status(self, field): return self.lib.ga_status(self._handle(), field)
     @property

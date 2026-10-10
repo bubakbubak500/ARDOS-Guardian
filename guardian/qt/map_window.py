@@ -14,6 +14,7 @@ window depends on.
 from __future__ import annotations
 
 import math
+from collections import deque
 from pathlib import Path
 import time
 
@@ -156,7 +157,7 @@ class MapCanvas(QWidget):
         self._network.finished.connect(self._tile_arrived)
         self._prefetch_network = QNetworkAccessManager(self)
         self._prefetch_network.finished.connect(self._prefetch_arrived)
-        self._prefetch_queue: list[tuple[int, int, int]] = []
+        self._prefetch_queue: deque[tuple[int, int, int]] = deque()
         self._prefetch_pending: set[tuple[int, int, int]] = set()
         self._prefetch_total = 0
         self._prefetch_done = 0
@@ -336,7 +337,7 @@ class MapCanvas(QWidget):
     def start_prefetch(self, keys: list[tuple[int, int, int]]) -> None:
         if self.source is None or self._cache is None or self._prefetch_active:
             return
-        self._prefetch_queue = self.missing_tiles(keys)
+        self._prefetch_queue = deque(self.missing_tiles(keys))
         self._prefetch_total = len(self._prefetch_queue)
         self._prefetch_done = 0
         self._prefetch_errors = 0
@@ -355,7 +356,7 @@ class MapCanvas(QWidget):
             self._prefetch_queue
             and len(self._prefetch_pending) < MAX_PREFETCH_IN_FLIGHT
         ):
-            key = self._prefetch_queue.pop(0)
+            key = self._prefetch_queue.popleft()
             zoom, x, y = key
             request = QNetworkRequest(QUrl(self.source.tile_url(zoom, x, y)))
             request.setHeader(
@@ -1194,7 +1195,6 @@ class MapWindow(QDialog):
         self._location_request = None
         self._location_mode = "windows"
         self._gps_resolution_error = ""
-        self._detected_fix: LocationFix | None = None
         self._detected_grid = ""
         self._prefetch_dialog: QProgressDialog | None = None
         self.setWindowTitle(tr("map.title"))
@@ -1975,7 +1975,6 @@ class MapWindow(QDialog):
         self.detect_cancel.hide()
         self.location_settings.hide()
         grid = to_locator(fix.latitude, fix.longitude, MAX_LOCATOR_CHARS)
-        self._detected_fix = fix
         self._detected_grid = grid
         self.canvas.preview_grid = grid
         self.canvas.look_at(fix.latitude, fix.longitude, 0.08)
@@ -2087,7 +2086,6 @@ class MapWindow(QDialog):
             self._apply(grid)
 
     def _discard_detected(self, *, clear_status: bool = True) -> None:
-        self._detected_fix = None
         self._detected_grid = ""
         self.canvas.preview_grid = ""
         self.detected_panel.hide()

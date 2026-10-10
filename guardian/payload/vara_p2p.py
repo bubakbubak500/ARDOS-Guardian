@@ -504,21 +504,7 @@ class VaraP2PBackend(PayloadBackend):
                 # owns RF.  In particular, do not QSY or restart its audio
                 # path after a bounded idle wait has failed: those callbacks
                 # may key a second transmitter on top of the native tail.
-                handoff_safe = not acquired or self._wait_control_handoff()
-                if not handoff_safe:
-                    # RF quiet delays the callback, not the result of the
-                    # already completed transfer. Preserve received/sent data.
-                    self._handoff_ready.clear()
-                    handoff_deferred = True
-                    self.on_log(
-                        "VARA P2P: retaining control ownership until the "
-                        "native RF path reports idle"
-                    )
-                else:
-                    if self.on_unqsy:
-                        self._safe(self.on_unqsy)
-                    if acquired and self.on_release:
-                        self._safe(self.on_release)
+                handoff_deferred = self._finish_control_handoff(acquired)
                 # The UI must never carry the previous route into the next
                 # session.  Clear before done(), which may start another
                 # control exchange synchronously.
@@ -630,6 +616,22 @@ class VaraP2PBackend(PayloadBackend):
             pass
         if log_failure:
             self.on_log("VARA P2P: radio did not become idle for control handoff")
+        return False
+
+    def _finish_control_handoff(self, acquired: bool) -> bool:
+        """Return whether RF ownership must outlive the completed transfer."""
+        if acquired and not self._wait_control_handoff():
+            # Defer the callback without changing the completed transfer's result.
+            self._handoff_ready.clear()
+            self.on_log(
+                "VARA P2P: retaining control ownership until the "
+                "native RF path reports idle"
+            )
+            return True
+        if self.on_unqsy:
+            self._safe(self.on_unqsy)
+        if acquired and self.on_release:
+            self._safe(self.on_release)
         return False
 
     def _defer_handoff(self, done: DoneCb, success: bool) -> None:
@@ -881,19 +883,7 @@ class VaraP2PBackend(PayloadBackend):
                 # not let the control modem QSY or restart while that owner
                 # is still keyed; recovery is the integration callback's job
                 # once the handoff becomes safe.
-                handoff_safe = not acquired or self._wait_control_handoff()
-                if not handoff_safe:
-                    self._handoff_ready.clear()
-                    handoff_deferred = True
-                    self.on_log(
-                        "VARA P2P: retaining control ownership until the "
-                        "native RF path reports idle"
-                    )
-                else:
-                    if self.on_unqsy:
-                        self._safe(self.on_unqsy)
-                    if acquired and self.on_release:
-                        self._safe(self.on_release)
+                handoff_deferred = self._finish_control_handoff(acquired)
                 self._clear_transfer_context()
                 with self._handoff_state_lock:
                     if self._active_message is msg:

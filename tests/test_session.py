@@ -680,6 +680,58 @@ def test_audio_start_frame_finishes_before_payload_takes_soundcard() -> None:
     assert started == [305]
 
 
+@pytest.mark.parametrize('state,kind,method', [
+    (SessionState.NEGOTIATING_PROFILE, FrameType.G2_PROFILE_OFFER, '_send_g2_profile'),
+    (SessionState.NEGOTIATING_WORKING, FrameType.WORKING_OFFER, '_send_working'),
+])
+def test_slow_agreement_offer_waits_for_tx_completion_before_retry(state, kind, method):
+    class DeferredControl:
+        supports_tx_completion = True
+        on_frame = None
+
+        def __init__(self):
+            self.sent = []
+
+        def send(self, frame, *, on_complete=None, allowed=None):
+            self.sent.append((frame, on_complete, allowed))
+
+    clock = [100.0]
+    transport = DeferredControl()
+    station = Orchestrator('OK7PS', transport, auto_route=False, clock=lambda: clock[0])
+    station.control_exchange_timeout = 12.04
+    station.start_timeout = 12.04
+    message = Message(306, 'OK7PS', 'OK2IPW', 'OK2IPW', state=state,
+                      attempts=1, t_state=clock[0], g2_profile_token='A500',
+                      working_token='=')
+    station.sessions[306] = message
+    getattr(station, method)(kind, message)
+
+    # A delayed 4.52-second ARDOP offer must not overlap the peer's ACK.
+    clock[0] = 113.0
+    station.tick(clock[0])
+    assert len(transport.sent) == 1
+    assert message.agreement_tx_pending
+    clock[0] = 114.0
+    transport.sent[0][1](True)
+    clock[0] = 126.0
+    station.tick(clock[0])
+    assert len(transport.sent) == 1
+    clock[0] = 126.1
+    station.tick(clock[0])
+    assert len(transport.sent) == 2
+    assert message.attempts == 2
+    assert not transport.sent[0][2]()
+    assert transport.sent[1][2]()
+    transport.sent[0][1](True)
+    assert message.agreement_tx_pending
+
+    # A lost worker callback still has a bounded failure path.
+    clock[0] = 163.0
+    station.tick(clock[0])
+    assert message.state is SessionState.FAILED
+    assert not transport.sent[1][2]()
+
+
 def test_any_backup_enters_route_discovery_after_primary_fails() -> None:
     bus = LoopbackBus()
     routes = RouteTable([Route("OK9ZZZ", "OK2IPW", "ANY")])

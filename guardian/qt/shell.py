@@ -618,11 +618,13 @@ class GuardianMainWindow(QMainWindow):
         self.vara_status = StatusIndicator()
         self.control_status = StatusIndicator()
         self.hamlib_status = StatusIndicator()
+        self.ardos_cz_status = StatusIndicator()
         for indicator in (
             self.radio_status,
             self.vara_status,
             self.control_status,
             self.hamlib_status,
+            self.ardos_cz_status,
         ):
             indicator.setSizePolicy(
                 QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
@@ -847,7 +849,11 @@ class GuardianMainWindow(QMainWindow):
         config = self.runtime.config
         self.spectrum_action.setEnabled(config.payload_backend != "ardop")
         sc_selected = config.payload_backend == "ofdm_vhf"
+        ardop_selected = config.payload_backend == "ardop"
         sc_status = self._sc_status() if sc_selected else None
+        ardop_status = (
+            self.runtime.operations.ardop_status() if ardop_selected else None
+        )
         no_cat = (
             config.radio_backend == "hamlib"
             and int(config.rig_model or 0) == DUMMY_MODEL
@@ -856,11 +862,13 @@ class GuardianMainWindow(QMainWindow):
         if no_cat and not self.manual_frequency.hasFocus():
             self.manual_frequency.setValue(int(config.manual_frequency_hz or 0))
         payload = PAYLOAD_LABELS.get(config.payload_backend, "VARA P2P")
-        mode_label = (
-            f"SC-FTN {str(config.g2_bandwidth).strip().upper()}"
-            if sc_selected
-            else config.vara_mode
-        )
+        if ardop_selected:
+            radio_mode = str(snapshot.radio.mode or "").strip().upper()
+            mode_label = f"{radio_mode or 'SSB'} / 500 Hz"
+        elif sc_selected:
+            mode_label = f"SC-FTN {str(config.g2_bandwidth).strip().upper()}"
+        else:
+            mode_label = config.vara_mode
         self.context_value.setText(
             f"{config.callsign or 'NOCALL'}  ·  {mode_label}  ·  {payload}"
         )
@@ -896,7 +904,8 @@ class GuardianMainWindow(QMainWindow):
             context_items.append(
                 tr("context.sessions", count=snapshot.network.active_sessions)
             )
-        if snapshot.vara.link_state == "CONNECTING":
+        if (config.payload_backend == "vara_p2p"
+                and snapshot.vara.link_state == "CONNECTING"):
             context_items.append(tr("context.vara_connecting"))
         self.context_activity.setText("  ·  ".join(context_items))
         self.context_activity.setVisible(bool(context_items))
@@ -905,6 +914,8 @@ class GuardianMainWindow(QMainWindow):
                 snapshot,
                 self.runtime.operations.payload_active(),
                 sc_status,
+                ardop_status=ardop_status,
+                payload_backend=config.payload_backend,
             )
         )
 
@@ -936,10 +947,17 @@ class GuardianMainWindow(QMainWindow):
         if sc_selected:
             sc_state = str(getattr(sc_status, "state", "idle") or "idle").lower()
             self.vara_status.set_status(
-                "success" if sc_state != "idle" else "inactive",
+                "success",
                 dual("SC-FTN: active", "SC-FTN: aktivní")
                 if sc_state != "idle"
                 else dual("SC-FTN: ready", "SC-FTN: připraveno"),
+            )
+        elif ardop_selected:
+            self.vara_status.set_status(
+                "success",
+                dual("ARDOP: active", "ARDOP: aktivní")
+                if ardop_status is not None
+                else dual("ARDOP: ready", "ARDOP: připraveno"),
             )
         else:
             self.vara_status.set_status(
@@ -964,6 +982,13 @@ class GuardianMainWindow(QMainWindow):
                 if dependency.hamlib_available
                 else tr("status.hamlib_missing"),
             )
+        ardos_service = getattr(self.runtime, "ardos_cz", None)
+        ardos_state = ardos_service.snapshot()["state"] if ardos_service else "disabled"
+        self.ardos_cz_status.set_status(
+            "success" if ardos_state == "online" else "inactive",
+            "ARDOS CZ: " + dual("online", "online") if ardos_state == "online"
+            else "ARDOS CZ: " + dual("offline", "offline"),
+        )
         self.radio_button.setText(
             tr("shell.disconnect_radio")
             if snapshot.radio.connected
@@ -1011,28 +1036,35 @@ class GuardianMainWindow(QMainWindow):
             else tr("common.not_configured"),
             radio_name,
         )
-        if sc_selected:
+        if sc_selected or ardop_selected:
             sc_policy_summary = ""
-            try:
-                policy = automatic_g2_policy(
-                    SC_FTN_WAVEFORM,
-                    str(config.g2_bandwidth).strip().upper(),
-                    radio_backend=config.radio_backend,
-                    radio_model=config.radio,
-                )
-                profile = ModemWorkspace.effective_profile(
-                    policy, policy.bandwidth
-                )
-                geometry = (
-                    f"{profile.name}; {profile.occupied_bandwidth:.0f} Hz; "
-                    f"center {profile.center_hz:.1f} Hz; "
-                    f"symbol {profile.symbol_rate:.1f} sym/s"
+            if ardop_selected:
+                geometry = dual(
+                    "500 Hz; radio mode USB/LSB; native ARDOP modem",
+                    "500 Hz; režim rádia USB/LSB; nativní modem ARDOP",
                 )
                 sc_state = tr("common.ready")
-                sc_policy_summary = policy.summary()
-            except ValueError as exc:
-                geometry = str(exc)
-                sc_state = tr("common.missing")
+            else:
+                try:
+                    policy = automatic_g2_policy(
+                        SC_FTN_WAVEFORM,
+                        str(config.g2_bandwidth).strip().upper(),
+                        radio_backend=config.radio_backend,
+                        radio_model=config.radio,
+                    )
+                    profile = ModemWorkspace.effective_profile(
+                        policy, policy.bandwidth
+                    )
+                    geometry = (
+                        f"{profile.name}; {profile.occupied_bandwidth:.0f} Hz; "
+                        f"center {profile.center_hz:.1f} Hz; "
+                        f"symbol {profile.symbol_rate:.1f} sym/s"
+                    )
+                    sc_state = tr("common.ready")
+                    sc_policy_summary = policy.summary()
+                except ValueError as exc:
+                    geometry = str(exc)
+                    sc_state = tr("common.missing")
             rows = [identity_row, radio_row]
             if config.radio_backend == "hamlib":
                 rows.append(
@@ -1062,7 +1094,8 @@ class GuardianMainWindow(QMainWindow):
                     ),
                     (
                         tr("ready.payload"),
-                        f"{payload} / AUTO / {sc_state}",
+                        f"{payload} / {sc_state}" if ardop_selected
+                        else f"{payload} / AUTO / {sc_state}",
                         geometry + (f"; {sc_policy_summary}" if sc_policy_summary else ""),
                     ),
                 ]

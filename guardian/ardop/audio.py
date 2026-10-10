@@ -8,6 +8,10 @@ import time
 import numpy as np
 from ..modem.audio import _import_sounddevice, resolve_device, transmit_waveform
 
+TX_GUARD_SECONDS = 0.25
+TX_TAIL_SECONDS = 0.05
+REPLY_QUIET_SECONDS = TX_GUARD_SECONDS + TX_TAIL_SECONDS + 0.05
+
 class AudioSession:
     def __init__(self, engine, *, audio_input=None, audio_output=None,
                  ptt=None, turnaround_ms=0, tx_scale=1.0, cancelled=None):
@@ -66,14 +70,22 @@ class AudioSession:
             self.sending = True
             started = time.monotonic()
             try:
+                # A decoded frame can end before the peer drains its USB
+                # output and releases PTT. Wait in RX before keying our reply;
+                # a PTT lead alone would already make us deaf to that tail.
+                if self.cancelled is not None:
+                    if self.cancelled.wait(REPLY_QUIET_SECONDS):
+                        raise RuntimeError('ARDOP cancelled')
+                else:
+                    time.sleep(REPLY_QUIET_SECONDS)
                 while not self.blocks.empty():
                     self.blocks.get_nowait()
                 wave = self.engine.waveform().astype(np.float32) / 32768.0
                 transmit_waveform(
                     self.sd, wave * self.tx_scale, sample_rate=48000,
                     device=self.out_device, ptt=self.ptt,
-                    lead_seconds=self.lead, tail_seconds=0.05,
-                    guard_seconds=0.25)
+                    lead_seconds=self.lead, tail_seconds=TX_TAIL_SECONDS,
+                    guard_seconds=TX_GUARD_SECONDS)
                 self.engine.finish_transmit(int((time.monotonic() - started) * 48000))
             finally:
                 self.sending = False

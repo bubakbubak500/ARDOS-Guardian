@@ -109,6 +109,8 @@ class ArdopBackend(PayloadBackend):
         peer = (msg.next_hop if sending else msg.source).upper()
         body = (msg.payload_bytes if msg.payload_bytes is not None else msg.body.encode('utf-8')) if sending else b''
         wire = envelope(msg.msg_id, body) if sending else b''
+        if sending:
+            msg.payload_wire_size = len(wire)
         ack = b'GACK' + struct.pack('>I', msg.msg_id)
         received = bytearray()
         offset = 0
@@ -116,12 +118,23 @@ class ArdopBackend(PayloadBackend):
         complete = False
         disconnecting = False
         last_mode = None
+        last_frames = [0, 0, 0]
+        last_state = None
         start = time.monotonic()
         deadline = start + (max(240, len(wire) * 8 / 41 * 4 + 180) if sending else 240)
         if sending:
             engine.command(0, target=peer)
         while time.monotonic() < deadline:
             audio.step()
+            for index, label in enumerate(('TX', 'RX', 'RX failed')):
+                event = engine.status(8 + index)
+                if event != last_frames[index]:
+                    self.on_log(f'ARDOP {label} frame 0x{event & 0xff:02X}')
+                    last_frames[index] = event
+            state = engine.state
+            if state != last_state:
+                self.on_log(f'ARDOP link state {state}, queued {engine.queued} bytes')
+                last_state = state
             mode = engine.status(7) & 0xfe
             if sending and mode != last_mode and mode in (0x48, 0x42, 0x40, 0x50, 0x52, 0x54):
                 label = {0x48: '4FSK 200 Hz', 0x42: '4PSK 200 Hz short',
@@ -147,6 +160,8 @@ class ArdopBackend(PayloadBackend):
                 if received:
                     if not ack.startswith(received):
                         raise ValueError('Invalid ARDOP completion acknowledgement')
+                    if received == ack and not complete:
+                        self.on_log('ARDOP completion acknowledgement received')
                     complete = received == ack
                 if complete and not disconnecting and not engine.transmitting:
                     engine.command(1)
@@ -164,6 +179,7 @@ class ArdopBackend(PayloadBackend):
                     engine.command(3, data=ack)
                     engine.command(7)  # IRS requests the link to return the ACK.
                     complete = True
+                    self.on_log(f'ARDOP payload checksum verified ({len(decoded)} bytes); returning acknowledgement')
                     deadline = time.monotonic() + 120
             if connected and engine.state == 0 and not engine.transmitting:
                 return complete and (sending or engine.queued == 0)

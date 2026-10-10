@@ -12,14 +12,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from ..ofdm.coding import (FecProfile, combine_harq_soft, decode_soft, encode_bits, encoded_bits,
-                           iterative_decode_candidates,
+from ..ofdm.coding import (FecProfile, decode_soft, encode_bits, encoded_bits,
                            fec_profile, fec_spec)
 from ..ofdm.config import sc_mcs
 from ..ofdm.framing import (
     HEADER_BYTES, LEGACY_FRAME_VERSION, AckBitmap,
     DecodedBurst, OfdmFrameError, OfdmFrameType, PhyHeader, SubBlock, _CRC,
-    _decode_manifest, _encode_manifest, _normalise_blocks, _set_evm,
+    _decode_manifest, _decode_soft_section, _encode_manifest, _normalise_blocks, _set_evm,
     max_arq_block_bytes,
     evm_to_snr_db, protocol_overhead_bytes,
 )
@@ -97,27 +96,7 @@ def decode_section_with_soft(profile: WaveformProfile, symbols, noise_var,
         _noise_prefix(noise_var, wanted_symbols),
     )
     current_soft = deinterleave(llr)[:encoded_bits(byte_count, fec)]
-    soft = current_soft
-    def crc_accepts(bits) -> bool:
-        raw = np.packbits(bits[:byte_count * 8].astype(np.uint8)).tobytes()
-        return (len(raw) >= _CRC.size
-                and raw[-_CRC.size:] == _CRC.pack(crc16(raw[:-_CRC.size])))
-
-    candidate_sets = [iterative_decode_candidates(
-        current_soft, byte_count, fec, accept=crc_accepts,
-    )]
-    fresh_ok = crc_accepts(candidate_sets[0][-1])
-    if prior_soft is not None and not fresh_ok:
-        prior_fec, prior = prior_soft
-        soft = combine_harq_soft(
-            current_soft, fec, prior, prior_fec, byte_count
-        )
-        candidate_sets.append(iterative_decode_candidates(
-            soft, byte_count, fec, accept=crc_accepts,
-        ))
-    candidates = [bits for group in candidate_sets for bits in group]
-    return ([np.packbits(bits[:byte_count * 8].astype(np.uint8)).tobytes()
-             for bits in candidates], soft)
+    return _decode_soft_section(current_soft, byte_count, fec, prior_soft)
 
 
 def reference_evm(profile: WaveformProfile, symbols, data: bytes,

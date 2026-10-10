@@ -60,6 +60,103 @@ def test_rejects_ambiguous_or_unsupported_plans(change):
         validate(value)
 
 
+def passband_plan():
+    value = plan()
+    for endpoint in value["endpoints"].values():
+        endpoint["config"].update(radio_backend="hamlib", rig_model=3073)
+    value["cases"][0].update(modem="ARDOP", channel={
+        "frequency_hz": 144_600_000, "mode": "USB", "passband_hz": 500})
+    return value
+
+
+def test_channel_passband_is_validated_for_hamlib_cat_endpoints():
+    checked = validate(passband_plan())
+    assert checked["cases"][0]["channel"] == {
+        "frequency_hz": 144_600_000, "mode": "USB", "passband_hz": 500}
+
+
+@pytest.mark.parametrize("width", [0, -500, None, "invalid", True])
+def test_channel_passband_rejects_invalid_width(width):
+    value = passband_plan()
+    value["cases"][0]["channel"]["passband_hz"] = width
+    with pytest.raises(ValueError, match="passband_hz"):
+        validate(value)
+
+
+@pytest.mark.parametrize("radio", [{"radio_backend": "vox"}, {"rig_model": 1}])
+def test_channel_passband_rejects_endpoints_without_cat(radio):
+    value = passband_plan()
+    value["endpoints"]["b"]["config"].update(radio)
+    with pytest.raises(ValueError, match="Hamlib CAT"):
+        validate(value)
+
+
+def test_channel_passband_is_set_verified_and_restored():
+    from guardian.lab.station import _set_channel, _restore_channel
+    from guardian.radio.base import RadioState
+    from guardian.radio.hamlib import HamlibRadio
+
+    class Radio(HamlibRadio):
+        def __init__(self):
+            self.state = RadioState(connected=True, frequency_hz=144_600_000,
+                                    mode="FM", passband_hz=15_000)
+            self.commands = []
+        def set_frequency(self, hz):
+            self.commands.append(("frequency", hz))
+            self.state.frequency_hz = hz
+        def set_mode(self, mode, passband=0):
+            self.commands.append(("mode", mode, passband))
+            self.state.mode, self.state.passband_hz = mode, passband
+        def get_state(self):
+            return deepcopy(self.state)
+
+    radio = Radio()
+    previous = radio.get_state()
+    channel = passband_plan()["cases"][0]["channel"]
+    readback = _set_channel(radio, channel)
+    assert (readback.mode, readback.passband_hz) == ("USB", 500)
+    _restore_channel(radio, previous)
+    assert radio.get_state() == previous
+    assert radio.commands == [("frequency", 144_600_000), ("mode", "USB", 500),
+                              ("frequency", 144_600_000), ("mode", "FM", 15_000)]
+
+
+def test_channel_passband_requires_actual_width_readback(monkeypatch):
+    from guardian.lab.station import _set_channel
+    from guardian.radio.base import RadioState
+    from guardian.radio.hamlib import HamlibRadio
+
+    radio = HamlibRadio()
+    monkeypatch.setattr(radio, "set_frequency", lambda hz: None)
+    monkeypatch.setattr(radio, "set_mode", lambda mode, passband=0: None)
+    monkeypatch.setattr(radio, "get_state", lambda: RadioState(
+        connected=True, frequency_hz=144_600_000, mode="USB", passband_hz=2400))
+    with pytest.raises(RuntimeError, match="passband readback"):
+        _set_channel(radio, passband_plan()["cases"][0]["channel"])
+
+
+def test_channel_without_passband_preserves_other_radio_backend_behavior():
+    from guardian.lab.station import _set_channel, _restore_channel
+    from guardian.radio.base import RadioState
+
+    class Radio:
+        def __init__(self):
+            self.state = RadioState(connected=True, frequency_hz=144_600_000, mode="FM")
+        def set_frequency(self, hz):
+            self.state.frequency_hz = hz
+        def set_mode(self, mode):
+            self.state.mode = mode
+        def get_state(self):
+            return deepcopy(self.state)
+
+    radio = Radio()
+    previous = radio.get_state()
+    readback = _set_channel(radio, {"frequency_hz": 144_600_000, "mode": "USB"})
+    assert readback.mode == "USB"
+    _restore_channel(radio, previous)
+    assert radio.get_state() == previous
+
+
 def test_content_verification_checks_filenames_text_and_bytes():
     original = MailMessage(1, "OK1AAA", "OK1BBB", subject="test", body="text",
                            attachments=[Attachment("binary.bin", b"\0\1\2")])

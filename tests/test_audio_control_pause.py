@@ -1,6 +1,7 @@
 """Control audio must leave the codec exclusively to the payload modem."""
 
 from types import SimpleNamespace
+import threading
 
 import pytest
 
@@ -58,6 +59,52 @@ def test_payload_suspension_holds_new_controls_and_cw_until_rx_resumes(monkeypat
         assert transport.wait_tx_idle(timeout=2.0)
         assert len(played) == 3  # One held relay plus CW, after reopening RX.
         assert transport._stream is not None
+    finally:
+        transport.stop()
+
+
+@pytest.mark.parametrize("kind", [FrameType.G2_PROFILE_OFFER, FrameType.WORKING_OFFER])
+@pytest.mark.parametrize("still_current", [True, False])
+def test_suspended_agreement_offer_keeps_completion_and_checks_current_before_tx(
+    monkeypatch, kind, still_current,
+):
+    transport, played = _transport(monkeypatch)
+    current = [True]
+    checked = []
+    completed = []
+    finished = threading.Event()
+
+    def allowed():
+        checked.append(current[0])
+        return current[0]
+
+    def complete(success):
+        completed.append(success)
+        finished.set()
+
+    def transmit(sd, samples, **kwargs):
+        kwargs["before_play"]()
+        try:
+            played.append(len(samples))
+        finally:
+            kwargs["after_release"]()
+
+    monkeypatch.setattr("guardian.modem.audio.transmit_waveform", transmit)
+    try:
+        assert transport.suspend(timeout=2.0)
+        offer = ControlFrame(kind, source="OK7PS", destination="A500",
+                             next_hop="OK2IPW", message_id=903)
+        transport.send(offer, on_complete=complete, allowed=allowed)
+        assert completed == [] and played == []
+        assert checked == []
+        current[0] = still_current
+
+        transport.start()
+        assert transport.wait_tx_idle(timeout=2.0)
+        assert finished.wait(2.0)
+        assert checked == [still_current]
+        assert completed == [still_current]
+        assert len(played) == int(still_current)
     finally:
         transport.stop()
 

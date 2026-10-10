@@ -7,6 +7,7 @@ import io
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._csv_values import format_mhz as _format_mhz, parse_mhz as _parse_mhz
 from .topology import DIRECTIONS, Link, Topology
 
 
@@ -31,18 +32,6 @@ class TopologyImportReport:
     @property
     def imported(self) -> int:
         return len(self.topology.links)
-
-
-def _format_mhz(freq_hz: int) -> str:
-    return f"{freq_hz / 1_000_000:.4f}" if freq_hz else ""
-
-
-def _parse_mhz(value: str) -> int:
-    text = value.strip().replace(" ", "").replace(",", ".")
-    if not text:
-        return 0
-    number = float(text)
-    return int(round(number if number > 1_000_000 else number * 1_000_000))
 
 
 def topology_to_csv(topology: Topology) -> str:

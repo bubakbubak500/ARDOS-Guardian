@@ -15,6 +15,7 @@ class RadioState:
     ptt: bool = False
     signal: int | None = None      # raw S-meter value if available
     error: str | None = None
+    passband_hz: int | None = None
 
     def freq_mhz(self) -> str:
         if self.frequency_hz is None:

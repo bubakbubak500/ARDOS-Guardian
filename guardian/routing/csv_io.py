@@ -17,6 +17,7 @@ import io
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._csv_values import format_mhz as _format_mhz, parse_mhz as _parse_mhz
 from .route_table import Route
 
 COLUMNS = (
@@ -48,10 +49,6 @@ class ImportReport:
         return len(self.routes)
 
 
-def _format_mhz(freq_hz: int) -> str:
-    return f"{freq_hz / 1_000_000:.4f}" if freq_hz else ""
-
-
 def routes_to_csv(routes) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";", lineterminator="\r\n")
@@ -79,16 +76,6 @@ def write_csv(path: Path | str, routes) -> Path:
 
 def template_csv() -> str:
     return routes_to_csv(TEMPLATE_ROWS)
-
-
-def _parse_mhz(value: str) -> int:
-    """Accept 145.2375, 145,2375 or a bare Hz figure."""
-    text = value.strip().replace(" ", "").replace(",", ".")
-    if not text:
-        return 0
-    number = float(text)
-    # Nobody works a station below 1 MHz here, so a large number is already Hz.
-    return int(round(number if number > 1_000_000 else number * 1_000_000))
 
 
 def routes_from_csv(text: str) -> ImportReport:

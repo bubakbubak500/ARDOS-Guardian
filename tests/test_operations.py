@@ -88,6 +88,83 @@ def _operations(tmp_path, **overrides) -> tuple[Operations, WorkerPool, MessageS
     return operations, workers, mailstore
 
 
+def test_ardop_pause_preserves_live_routes_until_normal_expiry(tmp_path, monkeypatch):
+    operations, workers, _ = _operations(tmp_path, discovery_mode="assisted",
+                                         link_advert_enabled=True)
+    try:
+        discovery = operations.net.discovery
+        discovery.tick(100)
+        discovery.advertise_neighbors([("OK1AAA", 10)])
+        discovery.receive(ControlFrame(type=FrameType.LINK_ADVERT,
+            source="OK1AAA", destination="OK1AAA", next_hop="OK7PS",
+            message_id=42, ttl=2))
+        assert discovery.routes.best("OK1AAA", 100) is not None
+        operations.config.payload_backend = "ardop"
+        operations.apply_network_settings()
+        assert discovery.link_advert_enabled and discovery.link_advert_paused
+        assert discovery.routes.best("OK1AAA", 100) is not None
+        operations.config._save_disabled = True
+        operations.audio_transport = SimpleNamespace(stop=lambda: None)
+        def reopen_without_audio():
+            from guardian.session import NullTransport
+            operations.net = operations._build_net(NullTransport())
+            return True
+        monkeypatch.setattr(operations, "start_control_channel", reopen_without_audio)
+        assert operations.restart_control_channel()
+        discovery = operations.net.discovery
+        assert discovery.link_advert_paused
+        assert discovery.routes.best("OK1AAA", 100) is not None
+        discovery.tick(100 + operations.config.discovery_route_lifetime + 1)
+        assert discovery.routes.best("OK1AAA", discovery._now) is None
+        operations.config.payload_backend = "ofdm_vhf"
+        operations.apply_network_settings()
+        assert not discovery.link_advert_paused
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
+def test_ardop_status_tracks_active_message_and_never_uses_vara_counters(tmp_path):
+    operations, workers, _ = _operations(tmp_path, payload_backend="ardop")
+    msg = Message(msg_id=42, source="OK7PS", final_dest="OK2BBB",
+                  next_hop="RELAY1", payload_bytes=b"test payload",
+                  payload_transport="ardop", state=SessionState.TRANSFERRING)
+    operations.net.sessions[msg.msg_id] = msg
+    try:
+        assert operations.ardop_status() is None
+        operations._payload_active.set()
+        msg.payload_wire_size = len(msg.payload_bytes) + 28
+        msg.payload_progress_bytes = 5
+        status = operations.ardop_status()
+        assert status.direction == "send" and status.total_bytes_exact
+        assert status.total_bytes == len(msg.payload_bytes)
+        assert status.progress_bytes == 5
+        assert status.transfer_source == "OK7PS" and status.transfer_via == "RELAY1"
+        msg.payload_progress_bytes = 6
+        assert status.progress_bytes == 5  # Poll results remain immutable.
+        msg.direction = "in"
+        msg.source = "RELAY1"
+        msg.final_dest = "OK7PS"
+        msg.payload_bytes = None
+        msg.payload_wire_size = 0
+        msg.state = SessionState.RECEIVING
+        status = operations.ardop_status()
+        assert status.direction == "receive" and not status.total_bytes_exact
+        assert status.total_bytes == 0 and status.transfer_source == ""
+        assert status.transfer_via == "RELAY1"
+        msg.payload_wire_size = 28 + 128
+        msg.payload_progress_bytes = 80
+        status = operations.ardop_status()
+        assert status.total_bytes == 128 and status.progress_bytes == 80
+        msg.payload_transport = "vara_p2p"
+        assert operations.ardop_status() is None
+    finally:
+        operations._payload_active.clear()
+        operations.net.sessions.clear()
+        operations.close()
+        workers.close(wait=True)
+
+
 def test_payload_ownership_defers_control_without_disabling_transfer_watchdog(
     tmp_path, monkeypatch,
 ) -> None:

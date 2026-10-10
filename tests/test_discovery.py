@@ -744,10 +744,173 @@ def test_disabling_link_advert_removes_only_its_volatile_state() -> None:
     rreq = engine.routes.learn("S2", "N2", 2, 0, 442, 1)
     assert engine.routes.best("N1", 1) is not None
 
+    engine.configure(link_advert_paused=True)
     engine.configure(link_advert_enabled=False)
     assert engine.live_topology.links(1) == []
     assert engine.routes.best("N1", 1) is None
     assert engine.routes.best("S2", 1) is rreq
+
+
+def test_paused_link_advert_preserves_known_route_until_normal_expiry() -> None:
+    sent = []
+    engine = DiscoveryEngine(
+        "S6", sent.append, mode=DISCOVERY_ASSISTED,
+        link_advert_enabled=True, auto_use=True, route_lifetime=10,
+    )
+    engine.tick(1)
+    engine.advertise_neighbors([("N1", 10.0)])
+    engine.receive(ControlFrame(
+        FrameType.LINK_ADVERT, source="N1", destination="N1",
+        next_hop="S6", message_id=48, ttl=1,
+    ))
+    route = engine.routes.best("N1", 1, approved_only=True)
+    assert route is not None
+    links = engine.live_topology.links(1)
+    sent.clear()
+
+    engine.configure(link_advert_paused=True)
+    assert engine.link_advert_enabled
+    assert engine.routes.best("N1", 1, approved_only=True) is route
+    assert engine.live_topology.links(1) == links
+    assert engine.advertise_neighbors([], force=True) == 0
+    assert engine.advertise_neighbors([("N2", 5.0)], force=True) == 0
+    engine.tick(10)
+    assert engine.routes.best("N1", 10, approved_only=True) is route
+    assert route.expires_at == 11
+    engine.tick(11.1)
+    assert engine.live_topology.links(11.1) == []
+    assert engine.routes.best("N1", 11.1, approved_only=True) is None
+    assert sent == []
+
+
+def test_pausing_link_advert_discards_pending_flood_and_still_answers_queries() -> None:
+    sent = []
+    engine = DiscoveryEngine(
+        "N1", sent.append, mode=DISCOVERY_ASSISTED, forward=True,
+        relay_enabled=True, link_advert_enabled=True, jitter_min=5, jitter_max=5,
+    )
+    engine.tick(1)
+    engine.receive(ControlFrame(
+        FrameType.LINK_ADVERT, source="S6", destination="S6",
+        next_hop="N2", message_id=49, ttl=4,
+    ))
+    engine.receive(ControlFrame(
+        FrameType.MULTIHOP_RREQ, source="S6", destination="N1",
+        next_hop="S6", message_id=50, ttl=4,
+    ))
+    assert any(item.kind == "LINK-ADVERT" for item in engine._scheduled)
+    engine.configure(link_advert_paused=True)
+    engine.tick(10)
+    assert sent and all(frame.type is FrameType.MULTIHOP_RREP for frame in sent)
+
+    # Fresh evidence may be recorded while paused, but must not start a flood.
+    engine.receive(ControlFrame(
+        FrameType.LINK_ADVERT, source="N2", destination="N2",
+        next_hop="S1", message_id=51, ttl=4,
+    ))
+    assert ("N2", "S1") in {(link.owner, link.neighbor)
+                            for link in engine.live_topology.links(10)}
+    engine.configure(link_advert_paused=False)
+    engine.tick(20)
+    assert all(frame.type is FrameType.MULTIHOP_RREP for frame in sent)
+
+
+def test_link_advert_resume_announces_before_previous_interval_is_due() -> None:
+    sent = []
+    engine = DiscoveryEngine(
+        "S6", sent.append, mode=DISCOVERY_ASSISTED,
+        link_advert_enabled=True, link_advert_interval=900,
+    )
+    engine.tick(1)
+    assert engine.advertise_neighbors([("N1", 5.0)]) == 1
+    engine.configure(link_advert_paused=True)
+    engine.tick(2)
+    assert engine.advertise_neighbors([("N1", 5.0)]) == 0
+    engine.configure(link_advert_paused=False)
+    assert engine.advertise_neighbors([("N1", 5.0)]) == 1
+    assert len(sent) == 2
+
+
+def test_orchestrator_initial_link_advert_pause_blocks_presence_and_neighbors() -> None:
+    frames = []
+    bus = GraphRadioBus(set(), monitor=lambda sender, frame: frames.append(frame))
+    station = Orchestrator(
+        "S6", bus.endpoint("S6"), discovery_mode=DISCOVERY_ASSISTED,
+        link_advert_enabled=True, link_advert_paused=True,
+    )
+    station.tick(1)
+    station.heard.record("N1", 1)
+    station.tick(2)
+    bus.pump()
+    assert frames == []
+    station.configure_discovery(link_advert_paused=False)
+    station.tick(3)
+    bus.pump()
+    assert len(frames) == 1
+    assert frames[0].type is FrameType.LINK_ADVERT
+    assert frames[0].next_hop == "N1"
+
+
+def test_audio_reopen_uses_fresh_advert_ids_and_does_not_replay_pending_queries() -> None:
+    frames = []
+    old = DiscoveryEngine("N1", frames.append, mode=DISCOVERY_ASSISTED,
+                          link_advert_enabled=True)
+    peer = DiscoveryEngine("S6", lambda frame: None, mode=DISCOVERY_ASSISTED,
+                           link_advert_enabled=True)
+    old.tick(1)
+    peer.tick(1)
+    old.advertise_neighbors([("S6", 10.0)])
+    first = frames[-1]
+    peer.receive(first)
+    old.start("S2")
+    assert old.pending
+
+    reopened = DiscoveryEngine("N1", frames.append, mode=DISCOVERY_ASSISTED,
+                               link_advert_enabled=True)
+    reopened.retain_observations(old)
+    assert not reopened.pending and not reopened._scheduled
+    reopened.tick(61)
+    peer.tick(61)
+    reopened.advertise_neighbors([("S6", 10.0)])
+    refreshed = frames[-1]
+    assert refreshed.message_id != first.message_id
+    peer.receive(refreshed)
+    assert peer.live_topology.links(61)[0].learned_at == 61
+
+
+def test_link_advert_budget_rotates_so_no_neighbor_is_permanently_skipped() -> None:
+    sent = []
+    engine = DiscoveryEngine(
+        "S6", sent.append, mode=DISCOVERY_ASSISTED,
+        link_advert_enabled=True, frame_budget=12, link_advert_interval=60,
+    )
+    neighbors = [(f"N{index:02}", 5.0) for index in range(13)]
+    engine.tick(1)
+    assert engine.advertise_neighbors(neighbors) == 12
+    assert [frame.next_hop for frame in sent] == [peer for peer, _snr in neighbors[:12]]
+    assert engine.advertise_neighbors(neighbors, force=True) == 0
+    assert len(sent) == 12  # Force must still respect the one-minute budget.
+    engine.tick(61)
+    assert engine.advertise_neighbors(neighbors) == 12
+    assert sent[12].next_hop == neighbors[-1][0]
+    assert {frame.next_hop for frame in sent} == {peer for peer, _snr in neighbors}
+
+
+def test_link_advert_rotation_handles_changed_neighbors_and_forced_refresh() -> None:
+    sent = []
+    engine = DiscoveryEngine(
+        "S6", sent.append, mode=DISCOVERY_ASSISTED,
+        link_advert_enabled=True, frame_budget=1, link_advert_interval=900,
+    )
+    neighbors = [("N1", 5.0), ("N2", 5.0)]
+    engine.tick(1)
+    assert engine.advertise_neighbors(neighbors) == 1
+    engine.tick(61)
+    assert engine.advertise_neighbors(neighbors) == 0
+    assert engine.advertise_neighbors(neighbors, force=True) == 1
+    engine.tick(121)
+    assert engine.advertise_neighbors([("N1", 5.0), ("N3", 5.0)]) == 1
+    assert [frame.next_hop for frame in sent] == ["N1", "N2", "N3"]
 
 
 def test_one_way_link_advert_is_visible_but_never_routable() -> None:

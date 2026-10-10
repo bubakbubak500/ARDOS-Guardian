@@ -174,8 +174,9 @@ class SettingsDialog(QDialog):
         self._build_payload_options()
         self._build_network()
         self._build_appearance(theme)
+        self._build_ardos_cz()
         if radio_only:
-            for index in (0, 4, 5, 6):
+            for index in (0, 4, 5, 6, 7):
                 self.tabs.setTabVisible(index, False)
             self.tabs.setCurrentIndex(1)
             intro.hide()
@@ -228,11 +229,11 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.dual_radio_enabled)
         note = QLabel(dual(
             "Radio 2 shares the mailbox and station callsign. Select its own audio devices, "
-            "CAT port and VARA instance with different TCP ports. Configure those same ports "
-            "in the second VARA instance. For AIOC/no CAT, enter the actual dial frequency.",
+            "and CAT port. When using VARA, use separate instances with different TCP ports "
+            "and configure those ports in VARA. For AIOC/no CAT, enter the actual dial frequency.",
             "Rádio 2 sdílí poštu a volací značku. Vyberte jeho vlastní zvuková zařízení, "
-            "CAT port a instanci VARA s odlišnými TCP porty. Stejné porty nastavte i v druhé "
-            "instanci VARA. U AIOC / bez CAT zadejte skutečnou frekvenci rádia."))
+            "a CAT port. Při použití VARA používejte samostatné instance s odlišnými TCP porty "
+            "a nastavte tyto porty i ve VARA. U AIOC / bez CAT zadejte skutečnou frekvenci rádia."))
         note.setWordWrap(True)
         layout.addWidget(note)
         self._second_layout = layout
@@ -1322,19 +1323,6 @@ class SettingsDialog(QDialog):
                 "nemění kódování přenášeného obsahu.",
             ),
         )
-        self.ardos_cz_enabled = QCheckBox(dual("Enable ARDOS CZ", "Zapnout ARDOS CZ"))
-        self.ardos_cz_enabled.setChecked(self.config.ardos_cz_enabled)
-        self.ardos_cz_url = QLineEdit(self.config.ardos_cz_url)
-        self.ardos_cz_url.setPlaceholderText("https://server.tailnet.ts.net")
-        self.ardos_cz_preference = QComboBox()
-        self.ardos_cz_preference.addItem(dual("Prefer server, RF fallback", "Přednostně server, jinak RF"), "server_first")
-        self.ardos_cz_preference.addItem(dual("RF; explicit server deposit only", "RF; pouze výslovný depozit na server"), "rf_only")
-        self.ardos_cz_preference.setCurrentIndex(max(0, self.ardos_cz_preference.findData(self.config.ardos_cz_preference)))
-        form.addRow(self.ardos_cz_enabled)
-        form.addRow("ARDOS CZ URL", self.ardos_cz_url)
-        form.addRow(dual("Transport preference", "Preference přenosu"), self.ardos_cz_preference)
-        form.addRow(QLabel(dual("Register and connect in Network → ARDOS CZ.",
-                               "Registrace a připojení: Síť → ARDOS CZ.")))
         self.default_ttl = _spin(1, 32, self.config.default_ttl)
         self.separate_working_channels = QCheckBox(
             tr("settings.separate_working_channels")
@@ -1398,6 +1386,30 @@ class SettingsDialog(QDialog):
         self.language.setCurrentIndex(max(0, self.language.findData(current)))
         form.addRow(tr("menu.theme"), self.theme)
         form.addRow(tr("settings.language"), self.language)
+
+    def _build_ardos_cz(self) -> None:
+        form = self._page(
+            "ARDOS CZ",
+            dual("Server transport and device registration.",
+                 "Serverový přenos a registrace zařízení."),
+        )
+        self.ardos_cz_enabled = QCheckBox(dual("Enable ARDOS CZ", "Zapnout ARDOS CZ"))
+        self.ardos_cz_enabled.setChecked(self.config.ardos_cz_enabled)
+        self.ardos_cz_url = QLineEdit(self.config.ardos_cz_url)
+        self.ardos_cz_url.setPlaceholderText("https://server.tailnet.ts.net")
+        self.ardos_cz_preference = QComboBox()
+        self.ardos_cz_preference.addItem(
+            dual("Prefer server, RF fallback", "Přednostně server, jinak RF"), "server_first")
+        self.ardos_cz_preference.addItem(
+            dual("RF; explicit server deposit only", "RF; pouze výslovný depozit na server"), "rf_only")
+        self.ardos_cz_preference.setCurrentIndex(max(
+            0, self.ardos_cz_preference.findData(self.config.ardos_cz_preference)))
+        form.addRow(self.ardos_cz_enabled)
+        form.addRow("ARDOS CZ URL", self.ardos_cz_url)
+        form.addRow(dual("Transport preference", "Preference přenosu"), self.ardos_cz_preference)
+        if not self.radio_only:
+            from .ardos_cz_panel import ArdosPanel
+            form.addRow(ArdosPanel(getattr(self.operations, "ardos_cz", None)))
 
     def _settings_locked_reason(self) -> str | None:
         """Return why applying a new station profile must wait.
@@ -1465,6 +1477,8 @@ class SettingsDialog(QDialog):
 
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
+        # SC-FTN can negotiate a VARA fallback; ARDOP cannot use VARA.
+        uses_vara = self.payload_backend.currentData() != "ardop"
         if self.ardos_cz_enabled.isChecked():
             from ..ardos_cz.client import server_url
             try:
@@ -1488,7 +1502,7 @@ class SettingsDialog(QDialog):
             )
         if not self.rigctld_host.text().strip():
             errors.append(dual("rigctld host cannot be empty.", "Adresa rigctld nesmí být prázdná."))
-        if not self.vara_host.text().strip():
+        if uses_vara and not self.vara_host.text().strip():
             errors.append(dual("VARA host cannot be empty.", "Adresa VARA nesmí být prázdná."))
         if self.radio_backend.currentData() == "hamlib" and self.radio_model.currentData() < 1:
             errors.append(
@@ -1505,11 +1519,11 @@ class SettingsDialog(QDialog):
                         "Vyberte sériový port pro zvolenou cestu rádia/PTT.",
                     )
                 )
-        for label, field in (
-            ("rigctld", self.rigctld_path),
-            ("VARA FM", self.vara_fm_path),
-            ("VARA HF", self.vara_hf_path),
-        ):
+        executable_fields = [("rigctld", self.rigctld_path)]
+        if uses_vara:
+            executable_fields.extend((("VARA FM", self.vara_fm_path),
+                                      ("VARA HF", self.vara_hf_path)))
+        for label, field in executable_fields:
             value = field.text()
             if value and Path(value).suffix.lower() == ".exe" and not Path(value).is_file():
                 errors.append(
@@ -1528,7 +1542,9 @@ class SettingsDialog(QDialog):
                 return ({editor.vara_hf_cmd.value(), editor.vara_hf_data.value()}
                         if editor.vara_mode.currentText() == "HF" else
                         {editor.vara_fm_cmd.value(), editor.vara_fm_data.value()})
-            if host(self.vara_host) == host(second.vara_host) and ports(self) & ports(second):
+            if (uses_vara and second.payload_backend.currentData() != "ardop"
+                    and host(self.vara_host) == host(second.vara_host)
+                    and ports(self) & ports(second)):
                 errors.append(dual("The two VARA instances must use different TCP ports.",
                                    "Dvě instance VARA musí používat různé TCP porty."))
             if (self.selected_cat_port() and self.selected_cat_port().upper() == second.selected_cat_port().upper()):
@@ -1554,7 +1570,7 @@ class SettingsDialog(QDialog):
             cmd, data = self.vara_hf_cmd.value(), self.vara_hf_data.value()
         else:
             cmd, data = self.vara_fm_cmd.value(), self.vara_fm_data.value()
-        if cmd == data:
+        if uses_vara and cmd == data:
             errors.append(dual("VARA command and data ports must differ.", "Řídicí a datový port VARA musí být odlišné."))
         return errors
 

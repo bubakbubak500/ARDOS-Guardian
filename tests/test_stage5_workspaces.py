@@ -362,7 +362,6 @@ def test_network_pages_are_flat_with_live_topology_last() -> None:
             tr("network.heard"),
             tr("network.topology"),
             tr("network.discovery"),
-            "ARDOS CZ",
             tr("network.live_topology"),
         ]
         # No page hides a second row of tabs inside itself.
@@ -417,6 +416,66 @@ def test_discovery_actions_are_disabled_and_explained_without_a_control_channel(
         assert tr("shell.start_control") in workspace.heard_status.text()
         assert workspace.link_advert_now.isEnabled() is False
         assert tr("shell.start_control") in workspace.link_advert_now.toolTip()
+    finally:
+        workspace.close()
+        runtime.close()
+
+
+@pytest.mark.parametrize(
+    "primary_backend,second_backend,primary_on,second_on,available",
+    [
+        ("ardop", "ofdm_vhf", True, True, True),
+        ("ardop", "vara_p2p", True, True, True),
+        ("ofdm_vhf", "ardop", True, True, True),
+        ("ardop", "ardop", True, True, False),
+        ("ardop", "ofdm_vhf", True, False, False),
+        ("ofdm_vhf", "ofdm_vhf", False, True, True),
+    ],
+)
+def test_manual_link_advert_is_available_when_any_radio_can_send(
+    monkeypatch, primary_backend, second_backend, primary_on, second_on, available,
+) -> None:
+    from guardian.session import LoopbackBus
+
+    _application()
+    config = StationConfig(
+        callsign="OK7PS", dual_radio_enabled=True, payload_backend=primary_backend,
+        discovery_mode="assisted",
+    )
+    config._save_disabled = True
+    second = config.second_radio_config()
+    second.payload_backend = second_backend
+    config.second_radio = second.radio_channel_profile()
+    monkeypatch.setattr(StationConfig, "load", classmethod(lambda cls, *args: config))
+    runtime = ShellRuntime()
+    frames = [[], []]
+    buses = [LoopbackBus(lambda _, frame: frames[0].append(frame)),
+             LoopbackBus(lambda _, frame: frames[1].append(frame))]
+    for index, (radio, bus, running) in enumerate(zip(
+        runtime.radio_coordinator.radios, buses, (primary_on, second_on)
+    )):
+        if running:
+            radio.audio_transport = bus.endpoint("station")
+            radio.net = radio._build_net(radio.audio_transport)
+        radio.heard.record(f"N{index + 1}", time.monotonic())
+    workspace = NetworkWorkspace(runtime)
+    try:
+        assert workspace.link_advert_now.isEnabled() is available
+        assert workspace.discovery_query.isEnabled() is primary_on
+        if available:
+            assert not workspace.link_advert_now.toolTip()
+            workspace.link_advert_now.click()
+            for bus in buses:
+                bus.pump()
+            assert any(frames)
+            if primary_backend == "ardop" or not primary_on:
+                assert not frames[0]
+            if second_backend == "ardop" or not second_on:
+                assert not frames[1]
+        else:
+            assert workspace.link_advert_now.toolTip()
+            for reason in workspace._link_advert_blockers():
+                assert reason in workspace.live_status.text()
     finally:
         workspace.close()
         runtime.close()

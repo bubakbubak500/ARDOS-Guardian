@@ -27,6 +27,7 @@ def test_hamlib_consumes_complete_multiline_mode_reply() -> None:
 
     assert state.frequency_hz == 145_237_500
     assert state.mode == "FM"
+    assert state.passband_hz == 15_000
     assert state.ptt is False
     assert state.signal == -54
     assert state.error is None
@@ -45,6 +46,7 @@ def test_no_cat_poll_uses_operator_frequency_and_never_reads_dummy_cat() -> None
     assert state.connected
     assert state.frequency_hz == 145_500_000
     assert state.mode is None and state.signal is None
+    assert state.passband_hz is None
     assert sock.sent == [b"t\n"], "dummy f/m/l values are not hardware telemetry"
 
 

@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings, Qt
@@ -78,6 +80,52 @@ def test_theme_preference_is_persisted(tmp_path) -> None:
         assert application.styleSheet()
     finally:
         window.close()
+        runtime.close()
+
+
+def test_sc_ready_and_ardos_online_statuses(tmp_path) -> None:
+    import time
+
+    _application()
+    runtime = ShellRuntime()
+    runtime.config.payload_backend = "ofdm_vhf"
+    runtime.config.ardos_cz_enabled = True
+    runtime.ardos_cz.state = "online"
+    runtime.ardos_cz.lease_deadline = time.monotonic() + 60
+    settings = QSettings(str(tmp_path / "status.ini"), QSettings.Format.IniFormat)
+    window = GuardianMainWindow(runtime, settings)
+    try:
+        window._apply_snapshot(runtime.snapshots.read())
+        assert window.vara_status.property("statusRole") == "success"
+        assert "SC-FTN" in window.vara_status.text()
+        assert window.ardos_cz_status.property("statusRole") == "success"
+        runtime.ardos_cz.lease_deadline = 0
+        window._apply_snapshot(runtime.snapshots.read())
+        assert window.ardos_cz_status.property("statusRole") == "inactive"
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_ardos_registration_lives_in_settings(tmp_path) -> None:
+    from guardian.i18n import tr
+    from guardian.qt.ardos_cz_panel import ArdosPanel
+    from guardian.qt.settings_dialog import SettingsDialog
+
+    _application()
+    runtime = ShellRuntime()
+    settings = QSettings(str(tmp_path / "ardos-settings.ini"), QSettings.Format.IniFormat)
+    dialog = SettingsDialog(runtime.config, ThemePreference.SYSTEM,
+                            settings=settings, operations=runtime.operations)
+    try:
+        labels = [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())]
+        assert "ARDOS CZ" in labels
+        ardos_tab = dialog.tabs.widget(labels.index("ARDOS CZ"))
+        assert ardos_tab.findChild(ArdosPanel) is not None
+        network = dialog.tabs.widget(labels.index(tr("settings.network")))
+        assert network.findChild(ArdosPanel) is None
+    finally:
+        dialog.close()
         runtime.close()
 
 
@@ -203,6 +251,95 @@ def test_ardop_disables_vara_spectrum_and_backend_switch_restores_it(tmp_path) -
             assert window.spectrum_action.isEnabled() == (backend != "ardop")
             assert window.vara_button.isEnabled() == (backend != "ardop")
             assert bool(window.vara_button.toolTip()) == (backend == "ardop")
+    finally:
+        window.close()
+        runtime.close()
+
+
+@pytest.mark.parametrize("cat_mode,expected_mode", [
+    ("USB", "USB"), ("LSB", "LSB"), ("FM", "FM"), (None, "SSB"),
+])
+def test_ardop_ready_context_and_readiness_use_own_transport(
+    tmp_path, monkeypatch, cat_mode, expected_mode
+) -> None:
+    from dataclasses import replace
+    from guardian import i18n
+
+    monkeypatch.setattr(i18n, "_language", i18n.Language.ENGLISH)
+    _application()
+    runtime = ShellRuntime()
+    runtime.config.payload_backend = "ardop"
+    runtime.config.vara_mode = "HF"
+    runtime.snapshots.update(
+        radio=replace(runtime.snapshots.read().radio, mode=cat_mode),
+    )
+    monkeypatch.setattr(runtime.operations, "ardop_status", lambda: None,
+                        raising=False)
+    settings = QSettings(str(tmp_path / "ardop-ready.ini"),
+                         QSettings.Format.IniFormat)
+    window = GuardianMainWindow(runtime, settings)
+    try:
+        assert window.vara_status.property("statusRole") == "success"
+        assert "ARDOP: ready" in window.vara_status.text()
+        assert expected_mode in window.context_value.text()
+        assert "500 Hz" in window.context_value.text()
+        assert "HF" not in window.context_value.text()
+        rows = [window.readiness.topLevelItem(i)
+                for i in range(window.readiness.topLevelItemCount())]
+        assert all("VARA" not in item.text(0) for item in rows)
+        payload_row = next(item for item in rows if "ARDOP" in item.text(1))
+        assert "500 Hz" in payload_row.text(2)
+        assert "USB/LSB" in payload_row.text(2)
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_ardop_active_and_idle_never_show_stale_vara_progress(
+    tmp_path, monkeypatch
+) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from guardian import i18n
+
+    monkeypatch.setattr(i18n, "_language", i18n.Language.ENGLISH)
+    _application()
+    runtime = ShellRuntime()
+    runtime.config.payload_backend = "ardop"
+    runtime.snapshots.update(vara=replace(
+        runtime.snapshots.read().vara, command_connected=True,
+        data_bytes_written=9000, tx_buffer_bytes=0,
+        transfer_source="OLD1", transfer_destination="OLD2",
+    ))
+    status = [SimpleNamespace(
+        state="sending", direction="send", total_bytes=400,
+        progress_bytes=100, total_bytes_exact=True,
+        transfer_source="OK1AAA", transfer_destination="OK2BBB",
+        transfer_via="OK2BBB",
+    )]
+    monkeypatch.setattr(runtime.operations, "ardop_status", lambda: status[0],
+                        raising=False)
+    monkeypatch.setattr(runtime.operations, "payload_active", lambda: True)
+    settings = QSettings(str(tmp_path / "ardop-progress.ini"),
+                         QSettings.Format.IniFormat)
+    window = GuardianMainWindow(runtime, settings)
+    try:
+        assert "ARDOP: active" in window.vara_status.text()
+        assert not window.transfer_panel.isHidden()
+        assert "ARDOP" in window.transfer_panel.title.text()
+        assert "100 of 400 B" in window.transfer_panel.detail.text()
+        assert "OLD" not in window.transfer_panel.detail.text()
+        status[0] = None
+        window._apply_snapshot(runtime.snapshots.read())
+        assert "ARDOP: ready" in window.vara_status.text()
+        assert window.transfer_panel.isHidden()
+
+        runtime.config.payload_backend = "vara_p2p"
+        window._apply_snapshot(runtime.snapshots.read())
+        assert "VARA" in window.vara_status.text()
+        assert not window.transfer_panel.isHidden()
+        assert "VARA" in window.transfer_panel.title.text()
+        assert "9000" in window.transfer_panel.detail.text()
     finally:
         window.close()
         runtime.close()

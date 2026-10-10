@@ -373,6 +373,14 @@ def decode_section_with_soft(symbols, noise_var, byte_count: int, modulation: st
     """Decode a section and expose deinterleaved LLRs for Chase-HARQ."""
     llr = demap_llr(symbols, modulation, noise_var)
     current_soft = deinterleave(llr)[:coded_bits(byte_count, fec)]
+    return _decode_soft_section(current_soft, byte_count, fec, prior_soft)
+
+
+def _decode_soft_section(
+    current_soft: np.ndarray, byte_count: int,
+    fec: FecProfile | int, prior_soft=None,
+) -> tuple[list[bytes], np.ndarray]:
+    """CRC candidates from fresh LLRs, then HARQ only if the retry needs it."""
     soft = current_soft
     def crc_accepts(bits) -> bool:
         raw = np.packbits(bits[:byte_count * 8].astype(np.uint8)).tobytes()

@@ -206,33 +206,6 @@ def _symbol_noise_covariance(pulse: np.ndarray, spacing: float, taps: int) -> np
     return covariance.astype(np.complex128)
 
 
-def _fft_filter_valid(values: np.ndarray, coefficients: np.ndarray) -> np.ndarray:
-    """Apply the learned FIR by bounded-memory overlap-save FDE."""
-    x = np.asarray(values, dtype=np.complex128)
-    h = np.asarray(coefficients, dtype=np.complex128)[::-1]
-    if not len(h) or len(x) < len(h):
-        return np.zeros(0, dtype=np.complex128)
-    # Four filter lengths keeps transform overhead small without allocating an
-    # FFT as long as a multi-second 20 kHz superframe.
-    size = 1 << max(8, (4 * len(h) - 1).bit_length())
-    fresh = size - len(h) + 1
-    spectrum = np.fft.fft(h, size)
-    padded = np.concatenate([np.zeros(len(h) - 1, dtype=np.complex128), x])
-    causal: list[np.ndarray] = []
-    position = 0
-    while position < len(x):
-        block = padded[position:position + size]
-        take = min(fresh, len(x) - position)
-        if len(block) < size:
-            block = np.pad(block, (0, size - len(block)))
-        filtered = np.fft.ifft(np.fft.fft(block, size) * spectrum)
-        causal.append(filtered[len(h) - 1:len(h) - 1 + take])
-        position += take
-    full = np.concatenate(causal)
-    first = len(h) - 1
-    return full[first:first + len(x) - len(h) + 1]
-
-
 def _fft_valid_correlation(signal: np.ndarray, reference: np.ndarray) -> tuple[int, float]:
     """Return the strongest normalized real correlation and its start index."""
     x = np.asarray(signal, dtype=np.float64)

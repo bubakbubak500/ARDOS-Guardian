@@ -102,8 +102,6 @@ class NetworkWorkspace(QWidget):
             self._scrollable_page(self._discovery_page()),
             tr("network.discovery"),
         )
-        from .ardos_cz_panel import ArdosPanel
-        self.tabs.addTab(self._scrollable_page(ArdosPanel(runtime)), "ARDOS CZ")
         self.tabs.addTab(
             self._scrollable_page(self._live_topology_page()),
             tr("network.live_topology"),
@@ -493,7 +491,7 @@ class NetworkWorkspace(QWidget):
         """Whether control audio is actually running, not what was configured."""
         return self.runtime.operations.audio_transport is not None
 
-    def _discovery_blockers(self) -> list[str]:
+    def _discovery_blockers(self, operations=None) -> list[str]:
         """Why the discovery plane cannot act, in the order worth fixing.
 
         Read from the running engine rather than from the widgets: a setting
@@ -501,23 +499,43 @@ class NetworkWorkspace(QWidget):
         pretends otherwise is how an operator ends up believing the radio is
         broken.
         """
+        operations = operations if operations is not None else self.runtime.operations
         reasons = []
-        if not self._control_active:
+        if operations.audio_transport is None:
             reasons.append(
                 tr("network.control_off_notice", action=tr("shell.start_control"))
             )
-        if self.runtime.operations.net.discovery.mode != DISCOVERY_ASSISTED:
+        if operations.net.discovery.mode != DISCOVERY_ASSISTED:
             reasons.append(tr("network.discovery_off_notice"))
         return reasons
+
+    def _link_advert_blockers(self) -> list[str]:
+        """Manual advertisements fan out over every available radio channel."""
+        operations = self.runtime.operations
+        coordinator = operations.coordinator
+        radios = coordinator.radios if coordinator is not None else [operations]
+        reasons = []
+        for radio in radios:
+            blockers = self._discovery_blockers(radio)
+            discovery = radio.net.discovery
+            if not discovery.link_advert_enabled:
+                blockers.append(tr("network.link_advert_disabled_notice"))
+            if discovery.link_advert_paused:
+                blockers.append(dual(
+                    "Neighbour advertisements are paused while ARDOP is selected.",
+                    "Oznámení sousedů jsou při zvoleném ARDOP pozastavená.",
+                ))
+            if not blockers:
+                return []
+            reasons.extend(blockers)
+        return list(dict.fromkeys(reasons))
 
     def _sync_discovery_controls(self) -> None:
         """Let every action say up front whether it can do anything."""
         blockers = self._discovery_blockers()
         self.discovery_query.setEnabled(not blockers)
         self.discovery_query.setToolTip(" ".join(blockers))
-        advert_blockers = list(blockers)
-        if not self.runtime.operations.net.discovery.link_advert_enabled:
-            advert_blockers.append(tr("network.link_advert_disabled_notice"))
+        advert_blockers = self._link_advert_blockers()
         self.link_advert_now.setEnabled(not advert_blockers)
         self.link_advert_now.setToolTip(" ".join(advert_blockers))
 
@@ -1127,11 +1145,7 @@ class NetworkWorkspace(QWidget):
             for route in routes
             if route.source == "link-advert" and route.active(now)
         ]
-        # _discovery_blockers already says when the mode is the problem; the only
-        # extra thing this page can be missing is its own switch.
-        live_notices = list(self._discovery_blockers())
-        if not discovery.link_advert_enabled:
-            live_notices.append(tr("network.link_advert_disabled_notice"))
+        live_notices = self._link_advert_blockers()
         self.live_status.setText(
             "\n".join(
                 [

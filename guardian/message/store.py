@@ -124,13 +124,7 @@ class MessageStore:
         bundle = mail.to_bundle()
         with self._lock:
             previous = self._index.get(mail.msg_id)
-            path = self._bundle_path(mail.msg_id)
-            pending = path.with_suffix(".bundle.pending")
-            with pending.open("wb") as handle:
-                handle.write(bundle)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(pending, path)
+            self._write_bundle(mail.msg_id, bundle)
             meta = self._meta(mail, len(bundle))
             if remote_request is not None:
                 meta["remote_request"] = dict(remote_request)
@@ -277,37 +271,37 @@ class MessageStore:
 
     def radio_path(self, msg_id: int, **updates) -> dict:
         """Local relay provenance; never included in the over-air bundle."""
-        with self._lock:
-            meta = self._index.get(msg_id)
-            if meta is None:
-                return {}
-            value = dict(meta.get("radio_path", {}))
-            if updates:
-                value.update(updates)
-                self._index[msg_id] = {**meta, "radio_path": value}
-                try:
-                    self._save_index()
-                except Exception:
-                    self._index[msg_id] = meta
-                    raise
-            return value
+        return self._path_metadata(msg_id, "radio_path", updates)
 
     def server_path(self, msg_id: int, **updates) -> dict:
         """Durable internet custody, kept separate from RF provenance."""
+        return self._path_metadata(msg_id, "server_path", updates)
+
+    def _path_metadata(self, msg_id: int, field: str, updates: dict) -> dict:
         with self._lock:
             old = self._index.get(msg_id)
             if old is None:
                 return {}
-            value = dict(old.get("server_path", {}))
+            value = dict(old.get(field, {}))
             if updates:
                 value.update(updates)
-                self._index[msg_id] = {**old, "server_path": value}
+                self._index[msg_id] = {**old, field: value}
                 try:
                     self._save_index()
                 except Exception:
                     self._index[msg_id] = old
                     raise
             return value
+
+    def _write_bundle(self, msg_id: int, bundle: bytes) -> None:
+        """Atomically publish a bundle while the caller owns the mailbox lock."""
+        path = self._bundle_path(msg_id)
+        pending = path.with_suffix(".bundle.pending")
+        with pending.open("wb") as handle:
+            handle.write(bundle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(pending, path)
 
     def import_server(self, bundle: bytes, my_callsign: str, receipt: dict) -> MailMessage:
         """ACK is allowed only after bundle and index have both been flushed.
@@ -333,13 +327,7 @@ class MessageStore:
                 return existing
             mail = MailMessage.from_bundle(bundle)
             mail.folder, mail.status, mail.read = Folder.INBOX, Status.RECEIVED, False
-            path = self._bundle_path(mail.msg_id)
-            pending = path.with_suffix(".bundle.pending")
-            with pending.open("wb") as handle:
-                handle.write(bundle)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(pending, path)
+            self._write_bundle(mail.msg_id, bundle)
             meta = self._meta(mail, len(bundle))
             meta.update(received_at=time.time(), server_path={**receipt, "state": "received"})
             self._index[mail.msg_id] = meta

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import wave
 
 import numpy as np
+import pytest
 
 import guardian.modem.audio as audio_module
 from guardian.modem.audio import (
@@ -13,6 +14,63 @@ from guardian.modem.audio import (
     match_device_name,
 )
 from guardian.protocol import ControlFrame, FrameType
+
+
+@pytest.mark.parametrize("consumer", ["control", "spectrum"])
+@pytest.mark.parametrize("failure", ["start", "stop"])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_failed_audio_stream_still_releases_device(
+    monkeypatch, consumer, failure, close_fails,
+) -> None:
+    from guardian.qt.spectrum_window import AudioMonitor
+
+    events = []
+
+    class Stream:
+        device = 1
+
+        def start(self):
+            events.append("start")
+            if failure == "start":
+                raise ValueError("original start failure")
+
+        def stop(self):
+            events.append("stop")
+            raise RuntimeError("stop failure")
+
+        def close(self):
+            events.append("close")
+            if close_fails:
+                raise RuntimeError("close failure")
+
+    backend = SimpleNamespace(
+        InputStream=lambda **kwargs: Stream(),
+        query_devices=lambda index, kind: {"name": "Test codec"},
+        check_input_settings=lambda **kwargs: None,
+        check_output_settings=lambda **kwargs: None,
+    )
+    monkeypatch.setattr(audio_module, "_import_sounddevice", lambda: backend)
+    monkeypatch.setitem(sys.modules, "sounddevice", backend)
+    monkeypatch.setattr("guardian.qt.spectrum_window.resolve_device", lambda *args: 1)
+    if consumer == "control":
+        transport = AudioControlTransport(input_device=1, output_device=2)
+        if failure == "start":
+            with pytest.raises(ValueError, match="original start failure"):
+                transport.start()
+        else:
+            transport.start()
+            transport.stop()
+        assert not transport._running
+    else:
+        transport = AudioMonitor("Test codec")
+        transport.start()
+        if failure == "start":
+            assert transport.error == "original start failure"
+        else:
+            transport.stop()
+        assert not transport.running
+    assert transport._stream is None
+    assert events == ["start", "stop", "close"]
 
 
 DEVICES = [

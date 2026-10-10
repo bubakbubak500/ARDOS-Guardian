@@ -76,7 +76,11 @@ bool ardop_demod_leader_search(ardop_demod *d, const int16_t *samples,
 	if (length < 1200)
 		return false;
 
-	if ((now_samples - d->last_good_frametype_decode > FULL_SEARCH_GATE_SAMPLES)
+	/* A fresh decoder has no known frequency to track. In particular, the
+	 * Guardian control decoder is recreated for each rolling audio window;
+	 * waiting 20 seconds there would permanently disable offset acquisition. */
+	if ((d->last_good_frametype_decode == 0
+	     || now_samples - d->last_good_frametype_decode > FULL_SEARCH_GATE_SAMPLES)
 	    && d->tuning_range > 0) {
 		/* Full search over the whole tuning range. */
 		start_bin = (200 - d->tuning_range) / 10;

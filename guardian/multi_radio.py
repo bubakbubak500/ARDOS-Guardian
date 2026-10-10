@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 
+from .ardos_cz import HELD_STATES
 from .i18n import dual
 from .message import Folder, Status
 from .protocol import ControlFrame
@@ -111,7 +112,7 @@ class RadioCoordinator:
             result = server.send(message_id)
             if result is not None:
                 return result
-        if self.mailstore.server_path(message_id).get("state") in {"checking", "uploading", "unknown", "accepted"}:
+        if self.mailstore.server_path(message_id).get("state") in HELD_STATES:
             return False
         lock = self.radios[0]._mail_mutation_lock
         if not lock.acquire(blocking=False):

@@ -19,7 +19,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from .afsk import SYNC, _bits_lsb_first, _bits_to_bytes_lsb_first
+from .afsk import SYNC, _bits_lsb_first, _bits_to_bytes_lsb_first, _extract_legacy_frames
 from .fec import K, conv_encode, viterbi_decode, viterbi_decode_soft
 
 M = 16
@@ -51,14 +51,6 @@ FEC_FLUSH_BITS = K - 1    # conv_encode appends K-1 flush bits before rate 1/2
 
 def _gray(n: int) -> int:
     return n ^ (n >> 1)
-
-
-def _ungray(g: int) -> int:
-    n = 0
-    while g:
-        n ^= g
-        g >>= 1
-    return n
 
 
 _GRAY = [_gray(i) for i in range(M)]            # symbol value -> tone index
@@ -318,20 +310,4 @@ class MFSKModem:
         return found[0] if found else None
 
     def _extract_frames(self, bits: np.ndarray) -> list[bytes]:
-        sync_bits = _bits_lsb_first(SYNC)
-        L = len(sync_bits)
-        results: list[bytes] = []
-        i = 0
-        limit = len(bits) - L
-        while i <= limit:
-            if int(np.sum(bits[i:i + L] != sync_bits)) == 0:
-                after = bits[i + L:]
-                if len(after) >= 8:
-                    length = _bits_to_bytes_lsb_first(after[:8])[0]
-                    need = 8 + length * 8
-                    if len(after) >= need:
-                        results.append(_bits_to_bytes_lsb_first(after[8:need]))
-                        i += L + need
-                        continue
-            i += 1
-        return results
+        return _extract_legacy_frames(bits)

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
-import json
 import os
 from pathlib import Path
 import queue
@@ -37,6 +36,35 @@ def session_view(session):
             "wire_bytes": session.payload_wire_size,
             "transfer_started_at": session.transfer_started_at,
             "payload_sent_at": session.payload_sent_at, "error": session.error}
+
+
+def _set_channel(radio, channel):
+    from guardian.radio.hamlib import HamlibRadio
+    passband = channel.get("passband_hz")
+    if passband is not None and not isinstance(radio, HamlibRadio):
+        raise RuntimeError("Radio passband requires a Hamlib CAT radio")
+    radio.set_frequency(int(channel["frequency_hz"]))
+    if passband is None:
+        radio.set_mode(channel["mode"])
+    else:
+        radio.set_mode(channel["mode"], passband=int(passband))
+    readback = radio.get_state()
+    if readback.frequency_hz != int(channel["frequency_hz"]) or readback.mode != channel["mode"]:
+        raise RuntimeError("Radio channel readback differs from the requested channel")
+    if passband is not None and readback.passband_hz != int(passband):
+        raise RuntimeError("Radio passband readback differs from the requested channel")
+    return readback
+
+
+def _restore_channel(radio, previous):
+    from guardian.radio.hamlib import HamlibRadio
+    if previous.frequency_hz:
+        radio.set_frequency(previous.frequency_hz)
+    if previous.mode:
+        if isinstance(radio, HamlibRadio):
+            radio.set_mode(previous.mode, passband=previous.passband_hz or 0)
+        else:
+            radio.set_mode(previous.mode)
 
 
 def main(connection, root: str, expected_fingerprint: str, peer: str, channel: dict | None = None) -> None:
@@ -88,10 +116,7 @@ def main(connection, root: str, expected_fingerprint: str, peer: str, channel: d
                     if operations.radio.is_open:
                         operations.radio.set_ptt(False)
                         if previous_channel and not operations.radio.no_cat:
-                            if previous_channel.frequency_hz:
-                                operations.radio.set_frequency(previous_channel.frequency_hz)
-                            if previous_channel.mode:
-                                operations.radio.set_mode(previous_channel.mode)
+                            _restore_channel(operations.radio, previous_channel)
             except Exception as exc:
                 shutdown_errors.append(str(exc))
             finally:
@@ -158,11 +183,7 @@ def main(connection, root: str, expected_fingerprint: str, peer: str, channel: d
                             if config.manual_frequency_hz != int(channel["frequency_hz"]):
                                 raise RuntimeError("AIOC/no-CAT radio must already be manually set to the requested frequency")
                         else:
-                            operations.radio.set_frequency(int(channel["frequency_hz"]))
-                            operations.radio.set_mode(channel["mode"])
-                            readback = operations.radio.get_state()
-                            if readback.frequency_hz != int(channel["frequency_hz"]) or readback.mode != channel["mode"]:
-                                raise RuntimeError("Radio channel readback differs from the requested channel")
+                            _set_channel(operations.radio, channel)
                         emit("channel", requested=channel, readback=plain(operations.radio.get_state()),
                              frequency_verified=not operations.is_no_cat_radio())
                     if config.payload_backend == "vara_p2p":

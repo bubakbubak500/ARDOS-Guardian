@@ -17,9 +17,17 @@ typedef struct {
     unsigned char received[65536];
     size_t received_len;
     int failed;
+    unsigned int frame_events[3];
 } guardian_ardop;
 static void observe(void *ctx, const ardop_obs *o) {
     guardian_ardop *g = ctx;
+    int event = o->kind == ARDOP_OBS_TX_FRAME ? 0 :
+                o->kind == ARDOP_OBS_RX_FRAME ? 1 :
+                o->kind == ARDOP_OBS_RX_FRAME_BAD ? 2 : -1;
+    if (event >= 0) {
+        unsigned int count = ((g->frame_events[event] >> 8) + 1) & 0x7fffff;
+        g->frame_events[event] = (count << 8) | o->frame_type;
+    }
     if (o->kind == ARDOP_OBS_RX_DATA) {
         if (o->data_len > sizeof(g->received) - g->received_len) g->failed = 1;
         else {
@@ -103,6 +111,9 @@ API int ga_status(guardian_ardop *g, int field) {
     case 5: return g->rt.last_sn;
     case 6: return ardop_mod_busy(&g->rt.mod);
     case 7: return g->rt.link.last_data_sent;
+    case 8: return (int)g->frame_events[0];
+    case 9: return (int)g->frame_events[1];
+    case 10: return (int)g->frame_events[2];
     default: return -1;
     }
 }

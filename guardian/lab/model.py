@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import fields, asdict
 from pathlib import Path
 
-from .identity import digest_json
+from ..radio.presets import DUMMY_MODEL
 
 MODES = {"SC-FTN": "ofdm_vhf", "VARA FM": "vara_p2p",
          "VARA HF": "vara_p2p", "ARDOP": "ardop"}
@@ -102,8 +102,22 @@ def validate(plan: dict) -> dict:
             case.pop("bandwidth", None)
         if case.get("channel"):
             channel = case["channel"]
+            if not isinstance(channel, dict):
+                raise ValueError("channel must be an object")
             if int(channel.get("frequency_hz", 0)) <= 0 or channel.get("mode") not in {"FM", "USB", "LSB", "PKTUSB", "PKTFM"}:
                 raise ValueError("channel requires frequency_hz and a supported radio mode")
+            if "passband_hz" in channel:
+                try:
+                    passband = int(channel["passband_hz"])
+                except (TypeError, ValueError):
+                    raise ValueError("channel passband_hz must be positive") from None
+                if isinstance(channel["passband_hz"], bool) or passband <= 0:
+                    raise ValueError("channel passband_hz must be positive")
+                channel["passband_hz"] = passband
+                if any(endpoint["config"]["radio_backend"] != "hamlib"
+                       or endpoint["config"]["rig_model"] == DUMMY_MODEL
+                       for endpoint in value["endpoints"].values()):
+                    raise ValueError("channel passband_hz requires Hamlib CAT radio endpoints")
         size = int(case.get("bytes", 10240))
         if not 1 <= size <= 32 * 1024 * 1024:
             raise ValueError("Payload size must be 1 byte..32 MiB")

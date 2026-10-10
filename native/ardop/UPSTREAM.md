@@ -11,8 +11,20 @@ credits Simon Rockliff's 1991 reference implementation; its attribution is
 preserved in core/codec/rs.c. Guardian does not compile the upstream GUI,
 network host server, external /lib dependencies or audio backends.
 
-`vendor/core` and `vendor/shell` are unmodified upstream source. Build inputs
-are explicitly listed in tools/build_ardop.py. Guardian's wrapper is
+`vendor/core` and `vendor/shell` retain the pinned upstream source except for:
+
+- The initial leader search in `core/modem/demodulate.c`: a fresh decoder
+  searches the configured frequency range immediately, rather than waiting
+  20 seconds. This is required for short Guardian control receive windows and
+  lets ARQ acquire radios with an oscillator offset on its first attempt.
+- The closing handshake in `core/link/link.c` and `link.h`: an IRS host
+  disconnect first waits for the ISS frame and uses its reply slot, avoiding
+  collisions with the peer's IDLE. Once the actual disconnect starts,
+  only teardown frames can change its pending DISC. Ordinary IDLE/data replies
+  must not overwrite the encoded frame used for disconnect retries. Returning
+  to disconnected state also clears the retry count.
+
+Build inputs are explicitly listed in tools/build_ardop.py. Guardian's wrapper is
 guardian_ardop.c; ABI 1 uses opaque, independent contexts and 48 kHz mono PCM.
 No callback into Python, process-global DSP state, sockets or device ownership
 crosses that boundary. sys.c supplies the optional capture timestamp helper;

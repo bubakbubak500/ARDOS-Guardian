@@ -293,6 +293,7 @@ class Message:
     announce_tx_queued_at: float | None = None
     announce_tx_done_at: float | None = None
     announce_tx_pending: bool = False
+    agreement_tx_pending: bool = False
     # Payload workers only publish monotonic byte counts.  The session thread
     # observes them in tick(), refreshes its own clock on real progress, and
     # retains an independent hard cap against an endless marginal link.
@@ -375,6 +376,7 @@ class Orchestrator:
         link_advert_enabled: bool = False,
         link_advert_interval: float = 900.0,
         discovery_channel_active: bool = True,
+        link_advert_paused: bool = False,
     ):
         self.callsign = callsign.strip().upper()
         self.transport = transport
@@ -449,6 +451,7 @@ class Orchestrator:
         self.sessions: dict[int, Message] = {}
         self._now = self._clock() if self._clock is not None else 0.0
         self.on_discovery_event: Callable[[DiscoveryEvent], None] | None = None
+        self.link_advert_neighbors: Callable[[float], list[tuple[str, float | None]]] | None = None
         self.discovery = DiscoveryEngine(
             self.callsign,
             self.transport.send,
@@ -462,6 +465,7 @@ class Orchestrator:
             denylist=discovery_denylist,
             auto_use=discovery_auto_use,
             link_advert_enabled=link_advert_enabled,
+            link_advert_paused=link_advert_paused,
             link_advert_interval=link_advert_interval,
             on_event=self._on_discovery_event,
             on_result=self._on_discovery_result,
@@ -905,7 +909,8 @@ class Orchestrator:
         self.discovery.tick(now, control_available=control_available)
         if control_available and self.discovery_channel_active:
             self.discovery.advertise_neighbors(
-                [
+                self.link_advert_neighbors(now)
+                if self.link_advert_neighbors is not None else [
                     (station.callsign, station.last_snr)
                     for station in self.heard.active(now)
                 ]
@@ -937,6 +942,13 @@ class Orchestrator:
                     msg.payload_progress_seen = progress
                     msg.t_state = now
             elapsed = now - msg.t_state
+            if (msg.state in {SessionState.NEGOTIATING_PROFILE, SessionState.NEGOTIATING_WORKING}
+                    and msg.agreement_tx_pending):
+                # Slow control offers can wait in the audio queue. The reply
+                # budget starts after TX, with a separate bound on a stuck TX.
+                if elapsed > max(30.0, 3.0 * self.start_timeout):
+                    self._fail(msg, "control agreement frame did not finish transmitting")
+                continue
             if msg.state is SessionState.ANNOUNCING:
                 if msg.announce_tx_pending:
                     # A busy audio channel may delay the actual HAVE_MSG well
@@ -1492,7 +1504,7 @@ class Orchestrator:
         self._emit(msg, f"proposing Guardian G2 profile {token}")
 
     def _send_g2_profile(self, kind: FrameType, msg: Message) -> None:
-        self.transport.send(ControlFrame(
+        frame = ControlFrame(
             type=kind,
             source=self.callsign,
             destination=msg.g2_profile_token or "=",
@@ -1501,10 +1513,34 @@ class Orchestrator:
             priority=msg.priority,
             ttl=msg.ttl,
             flags=msg.flags,
-        ))
+        )
+        self._send_agreement(frame, msg, SessionState.NEGOTIATING_PROFILE)
+
+    def _send_agreement(self, frame: ControlFrame, msg: Message,
+                        state: SessionState) -> None:
+        if (msg.state is not state
+                or frame.type not in {FrameType.G2_PROFILE_OFFER, FrameType.WORKING_OFFER}
+                or not getattr(self.transport, "supports_tx_completion", False)):
+            self.transport.send(frame)
+            return
+        attempt = msg.attempts
+        msg.agreement_tx_pending = True
+
+        def current() -> bool:
+            return (self.sessions.get(msg.msg_id) is msg
+                    and msg.state is state and msg.attempts == attempt)
+
+        def complete(success: bool) -> None:
+            if not current():
+                return
+            finished = self._clock() if self._clock is not None else time.monotonic()
+            msg.t_state = finished if success else finished - self.start_timeout - 1.0
+            msg.agreement_tx_pending = False
+
+        self.transport.send(frame, on_complete=complete, allowed=current)
 
     def _send_working(self, kind: FrameType, msg: Message) -> None:
-        self.transport.send(
+        self._send_agreement(
             ControlFrame(
                 type=kind,
                 source=self.callsign,
@@ -1514,7 +1550,7 @@ class Orchestrator:
                 priority=msg.priority,
                 ttl=msg.ttl,
                 flags=msg.flags,
-            )
+            ), msg, SessionState.NEGOTIATING_WORKING,
         )
 
     def _rx_working_offer(self, f: ControlFrame) -> None:

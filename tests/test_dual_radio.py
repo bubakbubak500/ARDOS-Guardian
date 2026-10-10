@@ -65,6 +65,82 @@ def heard(radio, callsign):
     radio.heard.record(callsign, time.monotonic(), freq_hz=radio.current_frequency())
 
 
+def test_manual_beacon_reaches_both_radio_channels(station):
+    _, radios, buses, frames = station
+    assert radios[0].send_beacon_now()
+    for bus in buses:
+        bus.pump()
+    assert [frame.type for frame in frames[0]] == [FrameType.BEACON]
+    assert [frame.type for frame in frames[1]] == [FrameType.BEACON]
+
+
+def test_periodic_beacon_reaches_both_radio_channels(station, monkeypatch):
+    _, radios, buses, frames = station
+    for radio in radios:
+        radio.config.beacon_enabled = True
+        monkeypatch.setattr(radio._beacon_random, "uniform", lambda low, high: 0.0)
+        radio._tick_beacon(1000.0)
+    for bus in buses:
+        bus.pump()
+    assert [frame.type for frame in frames[0]] == [FrameType.BEACON]
+    assert [frame.type for frame in frames[1]] == [FrameType.BEACON]
+
+
+def test_link_advert_announces_all_heard_neighbors_on_both_radios(station):
+    _, radios, buses, frames = station
+    heard(radios[0], "OK1AAA")
+    heard(radios[1], "OK1BBB")
+    assert radios[0].advertise_live_links() == 4
+    for bus in buses:
+        bus.pump()
+    for channel in frames:
+        adverts = [frame for frame in channel if frame.type == FrameType.LINK_ADVERT]
+        assert {frame.next_hop for frame in adverts} == {"OK1AAA", "OK1BBB"}
+
+
+def test_periodic_link_advert_uses_shared_neighbors_on_both_radios(station):
+    _, radios, buses, frames = station
+    heard(radios[0], "OK1AAA")
+    heard(radios[1], "OK1BBB")
+    now = time.monotonic()
+    for radio in radios:
+        radio.net.tick(now)
+    for bus in buses:
+        bus.pump()
+    for channel in frames:
+        adverts = [frame for frame in channel if frame.type == FrameType.LINK_ADVERT]
+        assert {frame.next_hop for frame in adverts} == {"OK1AAA", "OK1BBB"}
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_link_advert_excludes_neighbors_of_stopped_radio(station, manual):
+    _, radios, buses, frames = station
+    heard(radios[0], "OK1AAA")
+    heard(radios[1], "OK1BBB")
+    radios[1].stop_control_channel()
+    # The UI may retain the observation, but the station cannot offer this hop.
+    assert radios[1].heard.get("OK1BBB") is not None
+    if manual:
+        assert radios[0].advertise_live_links() == 1
+    else:
+        radios[0].net.tick(time.monotonic())
+    for bus in buses:
+        bus.pump()
+    adverts = [frame for frame in frames[0] if frame.type == FrameType.LINK_ADVERT]
+    assert {frame.next_hop for frame in adverts} == {"OK1AAA"}
+    assert not frames[1]
+
+
+def test_link_advert_retains_peer_available_on_running_radio(station):
+    _, radios, buses, frames = station
+    for radio in radios:
+        heard(radio, "OK1AAA")
+    radios[1].stop_control_channel()
+    assert radios[0].advertise_live_links() == 1
+    buses[0].pump()
+    assert [frame.next_hop for frame in frames[0]] == ["OK1AAA"]
+
+
 def test_second_profile_round_trip_and_independent_ports(tmp_path):
     cfg = StationConfig(callsign="OK7PS", radio_backend="vox", cat_port="COM7")
     second = cfg.second_radio_config()
@@ -237,6 +313,43 @@ def test_dual_radio_settings_copy_save_and_validate_ports(tmp_path):
         dialog.dual_radio_enabled.setChecked(False)
         assert dialog.apply()
         assert cfg.second_radio["manual_frequency_hz"] == 433_500_000
+    finally:
+        dialog.close()
+
+
+def test_ardop_settings_ignore_unused_vara_fields_but_keep_fallback_checks(tmp_path):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+    from guardian.qt.settings_dialog import SettingsDialog
+    from guardian.qt.theme import ThemePreference
+
+    app = QApplication.instance() or QApplication([])
+    cfg = StationConfig(callsign="OK7PS", payload_backend="ardop",
+                        manual_frequency_hz=144_600_000)
+    cfg._save_disabled = True
+    dialog = SettingsDialog(cfg, ThemePreference.SYSTEM,
+        settings=QSettings(str(tmp_path / "ardop.ini"), QSettings.Format.IniFormat))
+    try:
+        dialog.dual_radio_enabled.setChecked(True)
+        second = dialog.second_editor
+        second.manual_frequency.setValue(144_600_000)
+        second.vara_fm_cmd.setValue(dialog.vara_fm_cmd.value())
+        second.vara_fm_data.setValue(dialog.vara_fm_data.value())
+        assert dialog.validation_errors() == []
+        dialog.vara_host.clear()
+        dialog.vara_fm_data.setValue(dialog.vara_fm_cmd.value())
+        dialog.vara_fm_path.setText(str(tmp_path / "missing-vara.exe"))
+        assert dialog.validation_errors() == []
+
+        # SC-FTN retains the VARA fallback and must still validate its fields.
+        dialog.payload_backend.setCurrentIndex(dialog.payload_backend.findData("ofdm_vhf"))
+        errors = dialog.validation_errors()
+        assert any("host" in error or "VARA" in error for error in errors)
+        dialog.vara_host.setText("localhost")
+        dialog.vara_fm_path.setText("")
+        dialog.vara_fm_data.setValue(second.vara_fm_data.value())
+        second.payload_backend.setCurrentIndex(second.payload_backend.findData("ofdm_vhf"))
+        assert any("TCP" in error for error in dialog.validation_errors())
     finally:
         dialog.close()
 

@@ -62,6 +62,80 @@ def test_native_arq_500_retransmits_and_preserves_binary_payload(lose_first):
         assert a.state == b.state == 0
 
 
+@pytest.mark.parametrize('lost_frame', ['DISC', 'END'])
+def test_native_disconnect_retries_after_lost_teardown_frame(lost_frame):
+    wire = envelope(42, bytes(range(256)) * 3)
+    ack = b'GACK\x00\x00\x00*'
+    silence = np.zeros(960, dtype=np.int16)
+
+    def wait_for_retry(engine):
+        for _ in range(150):
+            if engine.transmitting:
+                return
+            engine.receive(silence)
+        pytest.fail('ARDOP did not retry its frame within three seconds')
+
+    with Engine('N0AAA') as a, Engine('N0BBB') as b:
+        a.command(3, data=wire)
+        a.command(0, target='N0BBB')
+        received = bytearray()
+        for _ in range(50):
+            for tx, rx in ((a, b), (b, a)):
+                if tx.transmitting:
+                    carry(tx, rx)
+            received.extend(b.read())
+            if received == wire and a.queued == 0:
+                break
+        assert received == wire
+        assert a.queued == 0
+
+        # Return the same completion acknowledgement as the payload backend,
+        # and let its native DataACK start the peer's next IDLE frame.
+        b.command(3, data=ack)
+        b.command(7)
+        returned = bytearray()
+        for _ in range(50):
+            for tx, rx in ((a, b), (b, a)):
+                if tx.transmitting:
+                    carry(tx, rx)
+            returned.extend(a.read())
+            if returned == ack:
+                break
+        assert returned == ack
+        assert a.transmitting
+        carry(a, b)
+        assert b.queued == 0
+        assert b.transmitting
+
+        a.command(1)
+        # A is now the IRS and B has already queued its IDLE. Requesting
+        # disconnect must remain pending until B finishes that frame.
+        assert not a.transmitting
+        carry(b, a)
+        assert a.transmitting
+        assert not b.transmitting
+        if lost_frame == 'DISC':
+            carry(a, b, lose=True)
+            # The peer missed DISC and continues its old IDLE. This must not
+            # replace the pending DISC retry's encoded bytes with a DataACK.
+            wait_for_retry(b)
+            carry(b, a)
+            assert not a.transmitting
+        else:
+            carry(a, b)
+            assert b.state == 0
+            carry(b, a, lose=True)
+        assert a.state != 0
+
+        wait_for_retry(a)
+        carry(a, b)
+        assert b.state == 0
+        assert b.transmitting
+        carry(b, a)
+        assert a.state == b.state == 0
+        assert a.queued == b.queued == 0
+
+
 def test_narrow_control_roundtrip_at_unknown_offset_and_with_noise():
     modem = ArdopControlModem()
     data = bytes(range(48))
@@ -80,6 +154,28 @@ def test_control_waveform_stays_inside_500_hz_channel():
     frequencies = np.fft.rfftfreq(len(wave), 1 / modem.fs)
     occupied = power[(frequencies >= 1250) & (frequencies <= 1750)].sum()
     assert occupied / power.sum() > 0.999
+
+
+@pytest.mark.parametrize('offset_hz', [-60, -35, 35, 60])
+def test_fresh_control_decoder_acquires_radio_frequency_offset(offset_hz):
+    modem = ArdopControlModem()
+    frame = ControlFrame(FrameType.HAVE_MSG, source='OK7PS',
+                         destination='OK2IPW', message_id=124)
+    payload = frame.encode()
+    wave = modem.modulate(payload)
+    # Shift real audio with an analytic signal, modelling the difference
+    # between two SSB radio oscillators without a 20-second receiver warmup.
+    spectrum = np.fft.fft(wave)
+    positive = np.zeros(len(wave))
+    positive[0] = 1
+    positive[1:(len(wave) + 1) // 2] = 2
+    if len(wave) % 2 == 0:
+        positive[len(wave) // 2] = 1
+    analytic = np.fft.ifft(spectrum * positive)
+    shifted = np.real(analytic * np.exp(
+        2j * np.pi * offset_hz * np.arange(len(wave)) / modem.fs))
+    samples = np.concatenate((np.zeros(7132), shifted, np.zeros(48000)))
+    assert modem.demodulate(samples, validator=lambda data: data == payload) == [payload]
 
 
 @pytest.mark.parametrize('offset', [7132, 48000 * 7 + 193])
@@ -222,3 +318,5 @@ def test_payload_ack_turnover_and_disconnect_between_two_native_instances():
     assert not errors
     assert results == [True, True]
     assert rx_msg.payload_bytes == payload
+    assert tx_msg.payload_wire_size == rx_msg.payload_wire_size == len(envelope(42, payload))
+    assert tx_msg.payload_progress_bytes == rx_msg.payload_progress_bytes == len(payload)

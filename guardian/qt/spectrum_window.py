@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 
 from ..assets import get_ico_path
 from ..i18n import dual
-from ..modem.audio import resolve_device
+from ..modem.audio import close_audio_stream, resolve_device
 from .theme import DARK_TOKENS, ThemeTokens
 from .window_geometry import fit_window_to_screen
 
@@ -134,11 +134,7 @@ class AudioMonitor:
         except Exception as exc:  # audio availability is environment-specific
             stream, self._stream = self._stream, None
             if stream is not None:
-                try:
-                    stream.stop()
-                    stream.close()
-                except Exception:
-                    pass
+                close_audio_stream(stream)
             self.error = str(exc)
             self.running = False
 
@@ -146,11 +142,7 @@ class AudioMonitor:
         stream, self._stream = self._stream, None
         self.running = False
         if stream is not None:
-            try:
-                stream.stop()
-                stream.close()
-            except Exception:
-                pass
+            close_audio_stream(stream)
 
     def take_samples(self, minimum: int = 4096) -> np.ndarray | None:
         with self._lock:

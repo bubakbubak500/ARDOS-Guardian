@@ -161,8 +161,6 @@ class StationLabWorkspace(QWidget):
     def __init__(self, runtime, parent=None) -> None:
         super().__init__(parent)
         self.runtime = runtime
-        self._last_session = 0
-        self._last_offer = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 8, 10, 8)
@@ -329,7 +327,6 @@ class StationLabWorkspace(QWidget):
         if not operations.start_station_calibration(peer, "quick"):
             self.refresh()
             return
-        self._last_offer = None
         self.refresh()
 
     def _cancel(self) -> None:
@@ -387,8 +384,6 @@ class StationLabWorkspace(QWidget):
 
         state = str(getattr(status, "state", CalibrationState.IDLE.value) or CalibrationState.IDLE.value)
         peer = str(getattr(status, "peer", "") or "")
-        session_id = int(getattr(status, "session_id", 0) or 0)
-        self._last_session = session_id
         pending_offer = bool(getattr(status, "pending_offer", False))
         self.offer.setVisible(pending_offer)
         self.offer_text.setText(

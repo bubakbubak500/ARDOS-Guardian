@@ -29,12 +29,12 @@ def server_status(path):
 
 
 class ArdosPanel(QWidget):
-    def __init__(self, runtime, parent=None):
+    def __init__(self, service, parent=None):
         super().__init__(parent)
-        self.runtime = runtime
+        self.service = service
         layout = QVBoxLayout(self)
-        hint = QLabel(dual('Enable ARDOS CZ and enter the HTTPS URL in Settings → Network.',
-                           'Zapněte ARDOS CZ a zadejte HTTPS adresu v Nastavení → Síť.'))
+        hint = QLabel(dual('Apply the ARDOS CZ settings before registering or connecting.',
+                           'Před registrací nebo připojením použijte nastavení ARDOS CZ.'))
         hint.setWordWrap(True)
         layout.addWidget(hint)
         self.status = QLabel()
@@ -42,12 +42,15 @@ class ArdosPanel(QWidget):
         layout.addWidget(self.status)
         register = QPushButton(dual('Register device with invitation', 'Registrovat zařízení pozvánkou'))
         register.clicked.connect(self.enroll)
+        register.setEnabled(service is not None)
         layout.addWidget(register)
         connect = QPushButton(dual('Connect', 'Připojit'))
-        connect.clicked.connect(lambda: runtime.ardos_cz.connect())
+        connect.clicked.connect(lambda: service.connect())
+        connect.setEnabled(service is not None)
         layout.addWidget(connect)
         disconnect = QPushButton(dual('Disconnect', 'Odpojit'))
-        disconnect.clicked.connect(lambda: runtime.ardos_cz.disconnect())
+        disconnect.clicked.connect(lambda: service.disconnect())
+        disconnect.setEnabled(service is not None)
         layout.addWidget(disconnect)
         layout.addStretch()
         self.timer = QTimer(self)
@@ -56,7 +59,7 @@ class ArdosPanel(QWidget):
         self.refresh()
 
     def refresh(self):
-        service = getattr(self.runtime, 'ardos_cz', None)
+        service = self.service
         snapshot = service.snapshot() if service else {'state': 'disabled', 'last_verified': 0}
         labels = {
             'disabled': ('Disabled', 'Vypnuto'), 'not_enrolled': ('Not registered', 'Neregistrováno'),
@@ -72,7 +75,9 @@ class ArdosPanel(QWidget):
         self.status.setText(f"ARDOS CZ: {value}\n" + dual('Last verified: ', 'Poslední ověření: ') + verified)
 
     def enroll(self):
-        service = self.runtime.ardos_cz
+        service = self.service
+        if service is None:
+            return
         if not service.enabled():
             QMessageBox.information(self, 'ARDOS CZ', dual('Enable ARDOS CZ in Settings first.', 'Nejprve zapněte ARDOS CZ v Nastavení.'))
             return

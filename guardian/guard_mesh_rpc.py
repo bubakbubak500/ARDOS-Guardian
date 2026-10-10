@@ -27,6 +27,10 @@ def json_bytes(value) -> bytes:
     return data
 
 
+def _reject_json_constant(_value):
+    raise ValueError("Invalid JSON number")
+
+
 def fragments(value, transfer_id):
     data = json_bytes(value)
     for offset in range(0, len(data), FRAGMENT_BYTES):
@@ -65,7 +69,7 @@ class Assembler:
         raw = bytes(self.data)
         self.transfer_id = None
         self.data.clear()
-        value = json.loads(raw.decode("utf-8"), parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Invalid JSON number")))
+        value = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
         if not isinstance(value, dict):
             raise ValueError("BLE request must be a JSON object")
         return tid, value

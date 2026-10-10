@@ -8,12 +8,10 @@ import time
 
 from ..message import Folder, Status
 from ..services import WorkerPool
+from . import HELD_STATES
 from .client import Client, ServerError, server_url
 from .credentials import WindowsCredentials
 from .protocol import inspect_bundle
-
-HELD_STATES = {'checking', 'uploading', 'unknown', 'accepted'}
-
 
 class ArdosService:
     def __init__(self, operations, client_factory=None):

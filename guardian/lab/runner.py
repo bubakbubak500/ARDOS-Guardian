@@ -14,7 +14,7 @@ import time
 import uuid
 import zipfile
 
-from .identity import identity, digest_json
+from .identity import identity
 from .model import validate, station_config, MODES
 from .station import main as station_main
 from .vara import prepare as prepare_vara, OwnedVara

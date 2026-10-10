@@ -40,6 +40,24 @@ def _sent(operations):
     return sent
 
 
+def test_ardop_pauses_link_adverts_without_losing_saved_network_policy(tmp_path):
+    operations, workers = _operations(tmp_path, payload_backend="ardop", link_advert_enabled=True)
+    try:
+        assert operations.net.discovery.link_advert_enabled
+        assert operations.net.discovery.link_advert_paused
+        assert operations.config.link_advert_enabled
+        operations.apply_network_settings()
+        assert operations.net.discovery.link_advert_enabled
+        assert operations.net.discovery.link_advert_paused
+        operations.config.payload_backend = "vara_p2p"
+        operations.apply_network_settings()
+        assert operations.net.discovery.link_advert_enabled
+        assert not operations.net.discovery.link_advert_paused
+    finally:
+        operations.close()
+        workers.close(wait=True)
+
+
 def test_manual_beacon_works_when_automatic_beacons_are_disabled(tmp_path) -> None:
     operations, workers = _operations(
         tmp_path,
