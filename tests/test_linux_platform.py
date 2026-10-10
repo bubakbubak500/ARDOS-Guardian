@@ -58,7 +58,8 @@ def test_linux_settings_grey_vara_and_ignore_its_validation(monkeypatch, tmp_pat
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(settings_module, "VARA_AVAILABLE", False)
     monkeypatch.setattr(settings_module, "LINUX", True)
-    monkeypatch.setattr(settings_module, "scan_audio_devices", lambda: [])
+    monkeypatch.setattr(settings_module, "scan_audio_devices",
+                        lambda **kwargs: SimpleNamespace(inputs=[], outputs=[], error=""))
     monkeypatch.setattr(settings_module, "list_serial_ports", lambda: [])
     cfg = StationConfig(payload_backend="vara_p2p")
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
